@@ -1,30 +1,31 @@
-#  Scalpel CLI 
-
-# Scalpel CLI
-
-```
-   /| ________________
-O|===|* >________________>
-   \|
-```
-
-![Project Status](https://img.shields.io/badge/status-in_development-orange)
-![Go Version](https://img.shields.io/badge/Go-1.22%2B-blue?logo=go&logoColor=white)
-![License](https://img.shields.io/badge/license-MIT-green)
+![Project Status](https://img.shields.io/badge/status-in_development-black)
+![Go Version](https://img.shields.io/badge/Go-1.22%2B-blue?logo=go&logoColor=green)
+![License](https://img.shields.io/badge/license-MIT-purple)
 
 Scalpel is an AI-native, autonomous security scanner designed for modern web applications. It combines a modular analysis engine with an LLM-powered agent to discover and analyze complex vulnerabilities through realistic, human-like browser interaction.
 
-##  Disclaimer
+## Disclaimer 
 
 This tool is intended for educational purposes and for use in authorized security assessments only. **Do not** use this tool on any system or network without explicit permission from the owner, as it is unethical and illegal. The creator of this software is **not** responsible for any misuse or damage caused by this framework. **Use at your own risk.**
 
 ---
 
-##  Key Features
+## Table of Contents
+
+- [Key Features](#key-features-)
+- [Architecture Overview](#architecture-overview-%FF%FF%FF)
+- [Technology Stack](#technology-stack-)
+- [Getting Started](#getting-started-)
+- [Usage](#usage-)
+- [License](#license-)
+
+---
+
+## Key Features 
 
 * **AI-Powered Agent:** Utilizes a Large Language Model for autonomous, objective-driven security missions.
 * **Knowledge Graph Core:** Builds a real-time graph of all discovered assets, relationships, and findings for contextual analysis.
-* **Advanced Dynamic Analysis (IAST):** Employs a sophisticated JavaScript shim for client-side taint analysis, detecting flows from sources (URL parameters, storage) to dangerous sinks (e.g., `innerHTML`, `eval`).
+* **Advanced Dynamic Analysis (IAST):** Employs a sophisticated JavaScript shim for client-side taint analysis to detect flows from sources (URL parameters, storage) to dangerous sinks (e.g., `innerHTML`, `eval`).
 * **Humanoid Browser Interaction:** Leverages an advanced "humanoid" engine for stealthy browser automation, simulating realistic mouse trajectories, typing patterns, and scrolling behavior to evade bot detection.
 * **Active Scanners:** Includes dedicated modules for detecting:
     * Race Conditions (`TimeSlip`)
@@ -36,7 +37,60 @@ This tool is intended for educational purposes and for use in authorized securit
 
 ---
 
-##  Getting Started
+## Architecture Overview 
+
+Scalpel is built on a modular, event-driven architecture that separates concerns for scalability and maintainability.
+
+```mermaid
+graph TD
+    subgraph "CLI (cmd)"
+        A[scan command]
+    end
+
+    subgraph "Core Services (pkg)"
+        B[Orchestrator]
+        C[Task Engine]
+        D[Knowledge Graph]
+        E[Browser Manager]
+    end
+    
+    subgraph "Analysis Modules (pkg/analysis)"
+        F[Adapters]
+        G[Active Scanners]
+        H[Passive Scanners]
+        I[Static Scanners]
+        J[AI Agent]
+    end
+
+    A --> B
+    B --> C
+    B --> E
+    B --> D
+    C --> F
+    F --> G & H & I & J
+    J --> E
+    G --> E
+    D <--> F
+
+**Orchestrator:** The top-level component that initializes all services and manages the scan lifecycle.
+2.  **Task Engine:** A worker pool that processes analysis tasks concurrently.
+3.  **Knowledge Graph:** A central PostgreSQL-backed graph that stores all discovered assets and their relationships.
+4.  **Browser Manager:** Manages a pool of headless browser instances, applying stealth and instrumentation.
+5.  **Analyzers (Adapters):** Modular components that perform specific security checks (Taint, IDOR, ATO, etc.).
+6.  **AI Agent:** An autonomous component with its own cognitive loop (OODA) that receives high-level missions and uses an LLM to decide on actions.
+---
+
+## Technology Stack 
+
+* **Go 1.22+**: For the core application logic and CLI.
+* **PostgreSQL**: Serves as the persistent backend for the knowledge graph and scan findings.
+* **Rod**: Used for browser automation and management.
+* **Mermaid**: For rendering diagrams in documentation.
+* **Gemini / OpenAI**: Pluggable LLM providers for the AI Agent.
+---
+---
+
+## Getting Started 
 
 Follow these steps to get the `scalpel-cli` scanner up and running.
 
@@ -45,34 +99,35 @@ Follow these steps to get the `scalpel-cli` scanner up and running.
 * **Go:** Version 1.22 or later.
 * **PostgreSQL:** A running instance for storing findings and the knowledge graph.
 * **Google Chrome / Chromium:** Required for headless browser operations.
-
 ### 1. Installation
 
 Clone the repository and build the binary:
 
 ```bash
 # Clone the repository
-git clone [https://github.com/xkilldash9x/scalpel-cli.git](https://github.com/xkilldash9x/scalpel-cli.git)
-cd scalpel-cli
+```git clone [https://github.com/xkilldash9x/scalpel-cli.git](https://github.com/xkilldash9x/scalpel-cli.git)
+cd scalpel-cli```
 
 # Tidy dependencies and build the executable
-go mod tidy
-go build -o scalpel-cli ./cmd/main.go
-
+```go mod tidy
+go build -o scalpel-cli ./cmd/main.go```
+```
+---
 ### 2. Configuration
 
 `scalpel-cli` is configured using a `config.yaml` file and environment variables.
 
 1.  Copy the existing `config.yaml` to `config.local.yaml`. This file is in the `.gitignore` and is safe for local secrets.
+
 2.  Update `config.local.yaml` with your settings, especially the PostgreSQL connection string:
 
     ```yaml
     # in config.local.yaml
-
+    
     postgres:
       # Replace with your actual database URL
       url: "postgres://user:password@localhost:5432/scalpeldb?sslmode=disable"
-
+    
     # If using the AI Agent, provide your LLM API Key
     agent:
       enabled: true
@@ -87,16 +142,16 @@ go build -o scalpel-cli ./cmd/main.go
     ```bash
     export SCALPEL_POSTGRES_URL="postgres://user:password@host:5432/scalpeldb"
     ```
+    ---
 
----
-##  Usage
+## Usage 
 
 The primary command is `scan`, which runs the full discovery and analysis pipeline against one or more targets.
 
 ### Command Syntax
 
+```sh
 ./scalpel-cli scan [target...] [flags]
-
 ### Flags
 
 * `-c, --config`: Path to a custom config file (e.g., `config.local.yaml`).
@@ -104,27 +159,14 @@ The primary command is `scan`, which runs the full discovery and analysis pipeli
 * `-f, --format`: Output format (`sarif`, `json`, `text`).
 * `-d, --depth`: Maximum depth for the crawler.
 * `--scope`: Scope of the scan (`root`, `subdomain`, `strict`).
-
 ### Example
 
 Run a scan against a target, limit the crawl depth to 2, and save the results to a SARIF file.
 
-./scalpel-cli scan https://example.com -c config.local.yaml -d 2 -o report.sarif -f sarif
-
+```sh
+./scalpel-cli scan [https://example.com](https://example.com) -c config.local.yaml -d 2 -o report.sarif -f sarif
 ---
-##  Architecture Overview
 
-Scalpel is built on a modular, event-driven architecture:
-
-1.  **Orchestrator:** The top-level component that initializes all services and manages the scan lifecycle.
-2.  **Discovery Engine:** Performs passive and active reconnaissance to identify assets and entry points.
-3.  **Knowledge Graph:** A central PostgreSQL-backed graph database that stores all discovered assets and their relationships.
-4.  **Task Engine:** A worker pool that processes analysis tasks concurrently.
-5.  **Analyzers (Adapters):** Modular components that perform specific security checks (Taint, IDOR, ATO, etc.).
-6.  **Browser Manager:** Manages a pool of headless browser instances, applying stealth and instrumentation.
-7.  **Agent:** An autonomous component with its own cognitive loop (OODA) that receives high-level missions and uses an LLM to decide on actions.
-
----
-## License
+## License 
 
 This project is licensed under the MIT License - see the `LICENSE.md` file for details.
