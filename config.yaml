@@ -1,5 +1,5 @@
 # -- config.yaml --
-# Completed configuration for the modular monolith version of evolution-scalpel.
+# Completed configuration for the modular monolith version of scalpel-cli.
 
 # logger configuration
 logger:
