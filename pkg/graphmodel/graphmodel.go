@@ -133,3 +133,46 @@ type GraphExport struct {
 	Nodes []*Node `json:"nodes"`
 	Edges []*Edge `json:"edges"`
 }
+
+// -- Deep Copy and Cloning Methods --
+
+// DeepCopy creates a true copy of the Properties map.
+// This is essential for preventing external modifications to internal graph state.
+func (p Properties) DeepCopy() Properties {
+	if p == nil {
+		return nil
+	}
+	copy := make(Properties, len(p))
+	for k, v := range p {
+		copy[k] = v // Assumes primitive, comparable values as required for indexing.
+	}
+	return copy
+}
+
+// Clone creates a deep copy of a Node.
+func (n *Node) Clone() *Node {
+	if n == nil {
+		return nil
+	}
+	return &Node{
+		ID:         n.ID,
+		Type:       n.Type,
+		Properties: n.Properties.DeepCopy(), // Crucial: Copy the properties map.
+		CreatedAt:  n.CreatedAt,
+		UpdatedAt:  n.UpdatedAt,
+	}
+}
+
+// Clone creates a deep copy of an Edge.
+func (e *Edge) Clone() *Edge {
+	if e == nil {
+		return nil
+	}
+	return &Edge{
+		SourceID:     e.SourceID,
+		TargetID:     e.TargetID,
+		Relationship: e.Relationship,
+		Properties:   e.Properties.DeepCopy(), // Crucial: Copy the properties map.
+		Timestamp:    e.Timestamp,
+	}
+}
