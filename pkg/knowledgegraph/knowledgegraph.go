@@ -1,8 +1,8 @@
-// pkg/knowledgegraph/knowledgegraph.go
 package knowledgegraph
 
 import (
 	"context"
+	"errors" // REVISION: Added for sentinel errors.
 	"fmt"
 	"net"
 	"net/url"
@@ -15,10 +15,13 @@ import (
 
 	"go.uber.org/zap"
 
-	// REFACTOR: Updated import path to use the consolidated graphmodel.
 	"github.com/xkilldash9x/scalpel-cli/pkg/graphmodel"
+	"github.com/xkilldash9x/scalpel-cli/pkg/interfaces"
 	"github.com/xkilldash9x/scalpel-cli/pkg/observability"
 )
+
+// REVISION: Added a sentinel error for not found resources.
+var ErrNotFound = errors.New("resource not found")
 
 // -- Internal data structures --
 
@@ -47,7 +50,7 @@ type Indexes struct {
 }
 
 // KnowledgeGraph is the main, thread safe in memory graph database.
-// It implements the GraphStore interface.
+// It implements the KnowledgeGraph interface.
 type KnowledgeGraph struct {
 	nodes   map[string]*graphmodel.Node
 	indexes Indexes
@@ -55,8 +58,8 @@ type KnowledgeGraph struct {
 	mutex   sync.RWMutex
 }
 
-// Ensure KnowledgeGraph implements the GraphStore interface.
-var _ GraphStore = (*KnowledgeGraph)(nil)
+// Ensure KnowledgeGraph implements the interfaces.KnowledgeGraph interface.
+var _ interfaces.KnowledgeGraph = (*KnowledgeGraph)(nil)
 
 // -- Initialization --
 
@@ -90,7 +93,8 @@ func (kg *KnowledgeGraph) initializeRootNodes() {
 		Type:       graphmodel.NodeTypeScanRoot,
 		Properties: graphmodel.Properties{"description": "The origin of the scan."},
 	}); err != nil {
-		kg.logger.Error("Failed to initialize Root Node", zap.Error(err))
+		// REVISION: Fail fast if critical nodes cannot be created.
+		kg.logger.Fatal("Critical failure: Failed to initialize Root Node", zap.Error(err))
 	}
 
 	if _, err := kg.addNodeInternal(graphmodel.NodeInput{
@@ -98,7 +102,8 @@ func (kg *KnowledgeGraph) initializeRootNodes() {
 		Type:       graphmodel.NodeTypeDataSource,
 		Properties: graphmodel.Properties{"description": "Data derived from open source intelligence."},
 	}); err != nil {
-		kg.logger.Error("Failed to initialize OSINT Node", zap.Error(err))
+		// REVISION: Fail fast if critical nodes cannot be created.
+		kg.logger.Fatal("Critical failure: Failed to initialize OSINT Node", zap.Error(err))
 	}
 }
 
@@ -114,7 +119,13 @@ func (kg *KnowledgeGraph) AddNode(input graphmodel.NodeInput) (*graphmodel.Node,
 	// For existing nodes, the type is immutable, so we don't infer/change it implicitly.
 	kg.mutex.Lock()
 	defer kg.mutex.Unlock()
-	return kg.addNodeInternal(input)
+
+	// REVISION: Return a clone to prevent data races.
+	node, err := kg.addNodeInternal(input)
+	if err != nil {
+		return nil, err
+	}
+	return node.Clone(), nil
 }
 
 // AddEdge adds or updates a relationship between two nodes (Upsert).
@@ -133,20 +144,26 @@ func (kg *KnowledgeGraph) AddEdge(input graphmodel.EdgeInput) (*graphmodel.Edge,
 
 	kg.mutex.Lock()
 	defer kg.mutex.Unlock()
-	return kg.addEdgeInternal(input)
+
+	// REVISION: Return a clone to prevent data races.
+	edge, err := kg.addEdgeInternal(input)
+	if err != nil {
+		return nil, err
+	}
+	return edge.Clone(), nil
 }
 
 // -- Internal Write Operations (must be called from within a mutex lock) --
 
 func (kg *KnowledgeGraph) addNodeInternal(input graphmodel.NodeInput) (*graphmodel.Node, error) {
+	// ... (implementation is unchanged) ...
+	// This internal function still returns a direct pointer, but the public-facing
+	// methods now clone the result before returning.
 	now := time.Now().UTC()
 	id := input.ID
 
 	if existingNode, exists := kg.nodes[id]; exists {
-		// Update Logic
-		// If input Type is provided and different, enforce immutability.
 		if input.Type != "" && existingNode.Type != input.Type {
-			// Type immutability is enforced for index consistency.
 			err := fmt.Errorf("cannot change type of existing node '%s' from '%s' to '%s'", id, existingNode.Type, input.Type)
 			kg.logger.Error("Node update aborted due to type change attempt", zap.String("id", id), zap.Error(err))
 			return nil, err
@@ -155,7 +172,6 @@ func (kg *KnowledgeGraph) addNodeInternal(input graphmodel.NodeInput) (*graphmod
 		if existingNode.Properties == nil {
 			existingNode.Properties = make(graphmodel.Properties)
 		}
-		// Merge properties (input overrides existing).
 		for k, v := range input.Properties {
 			existingNode.Properties[k] = v
 		}
@@ -165,13 +181,10 @@ func (kg *KnowledgeGraph) addNodeInternal(input graphmodel.NodeInput) (*graphmod
 		return existingNode, nil
 	}
 
-	// Insert Logic
 	nodeType := input.Type
 	if nodeType == "" {
-		// Infer type if not provided for new nodes.
 		nodeType = InferAssetType(id)
 	}
-
 	newNode := &graphmodel.Node{
 		ID:         id,
 		Type:       nodeType,
@@ -183,7 +196,6 @@ func (kg *KnowledgeGraph) addNodeInternal(input graphmodel.NodeInput) (*graphmod
 		newNode.Properties = make(graphmodel.Properties)
 	}
 	kg.nodes[id] = newNode
-	// Initialize edge maps for the new node. Crucial to prevent nil map panics.
 	kg.indexes.OutboundEdges[id] = make(EdgeMap)
 	kg.indexes.InboundEdges[id] = make(EdgeMap)
 	kg.updateIndexes(newNode)
@@ -192,33 +204,24 @@ func (kg *KnowledgeGraph) addNodeInternal(input graphmodel.NodeInput) (*graphmod
 }
 
 func (kg *KnowledgeGraph) addEdgeInternal(input graphmodel.EdgeInput) (*graphmodel.Edge, error) {
-	// Ensure nodes exist. This guarantees their edge maps are initialized.
+	// ... (implementation is unchanged) ...
 	if _, exists := kg.nodes[input.SourceID]; !exists {
 		return nil, fmt.Errorf("source node not found: %s", input.SourceID)
 	}
 	if _, exists := kg.nodes[input.TargetID]; !exists {
 		return nil, fmt.Errorf("target node not found: %s", input.TargetID)
 	}
-
-	// Check for existing edge using the explicit 'val, ok' idiom.
 	var existingEdge *graphmodel.Edge
 	var edgeExists bool
-
-	// We know OutboundEdges[SourceID] exists (initialized in addNodeInternal).
 	outboundMap := kg.indexes.OutboundEdges[input.SourceID]
-
 	if relationshipMap, ok := outboundMap[input.TargetID]; ok {
 		existingEdge, edgeExists = relationshipMap[input.Relationship]
 	}
-
 	now := time.Now().UTC()
-
 	if edgeExists {
-		// Update Logic
 		if existingEdge.Properties == nil {
 			existingEdge.Properties = make(graphmodel.Properties)
 		}
-		// Merge properties.
 		for k, v := range input.Properties {
 			existingEdge.Properties[k] = v
 		}
@@ -226,8 +229,6 @@ func (kg *KnowledgeGraph) addEdgeInternal(input graphmodel.EdgeInput) (*graphmod
 		kg.logger.Debug("Updated edge", zap.String("source", input.SourceID), zap.String("rel", string(input.Relationship)), zap.String("target", input.TargetID))
 		return existingEdge, nil
 	}
-
-	// Insert Logic
 	newEdge := &graphmodel.Edge{
 		SourceID:     input.SourceID,
 		TargetID:     input.TargetID,
@@ -238,20 +239,15 @@ func (kg *KnowledgeGraph) addEdgeInternal(input graphmodel.EdgeInput) (*graphmod
 	if newEdge.Properties == nil {
 		newEdge.Properties = make(graphmodel.Properties)
 	}
-
-	// Update Outbound Index. Initialize the nested relationship map if needed.
 	if outboundMap[input.TargetID] == nil {
 		outboundMap[input.TargetID] = make(map[graphmodel.RelationshipType]*graphmodel.Edge)
 	}
 	outboundMap[input.TargetID][input.Relationship] = newEdge
-
-	// Update Inbound Index. We know InboundEdges[TargetID] exists.
 	inboundMap := kg.indexes.InboundEdges[input.TargetID]
 	if inboundMap[input.SourceID] == nil {
 		inboundMap[input.SourceID] = make(map[graphmodel.RelationshipType]*graphmodel.Edge)
 	}
 	inboundMap[input.SourceID][input.Relationship] = newEdge
-
 	kg.logger.Debug("Added edge", zap.String("source", input.SourceID), zap.String("rel", string(input.Relationship)), zap.String("target", input.TargetID))
 	return newEdge, nil
 }
@@ -259,18 +255,15 @@ func (kg *KnowledgeGraph) addEdgeInternal(input graphmodel.EdgeInput) (*graphmod
 // -- Index Management (must be called from within a mutex lock) --
 
 func (kg *KnowledgeGraph) updateIndexes(node *graphmodel.Node) {
-	// 1. Index by Type
+	// ... (implementation is unchanged) ...
 	if _, exists := kg.indexes.ByType[node.Type]; !exists {
 		kg.indexes.ByType[node.Type] = make(Set)
 	}
 	kg.indexes.ByType[node.Type].Add(node.ID)
-
-	// 2. Index by Property
 	if _, exists := kg.indexes.ByProperty[node.Type]; !exists {
 		kg.indexes.ByProperty[node.Type] = make(PropertyIndex)
 	}
 	typeIndex := kg.indexes.ByProperty[node.Type]
-
 	for key, value := range node.Properties {
 		if !isComparable(value) {
 			kg.logger.Warn("Skipping index for non-comparable property value", zap.String("id", node.ID), zap.String("key", key), zap.String("type", fmt.Sprintf("%T", value)))
@@ -299,7 +292,6 @@ func (kg *KnowledgeGraph) removePropertyIndexes(node *graphmodel.Node) {
 		if propertyIndex, exists := typeIndex[key]; exists {
 			if valueSet, exists := propertyIndex[value]; exists {
 				valueSet.Remove(node.ID)
-				// Clean up empty sets/maps
 				if valueSet.Size() == 0 {
 					delete(propertyIndex, value)
 				}
@@ -308,6 +300,10 @@ func (kg *KnowledgeGraph) removePropertyIndexes(node *graphmodel.Node) {
 				delete(typeIndex, key)
 			}
 		}
+	}
+	// REVISION: Added final cleanup of the top-level NodeType index.
+	if len(typeIndex) == 0 {
+		delete(kg.indexes.ByProperty, node.Type)
 	}
 }
 
@@ -319,9 +315,11 @@ func (kg *KnowledgeGraph) GetNodeByID(id string) (*graphmodel.Node, error) {
 	defer kg.mutex.RUnlock()
 	node, exists := kg.nodes[id]
 	if !exists {
-		return nil, fmt.Errorf("node not found: %s", id)
+		// REVISION: Use the defined sentinel error.
+		return nil, ErrNotFound
 	}
-	return node, nil
+	// REVISION: Return a clone to prevent data races.
+	return node.Clone(), nil
 }
 
 // FindNodes retrieves nodes using indexes based on a query.
@@ -329,10 +327,13 @@ func (kg *KnowledgeGraph) FindNodes(query graphmodel.Query) ([]*graphmodel.Node,
 	kg.mutex.RLock()
 	defer kg.mutex.RUnlock()
 
+	// The logic for finding candidate IDs remains the same.
+	// The change is in idsToNodes, which now returns clones.
 	if query.Type == "" && len(query.Properties) == 0 {
+		// REVISION: Return clones for "get all" queries.
 		results := make([]*graphmodel.Node, 0, len(kg.nodes))
 		for _, node := range kg.nodes {
-			results = append(results, node)
+			results = append(results, node.Clone())
 		}
 		return results, nil
 	}
@@ -340,7 +341,6 @@ func (kg *KnowledgeGraph) FindNodes(query graphmodel.Query) ([]*graphmodel.Node,
 	var candidateIds Set
 	if query.Type != "" {
 		if ids, exists := kg.indexes.ByType[query.Type]; exists {
-			// Copy the set for intersection
 			candidateIds = make(Set, len(ids))
 			for id := range ids {
 				candidateIds.Add(id)
@@ -349,13 +349,10 @@ func (kg *KnowledgeGraph) FindNodes(query graphmodel.Query) ([]*graphmodel.Node,
 			return []*graphmodel.Node{}, nil
 		}
 	}
-
 	if len(query.Properties) == 0 {
 		return kg.idsToNodes(candidateIds), nil
 	}
-
 	if query.Type != "" {
-		// Optimized path: Type specific property index
 		typePropIndex, exists := kg.indexes.ByProperty[query.Type]
 		if !exists {
 			return []*graphmodel.Node{}, nil
@@ -378,7 +375,6 @@ func (kg *KnowledgeGraph) FindNodes(query graphmodel.Query) ([]*graphmodel.Node,
 			}
 		}
 	} else {
-		// Slower path: Cross type property index scan
 		kg.logger.Warn("Querying by property without a 'Type' can be inefficient.")
 		isFirstProperty := true
 		for key, value := range query.Properties {
@@ -415,7 +411,8 @@ func (kg *KnowledgeGraph) GetNeighbors(nodeId string) (graphmodel.NeighborsResul
 	defer kg.mutex.RUnlock()
 
 	if _, exists := kg.nodes[nodeId]; !exists {
-		return graphmodel.NeighborsResult{}, fmt.Errorf("node not found: %s", nodeId)
+		// REVISION: Use the defined sentinel error.
+		return graphmodel.NeighborsResult{}, ErrNotFound
 	}
 
 	result := graphmodel.NeighborsResult{
@@ -427,7 +424,8 @@ func (kg *KnowledgeGraph) GetNeighbors(nodeId string) (graphmodel.NeighborsResul
 		for targetID, relationshipMap := range outboundMap {
 			if targetNode, exists := kg.nodes[targetID]; exists {
 				for rel := range relationshipMap {
-					result.Outbound[rel] = append(result.Outbound[rel], targetNode)
+					// REVISION: Append a clone of the node.
+					result.Outbound[rel] = append(result.Outbound[rel], targetNode.Clone())
 				}
 			}
 		}
@@ -437,7 +435,8 @@ func (kg *KnowledgeGraph) GetNeighbors(nodeId string) (graphmodel.NeighborsResul
 		for sourceID, relationshipMap := range inboundMap {
 			if sourceNode, exists := kg.nodes[sourceID]; exists {
 				for rel := range relationshipMap {
-					result.Inbound[rel] = append(result.Inbound[rel], sourceNode)
+					// REVISION: Append a clone of the node.
+					result.Inbound[rel] = append(result.Inbound[rel], sourceNode.Clone())
 				}
 			}
 		}
@@ -568,15 +567,17 @@ func (kg *KnowledgeGraph) ExportGraph() graphmodel.GraphExport {
 		Nodes: make([]*graphmodel.Node, 0, len(kg.nodes)),
 		Edges: make([]*graphmodel.Edge, 0),
 	}
+	// REVISION: Return clones for "get all" queries.
 	for _, node := range kg.nodes {
-		export.Nodes = append(export.Nodes, node)
+		export.Nodes = append(export.Nodes, node.Clone())
 	}
 
 	// Iterate through OutboundEdges to export every edge exactly once.
 	for _, targetMap := range kg.indexes.OutboundEdges {
 		for _, relationshipMap := range targetMap {
 			for _, edge := range relationshipMap {
-				export.Edges = append(export.Edges, edge)
+				// REVISION: Append a clone of the edge.
+				export.Edges = append(export.Edges, edge.Clone())
 			}
 		}
 	}
@@ -594,7 +595,7 @@ func (kg *KnowledgeGraph) ExtractMissionSubgraph(ctx context.Context, missionID 
 	// 1. Validate Mission Node
 	_, exists := kg.nodes[missionID]
 	if !exists {
-		return graphmodel.GraphExport{}, fmt.Errorf("mission node not found: %s", missionID)
+		return graphmodel.GraphExport{}, ErrNotFound
 	}
 
 	includedNodeIDs := make(Set)
@@ -609,7 +610,6 @@ func (kg *KnowledgeGraph) ExtractMissionSubgraph(ctx context.Context, missionID 
 	// 3. Identify Recent History (Actions and Observations)
 	actions := kg.findMissionActions(missionID)
 
-	// Sort actions by creation time (oldest first).
 	sort.Slice(actions, func(i, j int) bool {
 		return actions[i].CreatedAt.Before(actions[j].CreatedAt)
 	})
@@ -622,9 +622,17 @@ func (kg *KnowledgeGraph) ExtractMissionSubgraph(ctx context.Context, missionID 
 
 	// Iterate over the recent actions.
 	for i := startIndex; i < len(actions); i++ {
+		// REVISION: Check for context cancellation during potentially long loops.
+		select {
+		case <-ctx.Done():
+			kg.logger.Warn("Subgraph extraction cancelled by context", zap.Error(ctx.Err()))
+			return graphmodel.GraphExport{}, ctx.Err()
+		default:
+			// Continue processing
+		}
+
 		actionNode := actions[i]
 		recentHistoryIDs.Add(actionNode.ID)
-		// Find the observation and artifacts generated by this action.
 		if outboundMap, ok := kg.indexes.OutboundEdges[actionNode.ID]; ok {
 			for relatedID, relMap := range outboundMap {
 				if _, ok := relMap[graphmodel.RelationshipTypeGeneratesObservation]; ok {
@@ -637,18 +645,15 @@ func (kg *KnowledgeGraph) ExtractMissionSubgraph(ctx context.Context, missionID 
 		}
 	}
 
-	// Add recent history nodes to the included set.
 	for id := range recentHistoryIDs {
 		includedNodeIDs.Add(id)
 	}
 
-	// 4. Include Directly Affected Assets (e.g., the target URL/Binary)
 	if outboundMap, ok := kg.indexes.OutboundEdges[missionID]; ok {
 		for assetID, relMap := range outboundMap {
 			if _, ok := relMap[graphmodel.RelationshipTypeAffects]; ok {
 				if _, exists := kg.nodes[assetID]; exists {
 					includedNodeIDs.Add(assetID)
-					// (Optional Enhancement): Include immediate neighbors of the asset (e.g., technologies).
 					kg.includeAssetNeighbors(assetID, includedNodeIDs)
 				}
 			}
@@ -658,12 +663,44 @@ func (kg *KnowledgeGraph) ExtractMissionSubgraph(ctx context.Context, missionID 
 	// 5. Populate Nodes and Edges for the export.
 	for id := range includedNodeIDs {
 		if node, ok := kg.nodes[id]; ok {
-			export.Nodes = append(export.Nodes, node)
+			// REVISION: Append a clone of the node.
+			export.Nodes = append(export.Nodes, node.Clone())
 		}
 	}
-	kg.populateEdgesForSubgraph(&export, includedNodeIDs)
+	// REVISION: Pass context to the helper for cancellation checking.
+	kg.populateEdgesForSubgraph(ctx, &export, includedNodeIDs)
 
 	return export, nil
+}
+
+// populateEdgesForSubgraph iterates through the included nodes and adds edges that connect them. (Assumes RLock is held).
+func (kg *KnowledgeGraph) populateEdgesForSubgraph(ctx context.Context, export *graphmodel.GraphExport, includedNodeIDs Set) {
+	addedEdgeSet := make(map[string]struct{})
+	for sourceID := range includedNodeIDs {
+		// REVISION: Check for context cancellation inside the loop.
+		select {
+		case <-ctx.Done():
+			return // Exit early
+		default:
+		}
+
+		if outboundMap, ok := kg.indexes.OutboundEdges[sourceID]; ok {
+			for targetID, relationshipMap := range outboundMap {
+				// Only include the edge if the target node is also in the subgraph.
+				if includedNodeIDs.Contains(targetID) {
+					for _, edge := range relationshipMap {
+						// Create a unique key for the edge to check for duplicates.
+						edgeKey := fmt.Sprintf("%s|%s|%s", edge.SourceID, edge.Relationship, edge.TargetID)
+						if _, exists := addedEdgeSet[edgeKey]; !exists {
+							// REVISION: Append a clone of the edge.
+							export.Edges = append(export.Edges, edge.Clone())
+							addedEdgeSet[edgeKey] = struct{}{}
+						}
+					}
+				}
+			}
+		}
+	}
 }
 
 // findMissionActions retrieves all action nodes connected to the mission. (Assumes RLock is held).
@@ -708,35 +745,13 @@ func (kg *KnowledgeGraph) includeAssetNeighbors(assetID string, includedNodeIDs 
 	}
 }
 
-// populateEdgesForSubgraph iterates through the included nodes and adds edges that connect them. (Assumes RLock is held).
-func (kg *KnowledgeGraph) populateEdgesForSubgraph(export *graphmodel.GraphExport, includedNodeIDs Set) {
-	addedEdgeSet := make(map[string]struct{}) // Used to prevent duplicate edges if multiple relationships exist.
-	for sourceID := range includedNodeIDs {
-		if outboundMap, ok := kg.indexes.OutboundEdges[sourceID]; ok {
-			for targetID, relationshipMap := range outboundMap {
-				// Only include the edge if the target node is also in the subgraph.
-				if includedNodeIDs.Contains(targetID) {
-					for _, edge := range relationshipMap {
-						// Create a unique key for the edge to check for duplicates.
-						edgeKey := fmt.Sprintf("%s|%s|%s", edge.SourceID, edge.Relationship, edge.TargetID)
-						if _, exists := addedEdgeSet[edgeKey]; !exists {
-							export.Edges = append(export.Edges, edge)
-							addedEdgeSet[edgeKey] = struct{}{}
-						}
-					}
-				}
-			}
-		}
-	}
-}
-
 // -- Utility Functions --
 
 // Basic regex for validating domain names (simplified).
 var domainRegex = regexp.MustCompile(`^([a-zA-Z0-9-]{1,63}\.)+[a-zA-Z]{2,63}$`)
 
 // InferAssetType determines the appropriate NodeType for an identifier.
-// Implemented as both a package level function (for external utility) and a method (to satisfy GraphStore interface).
+// Implemented as both a package level function (for external utility) and a method (to satisfy KnowledgeGraph interface).
 func InferAssetType(assetId string) graphmodel.NodeType {
 	// 1. Check for URL
 	if u, err := url.Parse(assetId); err == nil && u.Scheme != "" && u.Host != "" {
@@ -770,7 +785,7 @@ func InferAssetType(assetId string) graphmodel.NodeType {
 	return graphmodel.NodeTypeIdentifier
 }
 
-// InferAssetType method implementation for the GraphStore interface.
+// InferAssetType method implementation for the KnowledgeGraph interface.
 func (kg *KnowledgeGraph) InferAssetType(assetId string) graphmodel.NodeType {
 	return InferAssetType(assetId)
 }
@@ -817,8 +832,10 @@ func (kg *KnowledgeGraph) idsToNodes(ids Set) []*graphmodel.Node {
 	results := make([]*graphmodel.Node, 0, ids.Size())
 	for id := range ids {
 		if node, exists := kg.nodes[id]; exists {
-			results = append(results, node)
+			// REVISION: Append a clone of the node instead of the direct pointer.
+			results = append(results, node.Clone())
 		}
 	}
 	return results
 }
+
