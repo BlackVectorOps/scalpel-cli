@@ -14,7 +14,7 @@ import (
 
 	"github.com/xkilldash9x/scalpel-cli/pkg/config"
 	"github.com/xkilldash9x/scalpel-cli/pkg/observability"
-	"github.comcom/xkilldash9x/scalpel-cli/pkg/orchestrator"
+	"github.com/xkilldash9x/scalpel-cli/pkg/orchestrator"
 	"github.com/xkilldash9x/scalpel-cli/pkg/reporting"
 	"github.com/xkilldash9x/scalpel-cli/pkg/schemas"
 	"github.com/xkilldash9x/scalpel-cli/pkg/store"
