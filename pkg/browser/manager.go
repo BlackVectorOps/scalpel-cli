@@ -14,7 +14,7 @@ import (
 	"github.com/chromedp/chromedp"
 	"go.uber.org/zap"
 
-	"github.com/xkilldash9x/scalpel-cli/pkg/browser/cdp"
+	"github.com/xkilldash9x/scalpel-cli/pkg/browser"
 	"github.com/xkilldash9x/scalpel-cli/pkg/browser/shim"
 	"github.com/xkilldash9x/scalpel-cli/pkg/browser/stealth"
 	"github.com/xkilldash9x/scalpel-cli/pkg/config"

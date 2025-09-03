@@ -1,4 +1,4 @@
-// pkg/browser/analysis_context.go
+// File: pkg/browser/analysis_context.go
 package browser
 
 import (
@@ -13,15 +13,21 @@ import (
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 
-	"github.com/xkilldash9x/scalpel-cli/pkg/browser"
 	"github.com/xkilldash9x/scalpel-cli/pkg/browser/shim"
 	"github.com/xkilldash9x/scalpel-cli/pkg/browser/stealth"
 	"github.com/xkilldash9x/scalpel-cli/pkg/config"
 	"github.com/xkilldash9x/scalpel-cli/pkg/humanoid"
 )
 
-// ensure AnalysisContext implements the interface
-var _ browser.SessionContext = (*AnalysisContext)(nil)
+// Define constants for timeouts to avoid magic numbers.
+const (
+	artifactCollectionTimeout = 20 * time.Second
+	closeTimeout              = 10 * time.Second
+)
+
+
+// ensure AnalysisContext implements the interface.
+var _ SessionContext = (*AnalysisContext)(nil)
 
 // AnalysisContext manages a single, isolated browser tab (session) using CDP.
 type AnalysisContext struct {
@@ -59,40 +65,38 @@ func NewAnalysisContext(
 	l := logger.With(zap.String("session_id", id[:8]))
 
 	return &AnalysisContext{
-		id:                  id,
-		allocatorContext:    allocCtx,
-		globalConfig:        cfg,
-		logger:              l,
-		persona:             persona,
-		taintShimTemplate:   taintTemplate,
-		taintConfigJSON:     taintConfig,
+		id:                id,
+		allocatorContext:  allocCtx,
+		globalConfig:      cfg,
+		logger:            l,
+		persona:           persona,
+		taintShimTemplate: taintTemplate,
+		taintConfigJSON:   taintConfig,
 	}
 }
 
 // Initialize creates the browser tab and applies all necessary instrumentation.
 func (ac *AnalysisContext) Initialize(ctx context.Context) error {
 	ac.mu.Lock()
+	defer ac.mu.Unlock()
 
 	if ac.sessionContext != nil {
-		ac.mu.Unlock()
 		return fmt.Errorf("session already initialized")
 	}
 
-	// Critical Section: Initialize fields
+	// Create a new tab context.
 	sessionCtx, cancel := chromedp.NewContext(ac.allocatorContext)
 	ac.sessionContext = sessionCtx
 	ac.sessionCancel = cancel
+
+	// Initialize components.
 	ac.humanoid = humanoid.New(ac.globalConfig.Humanoid)
 	ac.harvester = NewHarvester(ac.sessionContext, ac.logger)
 	ac.interactor = NewInteractor(ac.logger, ac.humanoid)
 
-	// Unlock here. Fields are initialized and safe for concurrent access by other methods.
-	ac.mu.Unlock()
-
-	// Apply instrumentation and stealth.
+	// Apply instrumentation and stealth. Order is crucial: Stealth first.
 	if err := ac.applyStealth(); err != nil {
-		// Safe to call Close now without holding the lock.
-		ac.Close(ctx)
+		ac.Close(ctx) // Ensure cleanup on failure
 		return fmt.Errorf("failed to apply stealth: %w", err)
 	}
 
@@ -110,7 +114,7 @@ func (ac *AnalysisContext) Initialize(ctx context.Context) error {
 
 func (ac *AnalysisContext) applyStealth() error {
 	// Apply persona settings (UserAgent, Platform, Screen resolution, JS evasions).
-	if err := chromedp.Run(ac.sessionContext, stealth.Apply(ac.persona, ac.logger)); err != nil {
+	if err := chromedp.Run(ac.sessionContext, stealth.Apply(ac.persona)); err != nil {
 		return fmt.Errorf("failed to apply stealth persona: %w", err)
 	}
 	return nil
@@ -129,7 +133,7 @@ func (ac *AnalysisContext) applyInstrumentation() error {
 
 	// 2. Expose the callback function BEFORE injecting the script.
 	// We use chromedp.Expose which handles the unmarshalling automatically.
-	err = ac.ExposeFunction("__scalpel_sink_event", ac.handleTaintEvent)
+	err = ac.ExposeFunction("scalpel_sink_event", ac.handleTaintEvent)
 	if err != nil {
 		return fmt.Errorf("failed to expose taint callback: %w", err)
 	}
@@ -238,7 +242,7 @@ func (ac *AnalysisContext) ScrollPage(direction string) error {
 }
 
 // Interact uses the Interactor helper to explore the page.
-func (ac *AnalysisContext) Interact(config browser.InteractionConfig) error {
+func (ac *AnalysisContext) Interact(config InteractionConfig) error {
 	ac.logger.Debug("Starting automated humanoid interaction phase", zap.Int("max_depth", config.MaxDepth))
 
 	// The Interactor handles the complexity of finding, prioritizing, and clicking elements recursively.
@@ -246,43 +250,38 @@ func (ac *AnalysisContext) Interact(config browser.InteractionConfig) error {
 }
 
 // CollectArtifacts gathers data from the session.
-func (ac *AnalysisContext) CollectArtifacts(ctx context.Context) (*browser.Artifacts, error) {
+func (ac *AnalysisContext) CollectArtifacts() (*Artifacts, error) {
 	ac.mu.Lock()
+	defer ac.mu.Unlock()
 	if ac.isClosed {
-		ac.mu.Unlock()
 		return nil, fmt.Errorf("session is already closed")
 	}
-	harvester := ac.harvester
-	sessionContext := ac.sessionContext
-	ac.mu.Unlock()
 
-	artifacts := &browser.Artifacts{}
+	artifacts := &Artifacts{}
 	ac.logger.Debug("Collecting browser artifacts.")
 
-	// Use a timeout derived from the caller's context (ctx).
-	collectCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
-	defer cancel()
-
 	// 1. Stop the harvester and get its data
-	if harvester != nil {
-		artifacts.HAR, artifacts.ConsoleLogs = harvester.Stop(collectCtx)
+	if ac.harvester != nil {
+		// Use a timeout for collection.
+		collectCtx, cancel := context.WithTimeout(context.Background(), artifactCollectionTimeout)
+		defer cancel()
+		artifacts.HAR, artifacts.ConsoleLogs = ac.harvester.Stop(collectCtx)
 	}
-
-	// Create a new derived context for CDP operations that respects the collection timeout.
-	runCtx, cancelRunCtx := context.WithTimeout(sessionContext, 20*time.Second)
-	defer cancelRunCtx()
 
 	// 2. Get DOM content (Snapshot)
 	var domContent string
-	if err := chromedp.Run(runCtx, chromedp.OuterHTML("html", &domContent)); err != nil {
+	// ***FIX***: Check for the error from chromedp.Run and return it.
+	if err := chromedp.Run(ac.sessionContext, chromedp.OuterHTML("html", &domContent)); err != nil {
 		ac.logger.Warn("Could not retrieve final DOM content", zap.Error(err))
+		return nil, fmt.Errorf("failed to retrieve DOM: %w", err)
 	}
 	artifacts.DOM = domContent
 
 	// 3. Get storage state
-	var storageResult browser.StorageState
+	var storageResult StorageState
 	var cookies []*network.Cookie
-	err := chromedp.Run(runCtx,
+	// ***FIX***: Check for the error from the second chromedp.Run call and return it.
+	err := chromedp.Run(ac.sessionContext,
 		// Evaluate JavaScript to extract storage maps.
 		chromedp.Evaluate(
 			`({
@@ -298,6 +297,7 @@ func (ac *AnalysisContext) CollectArtifacts(ctx context.Context) (*browser.Artif
 	)
 	if err != nil {
 		ac.logger.Warn("Could not retrieve storage state", zap.Error(err))
+		return nil, fmt.Errorf("failed to retrieve storage state: %w", err)
 	}
 	storageResult.Cookies = cookies
 	artifacts.Storage = storageResult
@@ -305,45 +305,38 @@ func (ac *AnalysisContext) CollectArtifacts(ctx context.Context) (*browser.Artif
 	return artifacts, nil
 }
 
+
 // Close safely terminates the browser tab and its associated resources.
 func (ac *AnalysisContext) Close(ctx context.Context) error {
 	ac.mu.Lock()
+	defer ac.mu.Unlock()
+
 	if ac.isClosed {
-		ac.mu.Unlock()
 		return nil
 	}
 	ac.isClosed = true
-	// Capture references needed for closing before releasing the lock.
-	harvester := ac.harvester
-	sessionCancel := ac.sessionCancel
-	sessionContext := ac.sessionContext
-	ac.mu.Unlock() // Release the lock before potentially blocking operations.
 
 	// Stop harvester first.
-	if harvester != nil {
-		harvester.Stop(ctx)
+	if ac.harvester != nil {
+		ac.harvester.Stop(ctx)
 	}
 
 	// Cancel the session context.
-	if sessionCancel != nil {
-		sessionCancel()
+	if ac.sessionCancel != nil {
+		ac.sessionCancel()
 	}
-
-	if sessionContext == nil {
+	
+	// This check prevents a panic if Initialize was never called or failed early.
+	if ac.sessionContext == nil {
 		return nil
 	}
 
-	// Wait for the session context to be fully done.
-	// Use a robust timeout that respects the caller's deadline (ctx) and the hard timeout.
-	waitCtx, cancelWait := context.WithTimeout(ctx, 10*time.Second)
-	defer cancelWait()
-
+	// Wait for the session context to be fully done, with a timeout.
 	select {
-	case <-sessionContext.Done():
+	case <-ac.sessionContext.Done():
 		ac.logger.Debug("Browser session closed gracefully.")
-	case <-waitCtx.Done():
-		// This triggers if the caller's deadline OR the 10s timeout is reached.
-		ac.logger.Warn("Deadline exceeded waiting for browser session to close.", zap.Error(waitCtx.Err()))
+	case <-time.After(closeTimeout): // Hard timeout
+		ac.logger.Warn("Timeout waiting for browser session to close.")
 	}
 
 	return nil
