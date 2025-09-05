@@ -1,3 +1,4 @@
+originial:
 // pkg/humanoid/behavior.go
 package humanoid
 
@@ -171,4 +172,3 @@ func (h *Humanoid) recoverFatigue(duration time.Duration) {
 	h.fatigueLevel = math.Max(0.0, h.fatigueLevel) // Clamp at 0.0
 
 	h.applyFatigueEffects()
-}
