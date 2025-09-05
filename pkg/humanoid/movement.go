@@ -11,7 +11,7 @@ import (
 	"github.com/chromedp/cdproto/cdp"
 	"github.com/chromedp/cdproto/dom"
 	// Import input package for DispatchMouseEvent
-	"github.comcom/chromedp/cdproto/input"
+	"github.com/chromedp/cdproto/input"
 	"github.com/chromedp/chromedp"
 	"go.uber.org/zap"
 )
