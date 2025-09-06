@@ -7,11 +7,28 @@ import (
 	"math"
 	"time"
 
-	"github.com/chromedp/cdproto/input"
+	// Required for NodeID and Node types
+	"github.com/chromedp/cdproto/cdp"
+	// Required for BoxModel and low-level DOM access
 	"github.com/chromedp/cdproto/dom"
 	"github.com/chromedp/chromedp"
 	"go.uber.org/zap"
 )
+
+// sleepContext is a helper function that pauses execution for a given duration
+// while being cancellable by the parent context.
+func sleepContext(ctx context.Context, duration time.Duration) error {
+	// Handle negative or zero duration immediately.
+	if duration <= 0 {
+		return nil
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(duration):
+		return nil
+	}
+}
 
 // boxToCenter calculates the geometric center (centroid) of a DOM BoxModel.
 func boxToCenter(box *dom.BoxModel) (center Vector2D, valid bool) {
@@ -19,63 +36,51 @@ func boxToCenter(box *dom.BoxModel) (center Vector2D, valid bool) {
 		return Vector2D{}, false
 	}
 	// Calculate the average of the x and y coordinates.
+	// Content is defined as [x0, y0, x1, y1, x2, y2, x3, y3].
 	centerX := (box.Content[0] + box.Content[2] + box.Content[4] + box.Content[6]) / 4
 	centerY := (box.Content[1] + box.Content[3] + box.Content[5] + box.Content[7]) / 4
 	return Vector2D{X: centerX, Y: centerY}, true
 }
 
-// boxToDimensions returns the center, width, and height of a BoxModel.
-func boxToDimensions(box *dom.BoxModel) (center Vector2D, width, height float64) {
-	if box == nil {
-		return Vector2D{}, 0, 0
-	}
-	center, valid := boxToCenter(box)
-	if !valid {
-		return Vector2D{}, 0, 0
-	}
-	return center, float64(box.Width), float64(box.Height)
-}
-
-// fittsLawMT calculates the Movement Time (MT) according to Fitts's Law.
-// MT = A + B * ID, where ID (Index of Difficulty) = log2(D/W + 1).
-func (h *Humanoid) fittsLawMT(distance, width float64) float64 {
-	// Ensure a minimum effective width.
-	minWidth := 5.0
-	effectiveWidth := math.Max(width, minWidth)
-
-	// Index of Difficulty (ID).
-	id := math.Log2(distance/effectiveWidth + 1)
-
-	h.mu.Lock()
-	// Use dynamic config parameters (affected by fatigue).
-	A := h.dynamicConfig.FittsA
-	B := h.dynamicConfig.FittsB
-	randNorm := h.rng.NormFloat64()
-	h.mu.Unlock()
-
-	// Predicted Movement Time (MT).
-	mt := A + B*id
-
-	// Introduce variability (Coefficient of Variation CV ~ 12%).
-	variability := 0.12
-	stdDev := mt * variability
-	finalMT := randNorm*stdDev + mt
-
-	// Ensure MT is not unrealistically fast.
-	return math.Max(A*0.8, finalMT)
+// getElementBoxByVector creates a virtual BoxModel around a specific coordinate.
+// This is useful for functions that need a box but only have a target vector.
+func (h *Humanoid) getElementBoxByVector(ctx context.Context, vec Vector2D) (*dom.BoxModel, error) {
+	// Create a virtual box of 10x10 pixels centered on the vector
+	const virtualBoxSize = 10.0
+	halfSize := virtualBoxSize / 2.0
+	return &dom.BoxModel{
+		Content: []float64{
+			vec.X - halfSize, vec.Y - halfSize, // top-left
+			vec.X + halfSize, vec.Y - halfSize, // top-right
+			vec.X + halfSize, vec.Y + halfSize, // bottom-right
+			vec.X - halfSize, vec.Y + halfSize, // bottom-left
+		},
+		Width:  int64(virtualBoxSize),
+		Height: int64(virtualBoxSize),
+	}, nil
 }
 
 // getElementBoxBySelector is a utility to find an element by selector and get its BoxModel.
 func (h *Humanoid) getElementBoxBySelector(ctx context.Context, selector string) (*dom.BoxModel, error) {
+	// Nodes must be a slice of pointers for chromedp.Nodes.
 	var nodes []*cdp.Node
-	// WaitVisible ensures the element is rendered and in the viewport.
-	err := chromedp.Nodes(selector, &nodes, chromedp.ByQuery, chromedp.WaitVisible).Do(ctx)
+
+	// In the modern API, `chromedp.WaitVisible` is a standalone Action.
+	// We must sequence WaitVisible and Nodes using chromedp.Tasks.
+	tasks := chromedp.Tasks{
+		chromedp.WaitVisible(selector, chromedp.ByQuery),
+		chromedp.Nodes(selector, &nodes, chromedp.ByQuery),
+	}
+	err := tasks.Do(ctx)
 
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		if len(nodes) == 0 {
 			return nil, fmt.Errorf("humanoid: failed to find visible nodes for selector '%s': %w", selector, err)
 		}
-		// If nodes were found despite the error (e.g., timeout), proceed.
+		// If nodes were found despite the error (e.g., timeout during Nodes retrieval but after WaitVisible succeeded), proceed.
 		h.logger.Debug("Humanoid: chromedp.Nodes returned error but found nodes, proceeding.", zap.Error(err))
 	}
 
@@ -83,7 +88,7 @@ func (h *Humanoid) getElementBoxBySelector(ctx context.Context, selector string)
 		return nil, fmt.Errorf("humanoid: selector '%s' matched no nodes", selector)
 	}
 
-	// Use the robust getElementBox helper.
+	// Use the robust getElementBox helper on the first node found.
 	box, err := getElementBox(ctx, nodes[0].NodeID, h.logger)
 	if err != nil {
 		return nil, fmt.Errorf("humanoid: failed to get element geometry for '%s': %w", selector, err)
@@ -98,10 +103,11 @@ func getElementBox(ctx context.Context, nodeID cdp.NodeID, logger *zap.Logger) (
 
 	maxRetries := 3
 	for i := 0; i < maxRetries; i++ {
+		// Use the modern constructor pattern for low-level DOM commands.
 		box, err = dom.GetBoxModel().WithNodeID(nodeID).Do(ctx)
 
 		if err == nil {
-			// Check if the BoxModel is valid.
+			// Check if the BoxModel is valid (has dimensions).
 			if box != nil && len(box.Content) >= 8 && box.Width > 0 && box.Height > 0 {
 				return box, nil
 			}

@@ -1,18 +1,19 @@
-// pkg/humanoid/humanoid.go
+// -- pkg/humanoid/humanoid.go --
 package humanoid
 
 import (
 	"context"
-	"fmt"
 	"math"
 	"math/rand"
 	"sync"
 	"time"
 
 	"github.com/aquilax/go-perlin"
-	// Import necessary cdproto packages
+	// Required for BrowserContextID
 	"github.com/chromedp/cdproto/cdp"
+	// Required for MouseButton types and constants
 	"github.com/chromedp/cdproto/input"
+	// Required for GetLayoutMetrics
 	"github.com/chromedp/cdproto/page"
 	"github.com/chromedp/chromedp"
 	"go.uber.org/zap"
@@ -36,9 +37,7 @@ type Humanoid struct {
 	mu sync.Mutex
 
 	// Current cursor position and state
-	currentPos Vector2D
-	// UPDATED: Use input.MouseButton, which is a string type.
-	// This was the main culprit for the compilation errors.
+	currentPos         Vector2D
 	currentButtonState input.MouseButton // Tracks the currently pressed mouse button
 
 	// Fatigue modeling
@@ -56,42 +55,83 @@ type Humanoid struct {
 
 // New creates a new Humanoid instance with the given configuration.
 func New(config Config, logger *zap.Logger, browserContextID cdp.BrowserContextID) *Humanoid {
-	seed := time.Now().UnixNano()
+	// 1. Initialize RNG
+	var seed int64
+	var rng *rand.Rand
+	if config.Rng == nil {
+		seed = time.Now().UnixNano()
+		source := rand.NewSource(seed)
+		rng = rand.New(source)
+	} else {
+		// If an RNG is provided, use it. Use a randomized seed for Perlin noise.
+		seed = time.Now().UnixNano()
+		rng = config.Rng
+	}
+
+	// 2. Finalize the Session Persona
+	config.NormalizeTypoRates()
+	config.FinalizeSessionPersona(rng)
+
+	// Standard Perlin parameters
+	alpha, beta, n := 2.0, 2.0, int32(3)
+
 	h := &Humanoid{
 		baseConfig:       config,
 		dynamicConfig:    config, // Start with the base config
 		browserContextID: browserContextID,
 		logger:           logger,
-		rng:              rand.New(rand.NewSource(seed)),
+		rng:              rng,
 		lastActionTime:   time.Now(),
-		// UPDATED: Initialize with the correct "none" string constant.
+		// Use the modern constant for the 'none' button state.
 		currentButtonState: input.MouseButtonNone,
+		noiseX:             perlin.NewPerlin(alpha, beta, n, seed),
+		noiseY:             perlin.NewPerlin(alpha, beta, n, seed+1), // Offset seed for Y noise
 	}
-
-	// Initialize Perlin noise generators
-	// These values are just some defaults that i've found to work well.
-	alpha, beta := 2.0, 2.0 // Controls the smoothness of the noise
-	n := int32(3)           // Number of octaves
-	h.noiseX = perlin.NewPerlin(alpha, beta, n, seed)
-	h.noiseY = perlin.NewPerlin(alpha, beta, n, seed+1) // Offset seed for Y noise
 
 	return h
 }
 
+// GetCurrentPos safely retrieves the humanoid's current cursor position.
+func (h *Humanoid) GetCurrentPos() Vector2D {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.currentPos
+}
+
+// SetButtonState returns an Action that executes the provided button action (e.g., MouseDown or MouseUp)
+// AND updates the internal button state tracker.
+// This is essential for hybrid implementations (like DragAndDrop) that mix high-level
+// button actions with low-level movement simulation (simulateTrajectory).
+func (h *Humanoid) SetButtonState(newState input.MouseButton, action chromedp.Action) chromedp.Action {
+	return chromedp.ActionFunc(func(ctx context.Context) error {
+		// 1. Execute the actual browser action (MouseDown/Up).
+		if err := action.Do(ctx); err != nil {
+			return err
+		}
+
+		// 2. Update internal state tracker if successful.
+		h.mu.Lock()
+		h.currentButtonState = newState
+		h.mu.Unlock()
+		return nil
+	})
+}
+
 // InitializePosition sets the initial cursor position realistically within the viewport.
 func (h *Humanoid) InitializePosition(ctx context.Context) error {
-	// 1. Get the layout metrics.
-	layout, err := page.GetLayoutMetrics().Do(ctx)
+	// 1. Get the layout metrics using the modern low-level API pattern.
+	_, _, _, _, cssVisualViewport, _, err := page.GetLayoutMetrics().Do(ctx)
 	if err != nil {
 		h.logger.Warn("Humanoid: failed to get layout metrics", zap.Error(err))
 	}
 
 	var width, height float64
-	if layout != nil && layout.VisualViewport != nil {
-		width = layout.VisualViewport.ClientWidth
-		height = layout.VisualViewport.ClientHeight
+	if cssVisualViewport != nil {
+		width = cssVisualViewport.ClientWidth
+		height = cssVisualViewport.ClientHeight
 	}
 
+	// Fallback resolution if metrics fail or are zero.
 	if width <= 0 || height <= 0 {
 		width, height = 1024, 768
 	}
@@ -108,9 +148,12 @@ func (h *Humanoid) InitializePosition(ctx context.Context) error {
 	h.currentPos = Vector2D{X: startX, Y: startY}
 	h.mu.Unlock()
 
-	// 3. Dispatch the initial mouse move event to set the cursor position.
-	// We don't really care about the path here, just setting the initial state.
-	return input.DispatchMouseEvent(input.MouseMoved, startX, startY).
-		WithButton(input.MouseButtonNone).
-		Do(ctx)
+	// 3. Dispatch the initial mouse move event using a modern high-level Action.
+	// CORRECTION: Use the correct function name chromedp.MouseMove.
+	return chromedp.MouseMove(startX, startY).Do(ctx)
+}
+
+// pause is a simple, context aware sleep helper.
+func (h *Humanoid) pause(ctx context.Context, duration time.Duration) error {
+	return sleepContext(ctx, duration)
 }

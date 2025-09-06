@@ -1,91 +1,93 @@
-// pkg/humanoid/drag.go
+//pkg/humanoid/drag.go --
 package humanoid
 
 import (
 	"context"
 	"fmt"
 
+	// Required for MouseButton constants (e.g., input.MouseButtonLeft)
 	"github.com/chromedp/cdproto/input"
+	// Required for high-level actions (e.g., chromedp.MouseDown, chromedp.LeftButton)
 	"github.com/chromedp/chromedp"
+	"go.uber.org/zap"
 )
 
 // DragAndDrop simulates a human-like drag-and-drop action.
+// This function returns a complex Action (chromedp.Tasks).
 func (h *Humanoid) DragAndDrop(startSelector, endSelector string) chromedp.Action {
-	return chromedp.ActionFunc(func(ctx context.Context) error {
-		// High-intensity action.
-		h.updateFatigue(1.5)
+	// We need variables to store the coordinates between steps in the task sequence.
+	var start, end Vector2D
 
-		// 1. Locate the start and end elements.
-		start, err := h.getCenterOfElement(ctx, startSelector)
-		if err != nil {
-			return fmt.Errorf("could not get starting element position: %w", err)
-		}
+	// The entire operation is a sequence of tasks.
+	return chromedp.Tasks{
+		// 1. Preparation: Locate elements and calculate positions.
+		chromedp.ActionFunc(func(ctx context.Context) error {
+			// High-intensity action.
+			h.updateFatigue(1.5)
 
-		end, err := h.getCenterOfElement(ctx, endSelector)
-		if err != nil {
-			return fmt.Errorf("could not get ending element position: %w", err)
-		}
+			// Locate the start and end elements.
+			var err error
+			start, err = h.getCenterOfElement(ctx, startSelector)
+			if err != nil {
+				h.logger.Error("DragAndDrop failed: could not get starting element position",
+					zap.String("selector", startSelector),
+					zap.Error(err))
+				return fmt.Errorf("could not get starting element position: %w", err)
+			}
 
-		// 2. Create the potential field.
-		field := NewPotentialField()
+			end, err = h.getCenterOfElement(ctx, endSelector)
+			if err != nil {
+				h.logger.Error("DragAndDrop failed: could not get ending element position",
+					zap.String("selector", endSelector),
+					zap.Error(err))
+				return fmt.Errorf("could not get ending element position: %w", err)
+			}
+			return nil
+		}),
 
-		h.mu.Lock()
-		attractionStrength := h.dynamicConfig.FittsA
-		h.mu.Unlock()
+		// 2. Move to the starting element first.
+		h.MoveTo(startSelector, nil),
 
-		// The end point is an attractor.
-		field.AddSource(end, attractionStrength, 150.0)
-		// The start point is a weak repulsor.
-		field.AddSource(start, -attractionStrength*0.2, 100.0)
-
-		// 3. Move to the starting element first.
-		if err := h.MoveTo(startSelector, nil).Do(ctx); err != nil {
-			return fmt.Errorf("failed to move to starting element: %w", err)
-		}
+		// 3. Pause briefly before pressing down.
+		chromedp.ActionFunc(func(ctx context.Context) error {
+			return h.CognitivePause(ctx, 80, 30)
+		}),
 
 		// 4. Mouse down (Grab).
-		h.mu.Lock()
-		currentPos := h.currentPos
-		h.mu.Unlock()
+		// Use the SetButtonState wrapper to update the internal tracker for the subsequent low-level drag.
+		h.SetButtonState(input.MouseButtonLeft, chromedp.MouseDown(chromedp.LeftButton)),
 
-		// Pause briefly before pressing down.
-		if err := h.CognitivePause(ctx, 80, 30); err != nil {
-			return err
-		}
+		// 5. Pause briefly after pressing down before starting the drag.
+		chromedp.ActionFunc(func(ctx context.Context) error {
+			return h.CognitivePause(ctx, 100, 40)
+		}),
 
-		// UPDATED: Use the "left" string constant for the left mouse button.
-		if err := h.mouseDown(ctx, currentPos, input.MouseButtonLeft); err != nil {
-			return fmt.Errorf("failed to press mouse button: %w", err)
-		}
-
-		// Pause briefly after pressing down before starting the drag.
-		if err := h.CognitivePause(ctx, 100, 40); err != nil {
-			return err
-		}
-
-		// 5. Execute the drag movement.
-		// MoveToVector handles the movement while the button state is tracked.
-		if err := h.MoveToVector(end, field).Do(ctx); err != nil {
-			// Cleanup: Attempt to release the mouse even if the drag failed.
+		// 6. Execute the drag movement to the end position.
+		chromedp.ActionFunc(func(ctx context.Context) error {
+			field := NewPotentialField()
 			h.mu.Lock()
-			cleanupPos := h.currentPos
+			attractionStrength := h.dynamicConfig.FittsA
+			if attractionStrength <= 0 {
+				attractionStrength = 100.0 // Safety fallback
+			}
 			h.mu.Unlock()
-			// UPDATED: Use the "left" string constant for the left mouse button.
-			h.mouseUp(ctx, cleanupPos, input.MouseButtonLeft)
-			return fmt.Errorf("failed during drag movement: %w", err)
-		}
 
-		// 6. Mouse up (Release).
-		h.mu.Lock()
-		finalPos := h.currentPos
-		h.mu.Unlock()
+			// The end point is an attractor.
+			field.AddSource(end, attractionStrength, 150.0)
+			// The start point is a weak repulsor.
+			field.AddSource(start, -attractionStrength*0.2, 100.0)
 
-		// Pause briefly before releasing.
-		if err := h.CognitivePause(ctx, 90, 35); err != nil {
-			return err
-		}
+			// Execute the vector-based move. This uses the updated h.currentButtonState.
+			return h.MoveToVector(end, field).Do(ctx)
+		}),
 
-		// UPDATED: Use the "left" string constant for the left mouse button.
-		return h.mouseUp(ctx, finalPos, input.MouseButtonLeft)
-	})
+		// 7. Short pause before release.
+		chromedp.ActionFunc(func(ctx context.Context) error {
+			return h.CognitivePause(ctx, 70, 30)
+		}),
+
+		// 8. Mouse up (Drop).
+		// Use the SetButtonState wrapper to reset the internal tracker.
+		h.SetButtonState(input.MouseButtonNone, chromedp.MouseUp(chromedp.LeftButton)),
+	}
 }

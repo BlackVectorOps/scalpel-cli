@@ -1,13 +1,14 @@
-// pkg/humanoid/clickmodel.go
+// -- pkg/humanoid/clickmodel.go --
 package humanoid
 
 import (
 	"context"
-	"fmt"
 	"math"
 	"time"
 
+	// Required for MouseButton constants (e.g., input.MouseButtonLeft)
 	"github.com/chromedp/cdproto/input"
+	// Required for high-level actions (e.g., chromedp.MouseDown, chromedp.LeftButton)
 	"github.com/chromedp/chromedp"
 )
 
@@ -17,97 +18,45 @@ func (h *Humanoid) IntelligentClick(selector string, field *PotentialField) chro
 		field = NewPotentialField()
 	}
 
-	// We chain the actions using chromedp.Tasks.
+	// We build a sequence of Actions using chromedp.Tasks.
 	return chromedp.Tasks{
-		// 1. Move to the element.
+		// 1. Your custom human-like movement action.
 		h.MoveTo(selector, field),
 
-		// 2. Execute the click after the move completes.
+		// 2. Fitts's Law delay before the click.
 		chromedp.ActionFunc(func(ctx context.Context) error {
-			// Get the final position and distance traveled after the move.
 			h.mu.Lock()
-			currentPos := h.currentPos
 			distance := h.lastMovementDistance
 			h.mu.Unlock()
 
-			// Apply Fitts's Law delay before the click occurs (Terminal phase latency).
 			clickDelay := h.calculateTerminalFittsLaw(distance)
-			if err := sleepContext(ctx, clickDelay); err != nil {
-				return err
-			}
-
-			// Execute the physical click (down and up).
-			// UPDATED: Use the "left" string constant for the left mouse button.
-			if err := h.mouseDown(ctx, currentPos, input.MouseButtonLeft); err != nil {
-				return fmt.Errorf("failed to dispatch mousedown: %w", err)
-			}
-
-			// Calculate a realistic delay between mouse down and up.
-			h.mu.Lock()
-			holdDuration := time.Duration(h.dynamicConfig.ClickHoldMinMs+
-				h.rng.Intn(h.dynamicConfig.ClickHoldMaxMs-h.dynamicConfig.ClickHoldMinMs)) * time.Millisecond
-			h.mu.Unlock()
-
-			if err := sleepContext(ctx, holdDuration); err != nil {
-				return err
-			}
-
-			// UPDATED: Use the "left" string constant for the left mouse button.
-			if err := h.mouseUp(ctx, currentPos, input.MouseButtonLeft); err != nil {
-				return fmt.Errorf("failed to dispatch mouseup: %w", err)
-			}
-
-			return nil
+			return sleepContext(ctx, clickDelay)
 		}),
+
+		// 3. Mouse down using the modern, built-in action.
+		// Use SetButtonState wrapper to ensure internal state is tracked for potential low-level interaction later.
+		h.SetButtonState(input.MouseButtonLeft, chromedp.MouseDown(chromedp.LeftButton)),
+
+		// 4. Realistic hold duration between down and up.
+		chromedp.ActionFunc(func(ctx context.Context) error {
+			h.mu.Lock()
+
+			// Ensure the range for Intn is positive to prevent panic.
+			rangeMs := h.dynamicConfig.ClickHoldMaxMs - h.dynamicConfig.ClickHoldMinMs
+			var randomAddition int
+			if rangeMs > 0 {
+				randomAddition = h.rng.Intn(rangeMs)
+			}
+
+			holdDuration := time.Duration(h.dynamicConfig.ClickHoldMinMs+randomAddition) * time.Millisecond
+			h.mu.Unlock()
+			return sleepContext(ctx, holdDuration)
+		}),
+
+		// 5. Mouse up using the modern, built-in action.
+		// Use SetButtonState wrapper to reset internal state.
+		h.SetButtonState(input.MouseButtonNone, chromedp.MouseUp(chromedp.LeftButton)),
 	}
-}
-
-// mouseDown dispatches a mouse pressed event.
-func (h *Humanoid) mouseDown(ctx context.Context, pos Vector2D, button input.MouseButton) error {
-	// A little bit of noise to make the click position more realistic.
-	h.mu.Lock()
-	noiseX := (h.rng.Float64() - 0.5) * h.dynamicConfig.ClickNoise
-	noiseY := (h.rng.Float64() - 0.5) * h.dynamicConfig.ClickNoise
-	h.mu.Unlock()
-
-	// Update the button state BEFORE the event is dispatched.
-	h.mu.Lock()
-	// UPDATED: No more undefined input.MouseButtonNone
-	if h.currentButtonState != input.MouseButtonNone {
-		h.mu.Unlock()
-		return fmt.Errorf("mouse button %s is already pressed", h.currentButtonState)
-	}
-	h.currentButtonState = button
-	h.mu.Unlock()
-
-	return input.DispatchMouseEvent(input.MousePressed, pos.X+noiseX, pos.Y+noiseY).
-		WithButton(button).
-		WithClickCount(1).
-		WithTimestamp(timeNowInputPtr()).
-		Do(ctx)
-}
-
-// mouseUp dispatches a mouse released event.
-func (h *Humanoid) mouseUp(ctx context.Context, pos Vector2D, button input.MouseButton) error {
-	// A little bit of noise to make the click position more realistic.
-	h.mu.Lock()
-	noiseX := (h.rng.Float64() - 0.5) * (h.dynamicConfig.ClickNoise * 0.5)
-	noiseY := (h.rng.Float64() - 0.5) * (h.dynamicConfig.ClickNoise * 0.5)
-	h.mu.Unlock()
-
-	err := input.DispatchMouseEvent(input.MouseReleased, pos.X+noiseX, pos.Y+noiseY).
-		WithButton(button).
-		WithClickCount(1).
-		WithTimestamp(timeNowInputPtr()).
-		Do(ctx)
-
-	// Update the button state AFTER the event is dispatched.
-	h.mu.Lock()
-	// UPDATED: Use the correct "none" string constant.
-	h.currentButtonState = input.MouseButtonNone
-	h.mu.Unlock()
-
-	return err
 }
 
 // calculateTerminalFittsLaw determines the time required before initiating a click (terminal latency).
