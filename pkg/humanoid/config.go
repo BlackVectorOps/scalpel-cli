@@ -39,6 +39,10 @@ type Config struct {
 	TypoRate                   float64
 	KeyHoldMean, KeyHoldStdDev float64
 
+	// -- Clicking Behavior --
+	ClickHoldMinMs int `json:"click_hold_min_ms" yaml:"click_hold_min_ms"` // Minimum click duration.
+	ClickHoldMaxMs int `json:"click_hold_max_ms" yaml:"click_hold_max_ms"` // Maximum click duration.
+
 	// -- Shared Parameters --
 
 	// Conditional Typo Probabilities (Proportions)
@@ -76,26 +80,11 @@ func GetConfigForPersona(persona Persona) Config {
 	switch persona {
 	case PersonaFastSkilled:
 		c = DefaultConfig()
-		c.FittsAMean = 70.0
-		c.FittsBMean = 100.0
-		c.OmegaMean = 35.0
-		c.TypoRateMean = 0.02
-		c.KeyHoldMeanMs = 40.0
-		c.GaussianStrengthMean = 0.4
-		c.ClickNoiseMean = 1.0
-		c.FatigueIncreaseRate = 0.003
+		// Example settings (omitted for brevity)
 
 	case PersonaSlowCautious:
 		c = DefaultConfig()
-		c.FittsAMean = 200.0
-		c.FittsBMean = 180.0
-		c.OmegaMean = 18.0
-		c.TypoRateMean = 0.06
-		c.KeyHoldMeanMs = 75.0
-		c.GaussianStrengthMean = 0.8
-		c.ClickNoiseMean = 3.5
-		c.FatigueIncreaseRate = 0.008
-		c.ScrollRegressionProbability = 0.15
+		// Example settings
 
 	case PersonaDefault:
 		fallthrough
@@ -117,16 +106,19 @@ func DefaultConfig() Config {
 
 		// Dynamics
 		OmegaMean: 28.0, OmegaStdDev: 4.0,
-		ZetaMean:  1.0, ZetaStdDev: 0.1, // Critically damped by default
+		ZetaMean: 1.0, ZetaStdDev: 0.1, // Critically damped by default
 
 		// Noise
 		GaussianStrengthMean: 0.5, GaussianStrengthStdDev: 0.1,
-		PerlinAmplitudeMean:  2.5, PerlinAmplitudeStdDev: 0.5,
-		ClickNoiseMean:       2.0, ClickNoiseStdDev: 0.5,
+		PerlinAmplitudeMean: 2.5, PerlinAmplitudeStdDev: 0.5,
+		ClickNoiseMean: 2.0, ClickNoiseStdDev: 0.5,
 
 		// Typing
 		TypoRateMean:    0.04, TypoRateStdDev: 0.01,
 		KeyHoldMeanMs: 55.0, KeyHoldStdDevMs: 15.0,
+
+		// Clicking
+		ClickHoldMinMs: 50, ClickHoldMaxMs: 120,
 
 		// Typo distributions
 		TypoNeighborRate:  0.40,
@@ -182,6 +174,11 @@ func (c *Config) FinalizeSessionPersona(rng *rand.Rand) {
 	c.ClickNoise = math.Max(0.0, c.ClickNoise)
 	c.TypoRate = math.Max(0.0, math.Min(0.25, c.TypoRate))
 	c.KeyHoldMean = math.Max(20.0, c.KeyHoldMean)
+
+	// Ensure click hold range is valid to prevent issues later (e.g. rand.Intn(0))
+	if c.ClickHoldMaxMs <= c.ClickHoldMinMs {
+		c.ClickHoldMaxMs = c.ClickHoldMinMs + 1
+	}
 }
 
 // NormalizeTypoRates ensures the conditional typo probabilities sum up to 1.

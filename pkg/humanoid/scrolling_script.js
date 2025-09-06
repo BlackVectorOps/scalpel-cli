@@ -1,4 +1,3 @@
-// pkg/humanoid/scrolling_script.js
 /**
  * In-browser logic for performing a single human-like scroll iteration (JS-based).
  */
@@ -16,6 +15,7 @@ async (selector, injectedDeltaY, injectedDeltaX, readDensityFactor) => {
         try {
             style = window.getComputedStyle(node);
         } catch (e) {
+            // Element might be detached or in a context that prevents style access.
             return getScrollableParent(node.parentNode, axis);
         }
         let overflow, clientSize, scrollSize;
@@ -44,6 +44,7 @@ async (selector, injectedDeltaY, injectedDeltaX, readDensityFactor) => {
             let timeoutId = null;
 
             const checkScroll = () => {
+                // Check if element is still valid/connected
                 if (!element.isConnected && element !== document.scrollingElement && element !== document.documentElement) {
                     if (timeoutId) clearTimeout(timeoutId);
                     resolve();
@@ -79,6 +80,11 @@ async (selector, injectedDeltaY, injectedDeltaX, readDensityFactor) => {
         const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
             acceptNode: (node) => {
                 if (!node.parentElement || node.parentElement.offsetParent === null) return NodeFilter.FILTER_REJECT;
+                
+                // Ignore non-readable elements.
+                const parentTagName = node.parentElement.tagName;
+                if (parentTagName === 'SCRIPT' || parentTagName === 'STYLE' || parentTagName === 'NOSCRIPT') return NodeFilter.FILTER_REJECT;
+
                 try {
                     const style = window.getComputedStyle(node.parentElement);
                     if (style.visibility === 'hidden' || style.display === 'none') return NodeFilter.FILTER_REJECT;
@@ -199,6 +205,7 @@ async (selector, injectedDeltaY, injectedDeltaX, readDensityFactor) => {
         const waitPromises = Array.from(parentsToWaitFor).map(p => waitForScrollStabilization(p));
         await Promise.all(waitPromises);
     } else if (parentsToWaitFor.size > 0) {
+        // Short wait for 'auto' scroll
         await new Promise(res => setTimeout(res, 50 + Math.random() * 100));
     }
 

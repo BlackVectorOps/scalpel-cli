@@ -1,4 +1,4 @@
-// pkg/humanoid/behavior.go
+// -- pkg/humanoid/behavior.go --
 package humanoid
 
 import (
@@ -6,8 +6,6 @@ import (
 	"math"
 	"time"
 
-	"github.com/chromedp/cdproto/cdp"
-	"github.com/chromedp/cdproto/input"
 	"github.com/chromedp/chromedp"
 	"go.uber.org/zap"
 )
@@ -47,34 +45,70 @@ func (h *Humanoid) Hesitate(duration time.Duration) chromedp.Action {
 		h.mu.Unlock()
 
 		startTime := time.Now()
-		for time.Since(startTime) < duration {
+		// Use context-aware loop termination check.
+		for time.Since(startTime) < duration && ctx.Err() == nil {
 			// Small, random movements.
 			h.mu.Lock()
-			targetPos := startPos.Add(Vector2D{
+			finalPerturbedPoint := startPos.Add(Vector2D{
 				X: (h.rng.Float64() - 0.5) * 5,
 				Y: (h.rng.Float64() - 0.5) * 5,
 			})
 			h.mu.Unlock()
 
-			// Simulate a short, quick movement to the new target.
-			// UPDATED: Use the correct "none" string constant.
-			_, err := h.simulateTrajectory(ctx, h.currentPos, targetPos, nil, input.MouseButtonNone)
-			if err != nil {
+			// CORRECTION: Use the correct high-level function chromedp.MouseMove.
+			moveAction := chromedp.MouseMove(finalPerturbedPoint.X, finalPerturbedPoint.Y)
+			if err := moveAction.Do(ctx); err != nil {
 				h.logger.Debug("Humanoid: Hesitation movement failed", zap.Error(err))
-				// We can ignore this error as it's not critical.
+				// If context is cancelled, return the error immediately.
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				// Otherwise, we can ignore this non-critical error.
 			}
+
+			// Update internal position tracker after successful move.
+			h.mu.Lock()
+			h.currentPos = finalPerturbedPoint
+			h.mu.Unlock()
 
 			// Wait a bit before the next micro movement.
 			h.mu.Lock()
-			pauseDuration := time.Duration(50+h.rng.Intn(100)) * time.Millisecond
+			// Ensure Intn argument is positive.
+			randPart := 0
+			if 100 > 0 {
+				randPart = h.rng.Intn(100)
+			}
+			pauseDuration := time.Duration(50+randPart) * time.Millisecond
 			h.mu.Unlock()
+
+			// Adjust pause duration if it exceeds the remaining total duration.
 			if time.Since(startTime)+pauseDuration > duration {
+				pauseDuration = duration - time.Since(startTime)
+			}
+
+			// Ensure duration is positive before sleeping.
+			if pauseDuration <= 0 {
 				break
 			}
-			time.Sleep(pauseDuration)
+
+			// Use context-aware sleep instead of time.Sleep.
+			if err := sleepContext(ctx, pauseDuration); err != nil {
+				return err
+			}
 		}
 		return nil
 	})
+}
+
+// applyGaussianNoise adds high frequency tremor.
+func (h *Humanoid) applyGaussianNoise(point Vector2D) Vector2D {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	// Strength varies slightly randomly around the dynamic config value.
+	strength := h.dynamicConfig.GaussianStrength * (0.5 + h.rng.Float64())
+	pX := h.rng.NormFloat64() * strength
+	pY := h.rng.NormFloat64() * strength
+	return Vector2D{X: point.X + pX, Y: point.Y + pY}
 }
 
 // applyFatigueEffects adjusts the dynamic configuration based on the current fatigue level.

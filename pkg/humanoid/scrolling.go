@@ -1,4 +1,4 @@
-// pkg/humanoid/scrolling.go
+// -- pkg/humanoid/scrolling.go --
 package humanoid
 
 import (
@@ -10,8 +10,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/chromedp/cdproto/input"
+	// Required for GetLayoutMetrics
 	"github.com/chromedp/cdproto/page"
+	// Required for EvaluateParams
 	"github.com/chromedp/cdproto/runtime"
 	"github.com/chromedp/chromedp"
 	"go.uber.org/zap"
@@ -67,11 +68,13 @@ func (h *Humanoid) scrollWithJS(ctx context.Context, selector string, cfg Config
 
 		// Execute the in-browser scroll logic.
 		var res string
+		// Use the modern high-level chromedp.Evaluate Action.
 		err := chromedp.Evaluate(
 			scrollScript,
 			&res,
+			// Use the modern modifier pattern to await the promise returned by the JS.
 			func(p *runtime.EvaluateParams) *runtime.EvaluateParams {
-				return p.WithAwaitPromise(true) // Wait for stabilization.
+				return p.WithAwaitPromise(true)
 			},
 			selector,
 			injectedDeltaY,
@@ -156,7 +159,11 @@ func (h *Humanoid) scrollWithMouseWheel(ctx context.Context, selector string, cf
 
 	// Ensure cursor is initialized.
 	if h.GetCurrentPos().Mag() < 1.0 {
-		h.InitializePosition(scrollCtx)
+		if err := h.InitializePosition(scrollCtx); err != nil {
+			// If we can't initialize the position, fallback to JS scroll.
+			h.logger.Warn("Humanoid: failed to initialize mouse position for scrolling, falling back to JS", zap.Error(err))
+			return h.scrollWithJS(ctx, selector, cfg)
+		}
 	}
 
 	maxIterations := 30
@@ -191,9 +198,10 @@ func (h *Humanoid) scrollWithMouseWheel(ctx context.Context, selector string, cf
 		cursorPos := h.GetCurrentPos()
 
 		viewportCenterY := 400.0
-		layout, err := page.GetLayoutMetrics().Do(scrollCtx)
-		if err == nil && layout != nil && layout.VisualViewport != nil {
-			viewportCenterY = layout.VisualViewport.ClientHeight / 2.0
+		// Use the modern low-level API pattern for page metrics.
+		_, _, _, _, cssVisualViewport, _, err := page.GetLayoutMetrics().Do(scrollCtx)
+		if err == nil && cssVisualViewport != nil {
+			viewportCenterY = cssVisualViewport.ClientHeight / 2.0
 		}
 
 		deltaY := 1.0
@@ -212,12 +220,10 @@ func (h *Humanoid) scrollWithMouseWheel(ctx context.Context, selector string, cf
 		tickSize := 100.0
 
 		for j := 0; j < burstLength; j++ {
-			dispatchWheel := input.DispatchMouseEvent(input.MouseWheel, cursorPos.X, cursorPos.Y).
-				WithDeltaX(0).
-				WithDeltaY(deltaY * tickSize)
-
-			if err := dispatchWheel.Do(scrollCtx); err != nil {
-				return fmt.Errorf("humanoid: failed to dispatch mouse wheel event: %w", err)
+			// Use the modern, high-level MouseWheelXY Action.
+			scrollAction := chromedp.MouseWheelXY(cursorPos.X, cursorPos.Y, chromedp.MouseWheelY(deltaY*tickSize))
+			if err := scrollAction.Do(scrollCtx); err != nil {
+				return fmt.Errorf("humanoid: failed to dispatch mouse wheel action: %w", err)
 			}
 
 			// Pause between ticks (short physiological delay).
