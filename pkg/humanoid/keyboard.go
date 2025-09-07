@@ -10,7 +10,6 @@ import (
 	"unicode"
 
 	"github.com/chromedp/chromedp"
-	// MODERNIZED: Import the kb package for type-safe handling of special keys.
 	"github.com/chromedp/chromedp/kb"
 )
 
@@ -92,8 +91,7 @@ func (h *Humanoid) Type(selector string, text string) chromedp.Action {
 func (h *Humanoid) sendKey(ctx context.Context, key rune) error {
 	// We simulate the "hold" duration by sleeping for a tiny bit *after* the key is sent.
 	action := chromedp.SendKeys(
-		// SendKeys needs a target. Since the element is already focused (by Type()),
-		// we robustly target the active element using JS path.
+		// Target the active element using JS path.
 		"document.activeElement",
 		string(key),
 		chromedp.ByJSPath,
@@ -107,12 +105,9 @@ func (h *Humanoid) sendKey(ctx context.Context, key rune) error {
 }
 
 // sendControlKey dispatches control characters (like Backspace).
-// CORRECTED: The previous implementation misused chromedp.KeyAction, causing compilation errors.
-// MODERNIZED: Updated to use chromedp.SendKeys targeting the active element.
-// We accept interface{} to handle both strings/runes and kb.Key types seamlessly.
-func (h *Humanoid) sendControlKey(ctx context.Context, key interface{}) error {
+// FIXED: Updated signature to accept string as requested to resolve type mismatch.
+func (h *Humanoid) sendControlKey(ctx context.Context, key string) error {
 	// Use SendKeys targeted at the active element.
-	// This correctly handles control keys defined in the kb package (like kb.Backspace).
 	action := chromedp.SendKeys(
 		"document.activeElement",
 		key,
@@ -248,7 +243,7 @@ func (h *Humanoid) introduceNeighborTypo(ctx context.Context, char rune) (bool, 
 			return true, err
 		}
 		// Backspace
-		// MODERNIZED: Use kb.Backspace instead of the rune literal '\b'.
+		// kb.Backspace is compatible with the string signature (type Key string).
 		if err := h.sendControlKey(ctx, kb.Backspace); err != nil {
 			return true, err
 		}
@@ -292,14 +287,12 @@ func (h *Humanoid) introduceTransposition(ctx context.Context, char, nextChar ru
 			return false, advanced, err
 		}
 		// Backspace x2
-		// MODERNIZED: Use kb.Backspace.
 		if err := h.sendControlKey(ctx, kb.Backspace); err != nil {
 			return false, advanced, err
 		}
 		if err := h.keyPause(ctx, 1.1, 0.4, nil, 0); err != nil {
 			return false, advanced, err
 		}
-		// MODERNIZED: Use kb.Backspace.
 		if err := h.sendControlKey(ctx, kb.Backspace); err != nil {
 			return false, advanced, err
 		}
@@ -366,7 +359,6 @@ func (h *Humanoid) introduceInsertion(ctx context.Context, char rune) (bool, boo
 				return true, false, err
 			}
 			// Backspace
-			// MODERNIZED: Use kb.Backspace.
 			if err := h.sendControlKey(ctx, kb.Backspace); err != nil {
 				return true, false, err
 			}

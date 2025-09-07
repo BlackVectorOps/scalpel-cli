@@ -26,11 +26,9 @@ func (h *Humanoid) MoveTo(selector string, field *PotentialField) chromedp.Actio
 			h.updateFatigue(1.0)
 
 			// 1a. Ensure the target is visible (Scrolling).
-			// intelligentScroll is implemented in scroll.go.
 			if err := h.intelligentScroll(selector).Do(ctx); err != nil {
 				h.logger.Debug("Humanoid: Scrolling encountered issues (non-critical)", zap.Error(err), zap.String("selector", selector))
-				// Continue even if scrolling fails (e.g., context cancelled during scroll), 
-                // as the element might still be partially visible or the next step will fail robustly.
+				// Continue even if scrolling fails (e.g., context cancelled during scroll).
 			}
 
 			// 1b. Cognitive pause (Visual search and planning after scroll).
@@ -39,7 +37,6 @@ func (h *Humanoid) MoveTo(selector string, field *PotentialField) chromedp.Actio
 			}
 
 			// 1c. Locate the target element geometry.
-            // This step confirms visibility after the scroll attempt.
 			box, err := h.getElementBoxBySelector(ctx, selector)
 			if err != nil {
 				return fmt.Errorf("humanoid: failed to locate target element after scroll: %w", err)
@@ -84,8 +81,7 @@ func (h *Humanoid) MoveToVector(target Vector2D, field *PotentialField) chromedp
 
 			// Simulate the movement. This function call is blocking.
 			var err error
-			// Capture the velocity returned by the simulation.
-			// simulateTrajectory is defined in trajectory.go
+			
 			// Cast our internal MouseButton type to the required input.MouseButton type.
 			finalVelocity, err = h.simulateTrajectory(ctx, start, target, field, input.MouseButton(buttonState))
 

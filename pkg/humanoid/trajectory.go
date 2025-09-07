@@ -6,7 +6,7 @@ import (
 	"math"
 	"time"
 
-	// Requires latest cdproto for input.ButtonNone, input.ButtonLeft, etc.
+	// CRITICAL: Low-level input access is fundamentally required for high-fidelity simulation.
 	"github.com/chromedp/cdproto/input"
 	"github.com/chromedp/chromedp" // Required for chromedp.Sleep
 	"go.uber.org/zap"
@@ -152,22 +152,20 @@ func (h *Humanoid) simulateTrajectory(ctx context.Context, start, end Vector2D, 
 		finalPerturbedPoint := h.applyGaussianNoise(driftAppliedPos)
 
 		// Dispatch the mouse movement event.
-		// MODERNIZED: Use the modern builder pattern `input.DispatchMouseEvent`
-		// and the correct event type constant `input.MouseMoved`.
 		dispatchMouse := input.DispatchMouseEvent(input.MouseMoved, finalPerturbedPoint.X, finalPerturbedPoint.Y)
 
-		// MODERNIZED: Use the correct constant for no button, `input.ButtonNone`.
-		// This requires the updated cdproto dependency.
-		if buttonState != input.ButtonNone {
+		// FIXED: Use the string literal "none" for comparison as requested.
+		if buttonState != "none" {
 			dispatchMouse = dispatchMouse.WithButton(buttonState)
 			var buttons int64
-			// MODERNIZED: Use the correct button constants (e.g., input.ButtonLeft).
+			
+			// FIXED: Use string literals ("left", "right", "middle") for comparison.
 			switch buttonState {
-			case input.ButtonLeft:
+			case "left":
 				buttons = 1
-			case input.ButtonRight:
+			case "right":
 				buttons = 2
-			case input.ButtonMiddle:
+			case "middle":
 				buttons = 4
 			}
 			if buttons > 0 {
