@@ -1,4 +1,3 @@
-// -- pkg/humanoid/scroll.go --
 package humanoid
 
 import (
@@ -7,6 +6,7 @@ import (
     "fmt"
     "time"
 
+    "github.com/chromedp/cdproto/runtime" // <-- REQUIRED IMPORT ADDED
     "github.com/chromedp/chromedp"
     "go.uber.org/zap"
 )
@@ -283,12 +283,17 @@ func (h *Humanoid) intelligentScroll(selector string) chromedp.Action {
 
             // 1. Execute Scroll Iteration
             var resJSON string
-            // MODERNIZED: Use chromedp.CallFunctionOn.
-            // We set WithAwaitPromise(true) because the JS function is async.
-            // This requires the updated chromedp dependency.
-            err := chromedp.CallFunctionOn(scrollIterationJS, &resJSON, nil, selector, 0.0, 0.0, readDensityFactor).
-                WithAwaitPromise(true).
-                Do(ctx)
+
+            // FIXED: Replaced incorrect option with the correct functional option syntax.
+            err := chromedp.CallFunctionOn(
+                scrollIterationJS,
+                &resJSON,
+                func(p *runtime.CallFunctionOnParams) *runtime.CallFunctionOnParams {
+                    return p.WithAwaitPromise(true)
+                },
+                nil,
+                selector, 0.0, 0.0, readDensityFactor,
+            ).Do(ctx)
 
             if err != nil {
                 // Handle context cancellation gracefully.
@@ -384,10 +389,17 @@ func (h *Humanoid) simulateOvershoot(ctx context.Context, selector string, readD
 
     // Execute the corrective scroll using the JS function with injected deltas.
     var resJSON string
-    // MODERNIZED: Use CallFunctionOn with WithAwaitPromise.
-    err := chromedp.CallFunctionOn(scrollIterationJS, &resJSON, nil, selector, vCorrection, hCorrection, readDensityFactor).
-        WithAwaitPromise(true).
-        Do(ctx)
+
+    // FIXED: Replaced incorrect option with the correct functional option syntax.
+    err := chromedp.CallFunctionOn(
+        scrollIterationJS,
+        &resJSON,
+        func(p *runtime.CallFunctionOnParams) *runtime.CallFunctionOnParams {
+            return p.WithAwaitPromise(true)
+        },
+        nil,
+        selector, vCorrection, hCorrection, readDensityFactor,
+    ).Do(ctx)
 
     if err != nil {
         h.logger.Warn("Humanoid: Overshoot correction failed", zap.Error(err))
@@ -409,10 +421,17 @@ func (h *Humanoid) simulateRegression(ctx context.Context, selector string, read
 
     // Execute the regression scroll.
     var resJSON string
-    // MODERNIZED: Use CallFunctionOn with WithAwaitPromise.
-    err := chromedp.CallFunctionOn(scrollIterationJS, &resJSON, nil, selector, vRegression, hRegression, readDensityFactor).
-        WithAwaitPromise(true).
-        Do(ctx)
+
+    // FIXED: Replaced incorrect option with the correct functional option syntax.
+    err := chromedp.CallFunctionOn(
+        scrollIterationJS,
+        &resJSON,
+        func(p *runtime.CallFunctionOnParams) *runtime.CallFunctionOnParams {
+            return p.WithAwaitPromise(true)
+        },
+        nil,
+        selector, vRegression, hRegression, readDensityFactor,
+    ).Do(ctx)
 
     if err != nil {
         h.logger.Warn("Humanoid: Scroll regression failed", zap.Error(err))

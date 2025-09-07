@@ -6,7 +6,6 @@ import (
 	"math"
 	"time"
 
-	// Requires latest cdproto for input.ButtonLeft, etc.
 	"github.com/chromedp/cdproto/input"
 	"github.com/chromedp/chromedp"
 )
@@ -43,9 +42,8 @@ func (h *Humanoid) IntelligentClick(selector string, field *PotentialField) chro
 			currentPos := h.currentPos
 			h.mu.Unlock()
 
-			// MODERNIZED: Use the standard input.ButtonLeft constant.
-			// This requires the updated cdproto dependency.
-			mouseDownAction := chromedp.MouseEvent(input.MousePressed, currentPos.X, currentPos.Y, chromedp.Button(input.ButtonLeft))
+			// FIXED: Use the string literal "left" as requested.
+			mouseDownAction := chromedp.MouseEvent(input.MousePressed, currentPos.X, currentPos.Y, chromedp.Button("left"))
 			if err := mouseDownAction.Do(ctx); err != nil {
 				return err
 			}
@@ -82,8 +80,8 @@ func (h *Humanoid) IntelligentClick(selector string, field *PotentialField) chro
 			currentPos := h.currentPos
 			h.mu.Unlock()
 
-			// MODERNIZED: Use the standard input.ButtonLeft constant.
-			mouseUpAction := chromedp.MouseEvent(input.MouseReleased, currentPos.X, currentPos.Y, chromedp.Button(input.ButtonLeft))
+			// FIXED: Use the string literal "left" as requested.
+			mouseUpAction := chromedp.MouseEvent(input.MouseReleased, currentPos.X, currentPos.Y, chromedp.Button("left"))
 			if err := mouseUpAction.Do(ctx); err != nil {
 				return err
 			}

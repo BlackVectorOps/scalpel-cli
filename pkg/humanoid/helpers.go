@@ -49,9 +49,7 @@ func (h *Humanoid) getElementBoxBySelector(ctx context.Context, selector string)
 	// Nodes must be a slice of pointers for chromedp.Nodes.
 	var nodes []*cdp.Node
 
-	// In the modern API, `chromedp.WaitVisible` is a standalone Action.
-	// We must sequence WaitVisible and Nodes using chromedp.Tasks.
-    // Note: We use WaitVisible to ensure the element is ready, which often implies scrolling has finished.
+	// Sequence WaitVisible and Nodes using chromedp.Tasks.
 	tasks := chromedp.Tasks{
 		chromedp.WaitVisible(selector, chromedp.ByQuery),
 		chromedp.Nodes(selector, &nodes, chromedp.ByQuery),
@@ -89,7 +87,7 @@ func getElementBox(ctx context.Context, nodeID cdp.NodeID, logger *zap.Logger) (
 
 	maxRetries := 3
 	for i := 0; i < maxRetries; i++ {
-		// Use the modern constructor pattern for low-level DOM commands.
+		// Use the constructor pattern for low-level DOM commands.
 		box, err = dom.GetBoxModel().WithNodeID(nodeID).Do(ctx)
 
 		if err == nil {
@@ -103,7 +101,6 @@ func getElementBox(ctx context.Context, nodeID cdp.NodeID, logger *zap.Logger) (
 		logger.Debug("Humanoid: Failed to get valid BoxModel, retrying...", zap.Int("attempt", i+1), zap.Error(err))
 
 		// Wait before retrying (Exponential backoff).
-		// MODERNIZATION: Use chromedp.Sleep for context awareness.
 		sleepDuration := time.Millisecond * time.Duration(50*math.Pow(2, float64(i)))
 		if err := chromedp.Sleep(sleepDuration).Do(ctx); err != nil {
 			// Context was cancelled during sleep

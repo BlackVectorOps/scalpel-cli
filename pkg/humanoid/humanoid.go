@@ -10,7 +10,6 @@ import (
 
 	"github.com/aquilax/go-perlin"
 	"github.com/chromedp/cdproto/cdp"
-	// Requires latest cdproto
 	"github.com/chromedp/cdproto/input"
 	"github.com/chromedp/cdproto/page"
 	"github.com/chromedp/chromedp"
@@ -123,7 +122,7 @@ func (h *Humanoid) SetButtonState(newState MouseButton, action chromedp.Action) 
 // InitializePosition sets the initial cursor position realistically within the viewport.
 func (h *Humanoid) InitializePosition(ctx context.Context) error {
 	// 1. Get the layout metrics.
-	// MODERNIZED & VERIFIED: Using the modern 7-value return signature required by the latest cdproto.
+	// VERIFIED: Using the modern 7-value return signature.
 	_, _, _, _, cssVisualViewport, _, err := page.GetLayoutMetrics().Do(ctx)
 	if err != nil {
 		h.logger.Warn("Humanoid: failed to get layout metrics", zap.Error(err))

@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 
-	// Requires latest cdproto for input.ButtonLeft
 	"github.com/chromedp/cdproto/input"
 	"github.com/chromedp/chromedp"
 	"go.uber.org/zap"
@@ -53,9 +52,8 @@ func (h *Humanoid) DragAndDrop(startSelector, endSelector string) chromedp.Actio
 			currentPos := h.currentPos
 			h.mu.Unlock()
 
-			// MODERNIZED: Use type-safe constants input.MousePressed and input.ButtonLeft.
-			// This requires the updated cdproto dependency.
-			if err := chromedp.MouseEvent(input.MousePressed, currentPos.X, currentPos.Y, chromedp.Button(input.ButtonLeft)).Do(ctx); err != nil {
+			// FIXED: Use the string literal "left" as requested.
+			if err := chromedp.MouseEvent(input.MousePressed, currentPos.X, currentPos.Y, chromedp.Button("left")).Do(ctx); err != nil {
 				return err
 			}
 
@@ -94,8 +92,8 @@ func (h *Humanoid) DragAndDrop(startSelector, endSelector string) chromedp.Actio
 			currentPos := h.currentPos
 			h.mu.Unlock()
 
-			// MODERNIZED: Use type-safe constants input.MouseReleased and input.ButtonLeft.
-			if err := chromedp.MouseEvent(input.MouseReleased, currentPos.X, currentPos.Y, chromedp.Button(input.ButtonLeft)).Do(ctx); err != nil {
+			// FIXED: Use the string literal "left" as requested.
+			if err := chromedp.MouseEvent(input.MouseReleased, currentPos.X, currentPos.Y, chromedp.Button("left")).Do(ctx); err != nil {
 				return err
 			}
 

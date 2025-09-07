@@ -70,6 +70,7 @@ func (h *Humanoid) Hesitate(duration time.Duration) chromedp.Action {
 			})
 			h.mu.Unlock()
 
+            // Use input.MouseMoved constant for the event type.
 			if err := chromedp.MouseEvent(input.MouseMoved, targetPos.X, targetPos.Y).Do(ctx); err != nil {
 				return err
 			}
