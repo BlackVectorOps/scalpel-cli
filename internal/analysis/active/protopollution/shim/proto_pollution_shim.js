@@ -1,4 +1,4 @@
-// -- pkg/analysis/active/protopollution/analyzer.go --
+// internal/analysis/active/protopollution/analyzer.go 
 package protopollution
 
 import (

@@ -1,4 +1,4 @@
-// -- cmd/scalpel-cli/report.go --
+// -- cmd/scalpel-cli/report.go 
 package cmd
 
 import (
@@ -7,10 +7,10 @@ import (
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
 
-	"github.com/xkilldash9x/scalpel-cli/pkg/config"
-	"github.com/xkilldash9x/scalpel-cli/pkg/observability"
-	"github.com/xkilldash9x/scalpel-cli/pkg/results"
-	"github.com/xkilldash9x/scalpel-cli/pkg/store"
+	"github.com/xkilldash9x/scalpel-cli/internal/config"
+	"github.com/xkilldash9x/scalpel-cli/internal/observability"
+	"github.com/xkilldash9x/scalpel-cli/internal/results"
+	"github.com/xkilldash9x/scalpel-cli/internal/store"
 )
 
 func newReportCmd() *cobra.Command {

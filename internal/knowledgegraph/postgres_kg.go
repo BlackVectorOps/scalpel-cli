@@ -1,3 +1,4 @@
+// internal/knowledgegraph/postgres_kg.go
 package knowledgegraph
 
 import (

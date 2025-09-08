@@ -1,4 +1,4 @@
-// internal/worker/adapters/agent_adapter.go --
+// internal/worker/adapters/agent_adapter.go
 package adapters
 
 import (

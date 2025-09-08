@@ -1,3 +1,4 @@
+// internal/orchestrator/orchestrator.go
 package orchestrator
 
 import (
@@ -7,9 +8,9 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/xkilldash9x/scalpel-cli/pkg/config"
+	"github.com/xkilldash9x/scalpel-cli/internal/config"
 	// CORRECTED: All dependencies are now abstract interfaces.
-	"github.com/xkilldash9x/scalpel-cli/pkg/interfaces"
+	"github.com/xkilldash9x/scalpel-cli/internal/interfaces"
 )
 
 // Orchestrator manages the high-level lifecycle of a scan.
