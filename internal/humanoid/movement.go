@@ -1,4 +1,4 @@
-// internal/humanoid/movement.go
+// Filename: internal/humanoid/movement.go
 package humanoid
 
 import (
@@ -6,9 +6,7 @@ import (
 	"fmt"
 	"math"
 
-	// Required for BoxModel (necessary low-level access)
 	"github.com/chromedp/cdproto/dom"
-	// Required for input.MouseButton type for simulateTrajectory
 	"github.com/chromedp/cdproto/input"
 	"github.com/chromedp/chromedp"
 	"go.uber.org/zap"
@@ -23,7 +21,7 @@ func (h *Humanoid) MoveTo(selector string, field *PotentialField) chromedp.Actio
 		// 1. Preparation Phase: Scroll, locate, and plan.
 		chromedp.ActionFunc(func(ctx context.Context) error {
 			// Moving is a high intensity action.
-			//h.updateFatigue(1.0) // This function does not exist in the provided code
+			h.updateFatigue(1.0)
 
 			// 1a. Ensure the target is visible (Scrolling).
 			if err := h.intelligentScroll(selector).Do(ctx); err != nil {
@@ -32,9 +30,9 @@ func (h *Humanoid) MoveTo(selector string, field *PotentialField) chromedp.Actio
 			}
 
 			// 1b. Cognitive pause (Visual search and planning after scroll).
-			// if err := h.CognitivePause(150, 50).Do(ctx); err != nil { // This function does not exist in the provided code
-			// 	return err
-			// }
+			if err := h.CognitivePause(150, 50).Do(ctx); err != nil {
+				return err
+			}
 
 			// 1c. Locate the target element geometry.
 			box, err := h.getElementBoxBySelector(ctx, selector)
