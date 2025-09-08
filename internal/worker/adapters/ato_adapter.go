@@ -22,23 +22,38 @@ type ATOAdapter struct {
 	httpClient *http.Client
 }
 
+// NewATOAdapter creates a new ATOAdapter with a default HTTP client.
 func NewATOAdapter() *ATOAdapter {
-	return &ATOAdapter{
-		BaseAnalyzer: core.NewBaseAnalyzer("ATO Adapter (Password Spraying)", core.TypeActive),
-		httpClient: &http.Client{
+	defaultClient := &http.Client{
 			Timeout:       15 * time.Second,
 			CheckRedirect: func(req *http.Request, via []*http.Request) error { return http.ErrUseLastResponse },
-		},
+	}
+
+	return &ATOAdapter{
+		BaseAnalyzer: core.NewBaseAnalyzer("ATO Adapter (Password Spraying)", core.TypeActive),
+		httpClient: defaultClient,
+	}
+}
+
+// SetHttpClient allows overriding the default HTTP client, primarily for testing.
+func (a *ATOAdapter) SetHttpClient(client *http.Client) {
+	if client != nil {
+		a.httpClient = client
 	}
 }
 
 func (a *ATOAdapter) Analyze(ctx context.Context, analysisCtx *core.AnalysisContext) error {
+	if a.httpClient == nil {
+		return fmt.Errorf("critical error: HTTP client not initialized in ATOAdapter")
+	}
 	analysisCtx.Logger.Info("Starting active password spraying attack.")
 
 	// Use the specific parameter struct for type safety.
 	params, ok := analysisCtx.Task.Parameters.(schemas.ATOTaskParams)
 	if !ok {
-		return fmt.Errorf("invalid parameters type for ATO task; expected schemas.ATOTaskParams")
+		actualType := fmt.Sprintf("%T", analysisCtx.Task.Parameters)
+		analysisCtx.Logger.Error("Invalid parameter type assertion", zap.String("expected", "schemas.ATOTaskParams"), zap.String("actual", actualType))
+		return fmt.Errorf("invalid parameters type for ATO task; expected schemas.ATOTaskParams, got %s", actualType)
 	}
 
 	if len(params.Usernames) == 0 {
@@ -48,7 +63,14 @@ func (a *ATOAdapter) Analyze(ctx context.Context, analysisCtx *core.AnalysisCont
 	payloads := ato.GenerateSprayingPayloads(params.Usernames)
 	analysisCtx.Logger.Info("Generated login payloads for spraying attack", zap.Int("payload_count", len(payloads)))
 
+	// Throttle requests to avoid overwhelming the target.
+	throttle := time.Tick(200 * time.Millisecond)
+
 	for _, attempt := range payloads {
+		// Wait for throttle tick.
+		<-throttle
+		
+		// Check for cancellation signal before each attempt.
 		select {
 		case <-ctx.Done():
 			analysisCtx.Logger.Warn("ATO analysis cancelled by context.", zap.Error(ctx.Err()))
@@ -56,7 +78,6 @@ func (a *ATOAdapter) Analyze(ctx context.Context, analysisCtx *core.AnalysisCont
 		default:
 		}
 		a.performLoginAttempt(ctx, analysisCtx, attempt)
-		time.Sleep(200 * time.Millisecond)
 	}
 	return nil
 }
@@ -75,17 +96,27 @@ func (a *ATOAdapter) performLoginAttempt(ctx context.Context, analysisCtx *core.
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "evolution-scalpel-ATO-Scanner/1.0")
+	req.Header.Set("User-Agent", "evolution-scalpel-ATO-Scanner/1.1")
 
 	startTime := time.Now()
 	resp, err := a.httpClient.Do(req)
 	if err != nil {
+		// Check for cancellation before logging network errors.
+		if ctx.Err() != nil {
+			return
+		}
 		logger.Warn("HTTP request failed during login attempt", zap.Error(err))
 		return
 	}
 	defer resp.Body.Close()
 	responseTimeMs := time.Since(startTime).Milliseconds()
-	bodyBytes, _ := io.ReadAll(resp.Body)
+
+	// Read the body, limiting the size (e.g., 1MB) to prevent memory exhaustion.
+	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
+	if err != nil {
+		logger.Warn("Failed to read response body", zap.Error(err))
+		// Proceed with analysis based on status code even if body reading failed.
+	}
 
 	result := ato.AnalyzeResponse(attempt, resp.StatusCode, string(bodyBytes), responseTimeMs)
 
@@ -102,12 +133,25 @@ func (a *ATOAdapter) performLoginAttempt(ctx context.Context, analysisCtx *core.
 }
 
 func (a *ATOAdapter) createAtoFinding(analysisCtx *core.AnalysisContext, vuln string, severity schemas.Severity, cwe, desc string, result ato.LoginResponse) {
-	evidence, _ := json.Marshal(map[string]interface{}{
-		"attempt":      result.Attempt,
+	// Truncate evidence if necessary.
+	responseBodyEvidence := result.ResponseBody
+	if len(responseBodyEvidence) > 2048 {
+		responseBodyEvidence = responseBodyEvidence[:2048] + "... [TRUNCATED]"
+	}
+	
+	evidenceMap := map[string]interface{}{
+		"username":      result.Attempt.Username,
+		// Password intentionally omitted from evidence logs.
 		"statusCode":   result.StatusCode,
-		"responseBody": result.ResponseBody,
+		"responseBody": responseBodyEvidence,
 		"detail":       result.EnumerationDetail,
-	})
+		"responseTimeMs": result.ResponseTimeMs,
+	}
+	evidence, err := json.Marshal(evidenceMap)
+	if err != nil {
+		analysisCtx.Logger.Error("Failed to marshal ATO evidence", zap.Error(err))
+		evidence = []byte(fmt.Sprintf(`{"error": "failed to marshal evidence: %s"}`, err.Error()))
+	}
 
 	finding := schemas.Finding{
 		ID:             uuid.New().String(),
@@ -119,7 +163,7 @@ func (a *ATOAdapter) createAtoFinding(analysisCtx *core.AnalysisContext, vuln st
 		Severity:       severity,
 		Description:    desc,
 		Evidence:       evidence,
-		Recommendation: "Implement rate limiting, account lockouts, and CAPTCHA. Ensure login responses are generic and do not disclose whether a username or password was correct.",
+		Recommendation: "Implement rate limiting, account lockouts, and CAPTCHA. Ensure login responses are generic and do not disclose whether a username or password was correct. Implement MFA.",
 		CWE:            cwe,
 	}
 	analysisCtx.AddFinding(finding)

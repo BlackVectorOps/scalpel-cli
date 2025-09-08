@@ -2,6 +2,9 @@ package schemas
 
 import "time"
 
+// -- Core Graph Models --
+// These types represent the fully-formed entities as they exist in the graph database.
+
 // Node represents a fundamental entity in the knowledge graph.
 type Node struct {
 	ID         string                 `json:"id"`
@@ -25,11 +28,8 @@ type Edge struct {
 	Properties map[string]interface{} `json:"properties"`
 }
 
-// KGUpdates represents the interconnected data discovered during analysis.
-type KGUpdates struct {
-	Nodes []Node `json:"nodes"`
-	Edges []Edge `json:"edges"`
-}
+// -- Graph Input/Update Models --
+// These types are used specifically as inputs for creating or updating graph elements.
 
 // NodeInput is used for creating or updating a node for the Knowledge Graph.
 type NodeInput struct {
@@ -54,3 +54,15 @@ type RelationshipType string
 
 // Properties is a generic map for storing attributes.
 type Properties map[string]interface{}
+
+// -- Graph Query/Export Models --
+// These types are used to fulfill the KnowledgeGraph interface contracts.
+
+// Query is a placeholder for graph query structures.
+type Query struct{}
+
+// NeighborsResult is a placeholder for the results of a neighbor query.
+type NeighborsResult struct{}
+
+// GraphExport is a placeholder for a full graph export.
+type GraphExport struct{}

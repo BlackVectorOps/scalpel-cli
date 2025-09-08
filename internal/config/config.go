@@ -7,7 +7,6 @@ package config
 
 import (
 	"fmt"
-	"strings"
 	"sync"
 	"time"
 

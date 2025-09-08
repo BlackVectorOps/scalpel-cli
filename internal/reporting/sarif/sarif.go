@@ -1,8 +1,7 @@
-// internal/reporting/sarif/sarif.go
 package sarif
 
 // This file defines the Go structs for the SARIF 2.1.0 standard.
-// NOTE: This is a simplified version containing only the fields used by your reporter.
+// Pointers are used for optional fields. Required fields use value types.
 
 type Log struct {
 	Version string `json:"version"`
@@ -19,15 +18,16 @@ type Tool struct {
 	Driver *ToolComponent `json:"driver"`
 }
 
+// ToolComponent describes the tool that produced the results. Pointers are used for optional bits.
 type ToolComponent struct {
 	Name           string                 `json:"name"`
-	Version        string                 `json:"version,omitempty"`
-	InformationURI string                 `json:"informationUri,omitempty"`
+	Version        *string                `json:"version,omitempty"`
+	InformationURI *string                `json:"informationUri,omitempty"`
 	Rules          []*ReportingDescriptor `json:"rules,omitempty"`
 }
 
 type ReportingDescriptor struct {
-	ID               string                    `json:"id"` // Required, changed to value type
+	ID               string                    `json:"id"` // Required
 	Name             *string                   `json:"name,omitempty"`
 	ShortDescription *MultiformatMessageString `json:"shortDescription,omitempty"`
 	FullDescription  *MultiformatMessageString `json:"fullDescription,omitempty"`
@@ -36,7 +36,7 @@ type ReportingDescriptor struct {
 }
 
 type Result struct {
-	RuleID    string      `json:"ruleId"` // Required, changed to value type
+	RuleID    string      `json:"ruleId"` // Required
 	Message   *Message    `json:"message"`
 	Level     Level       `json:"level,omitempty"`
 	Locations []*Location `json:"locations,omitempty"`

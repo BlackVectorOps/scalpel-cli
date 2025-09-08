@@ -114,7 +114,7 @@ func (h *Harvester) eventListener(ev interface{}) {
 
 	// Dispatch event based on type.
 	switch e := ev.(type) {
-	// --- Network Events ---
+	// -- Network Events --
 	case *network.EventRequestWillBeSent:
 		h.handleRequestWillBeSent(e)
 	case *network.EventResponseReceived:
@@ -124,13 +124,13 @@ func (h *Harvester) eventListener(ev interface{}) {
 	case *network.EventLoadingFailed:
 		h.handleLoadingFailed(e)
 
-	// --- Page Events (for HAR timings) ---
+	// -- Page Events (for HAR timings) --
 	case *page.EventLoadEventFired:
 		h.pageLoadEvent = e
 	case *page.EventDomContentEventFired:
 		h.domContentEvent = e
 
-	// --- Runtime/Console Events ---
+	// -- Runtime/Console Events --
 	case *runtime.EventConsoleAPICalled:
 		h.handleConsoleAPICalled(e)
 	case *runtime.EventExceptionThrown:
@@ -138,7 +138,7 @@ func (h *Harvester) eventListener(ev interface{}) {
 	}
 }
 
-// --- Network Event Handlers (Must be called under h.mu lock) ---
+// -- Network Event Handlers (Must be called under h.mu lock) --
 
 func (h *Harvester) handleRequestWillBeSent(e *network.EventRequestWillBeSent) {
 	// Handle redirects: The new request reuses the RequestID.
@@ -184,7 +184,7 @@ func (h *Harvester) handleLoadingFailed(e *network.EventLoadingFailed) {
 	}
 }
 
-// --- Console Event Handlers (Must be called under h.mu lock) ---
+// -- Console Event Handlers (Must be called under h.mu lock) --
 
 func (h *Harvester) handleConsoleAPICalled(e *runtime.EventConsoleAPICalled) {
 	logEntry := schemas.ConsoleLog{
@@ -241,7 +241,7 @@ func (h *Harvester) formatConsoleArgs(args []*runtime.RemoteObject) string {
 	return strings.Join(parts, " ")
 }
 
-// --- Body Fetching ---
+// -- Body Fetching --
 
 // fetchBodies retrieves the response bodies for captured requests concurrently.
 func (h *Harvester) fetchBodies(ctx context.Context) {
@@ -319,7 +319,7 @@ func (h *Harvester) fetchBodies(ctx context.Context) {
 	wg.Wait()
 }
 
-// --- HAR Generation ---
+// -- HAR Generation --
 
 // generateHAR constructs the HAR structure from the collected request data.
 func (h *Harvester) generateHAR() *har.HAR {

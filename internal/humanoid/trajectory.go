@@ -168,9 +168,17 @@ func (h *Humanoid) simulateTrajectory(ctx context.Context, start, end Vector2D, 
 		// Dispatch the mouse movement event.
 		dispatchMouse := input.DispatchMouseEvent(input.MouseMoved, finalPerturbedPoint.X, finalPerturbedPoint.Y)
 
+<<<<<<< HEAD
 		if buttonState != "none" {
 			dispatchMouse = dispatchMouse.WithButton(buttonState)
 			var buttons int64
+=======
+		// FIXED: Use the string literal "none" for comparison as requested in the input file context.
+		if buttonState != "none" {
+			dispatchMouse = dispatchMouse.WithButton(buttonState)
+			var buttons int64
+			// FIXED: Use string literals ("left", "right", "middle") for comparison.
+>>>>>>> fc7e743 (	modified:   ../../../../../api/schemas/graph.go)
 			switch buttonState {
 			case "left":
 				buttons = 1

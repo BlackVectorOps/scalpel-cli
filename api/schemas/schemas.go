@@ -2,10 +2,11 @@ package schemas
 
 import (
 	"encoding/json"
-	"time"
 	"fmt"
+	"time"
 )
 
+// -- Task and Finding Definitions --
 
 // TaskType defines the valid types of tasks the engine can process.
 type TaskType string
@@ -25,10 +26,10 @@ const (
 type Severity string
 
 const (
-	SeverityCritical    Severity = "CRITICAL"
-	SeverityHigh        Severity = "HIGH"
-	SeverityMedium      Severity = "MEDIUM"
-	SeverityLow         Severity = "LOW"
+	SeverityCritical      Severity = "CRITICAL"
+	SeverityHigh          Severity = "HIGH"
+	SeverityMedium        Severity = "MEDIUM"
+	SeverityLow           Severity = "LOW"
 	SeverityInformational Severity = "INFORMATIONAL"
 )
 
@@ -67,6 +68,31 @@ type Finding struct {
 	CWE            string          `json:"cwe,omitempty"`
 }
 
+// -- Knowledge Graph Definitions --
+// CORRECTED: Added KGNode and KGEdge to resolve the undefined type error.
+
+// KGNode represents a node in the knowledge graph.
+type KGNode struct {
+	ID         string                 `json:"id"`
+	Type       string                 `json:"type"`
+	Label      string                 `json:"label"`
+	Properties map[string]interface{} `json:"properties"`
+}
+
+// KGEdge represents a directed edge between two nodes in the knowledge graph.
+type KGEdge struct {
+	Source     string                 `json:"source"`
+	Target     string                 `json:"target"`
+	Label      string                 `json:"label"`
+	Properties map[string]interface{} `json:"properties"`
+}
+
+// KGUpdates represents a batch of nodes and edges to be added to the knowledge graph.
+type KGUpdates struct {
+	Nodes []KGNode `json:"nodes"`
+	Edges []KGEdge `json:"edges"`
+}
+
 // -- Task Parameter Deserialization Logic --
 
 // paramsFactory is a function type that returns a pointer to a new instance of a parameter struct.
@@ -74,17 +100,18 @@ type paramsFactory func() interface{}
 
 // paramsRegistry maps TaskTypes to their corresponding factory functions.
 var paramsRegistry = map[TaskType]paramsFactory{
-	TaskAgentMission:        func() interface{} { return &AgentMissionParams{} },
-	TaskAnalyzeWebPageTaint: func() interface{} { return &TaintTaskParams{} },
+	TaskAgentMission:          func() interface{} { return &AgentMissionParams{} },
+	TaskAnalyzeWebPageTaint:   func() interface{} { return &TaintTaskParams{} },
 	TaskAnalyzeWebPageProtoPP: func() interface{} { return &ProtoPollutionTaskParams{} },
-	TaskTestAuthATO:         func() interface{} { return &ATOTaskParams{} },
-	TaskTestAuthIDOR:        func() interface{} { return &IDORTaskParams{} },
-	TaskAnalyzeJWT:          func() interface{} { return &JWTTaskParams{} },
-	TaskTestRaceCondition:   func() interface{} { return &RaceConditionTaskParams{} },
-	TaskAnalyzeHeaders:      func() interface{} { return &HeadersTaskParams{} },
+	TaskTestAuthATO:           func() interface{} { return &ATOTaskParams{} },
+	TaskTestAuthIDOR:          func() interface{} { return &IDORTaskParams{} },
+	TaskAnalyzeJWT:            func() interface{} { return &JWTTaskParams{} },
+	TaskTestRaceCondition:     func() interface{} { return &RaceConditionTaskParams{} },
+	TaskAnalyzeHeaders:        func() interface{} { return &HeadersTaskParams{} },
 }
 
 // UnmarshalJSON provides custom deserialization logic for the Task struct.
+// This allows us to have strongly-typed parameter structs based on the TaskType.
 func (t *Task) UnmarshalJSON(data []byte) error {
 	type TaskAlias Task
 	aux := struct {
@@ -98,15 +125,19 @@ func (t *Task) UnmarshalJSON(data []byte) error {
 		return fmt.Errorf("failed to unmarshal base task structure: %w", err)
 	}
 
+	// If there are no parameters, we're done.
 	if len(aux.Parameters) == 0 || string(aux.Parameters) == "null" {
 		return nil
 	}
 
+	// Look up the correct parameter struct type in our registry.
 	factory, ok := paramsRegistry[t.Type]
 	if !ok {
+		// No specific struct for this task type, so we leave Parameters as raw JSON.
 		return nil
 	}
 
+	// Create a new instance of the parameter struct.
 	params := factory()
 	if err := json.Unmarshal(aux.Parameters, params); err != nil {
 		return fmt.Errorf("failed to unmarshal parameters for task type %s: %w", t.Type, err)
@@ -116,7 +147,3 @@ func (t *Task) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// -- Placeholder Structs for Interface Contracts --
-type Query struct{}
-type NeighborsResult struct{}
-type GraphExport struct{}
