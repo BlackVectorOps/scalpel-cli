@@ -1,4 +1,4 @@
-// pkg/analysis/active/timeslip/types.go
+// internal/analysis/active/timeslip/types.go
 package timeslip
 
 import (
@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/xkilldash9x/scalpel-cli/pkg/network"
+	"github.com/xkilldash9x/scalpel-cli/internal/network"
 )
 
 // Define custom error types for better classification.
