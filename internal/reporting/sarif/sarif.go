@@ -1,4 +1,4 @@
-// -- pkg/reporting/sarif/sarif.go --
+// internal/reporting/sarif/sarif.go
 package sarif
 
 // This file defines the Go structs for the SARIF 2.1.0 standard.

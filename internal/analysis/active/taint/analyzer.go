@@ -1,4 +1,4 @@
-// -- pkg/analysis/active/taint/analyzer.go --
+// internal/analysis/active/taint/analyzer.go
 package taint
 
 import (

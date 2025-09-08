@@ -1,4 +1,4 @@
-// -- pkg/analysis/auth/ato/analyzer.go --
+// internal/analysis/auth/ato/analyzer.go 
 package ato
 
 import (

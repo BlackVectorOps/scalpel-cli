@@ -1,4 +1,4 @@
-// -- pkg/llmclient/factory.go --
+// internal/llmclient/factory.go
 package llmclient
 
 import (
@@ -6,9 +6,9 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/xkilldash9x/scalpel-cli/pkg/config"
+	"github.com/xkilldash9x/scalpel-cli/internal/config"
 	// Import the interface from the central interfaces package to break the cycle.
-	"github.com/xkilldash9x/scalpel-cli/pkg/interfaces"
+	"github.com/xkilldash9x/scalpel-cli/internal/interfaces"
 )
 
 // NewClient is a factory function that creates an LLMClient based on the configuration.

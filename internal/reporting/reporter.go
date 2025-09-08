@@ -1,4 +1,4 @@
-// -- pkg/reporting/reporter.go --
+// internal/reporting/reporter.go
 package reporting
 
 import (

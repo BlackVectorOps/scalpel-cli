@@ -1,4 +1,4 @@
-// -- pkg/network/proxy.go --
+// internal/network/proxy.go 
 package network
 
 import (
@@ -16,7 +16,7 @@ import (
 	"github.com/elazarl/goproxy"
 	"go.uber.org/zap"
 
-	"github.com/xkilldash9x/scalpel-cli/pkg/observability"
+	"github.com/xkilldash9x/scalpel-cli/internal/observability"
 )
 
 // Global lock for protecting global goproxy state modification.

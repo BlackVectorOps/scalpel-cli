@@ -1,3 +1,4 @@
+// internal/knowledgegraph/knowledgegraph.go
 package knowledgegraph
 
 import (

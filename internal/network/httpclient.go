@@ -1,4 +1,4 @@
-// -- pkg/network/httpclient.go --
+// internal/network/httpclient.go
 package network
 
 import (
@@ -12,7 +12,7 @@ import (
 	"go.uber.org/zap"
 	"golang.org/x/net/http2"
 
-	"github.com/xkilldash9x/scalpel-cli/pkg/observability"
+	"github.com/xkilldash9x/scalpel-cli/internal/observability"
 )
 
 // Constants for default optimized TCP/HTTP settings.

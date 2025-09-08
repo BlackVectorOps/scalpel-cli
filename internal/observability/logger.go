@@ -1,4 +1,4 @@
-// -- pkg/observability/logger.go --
+// internal/observability/logger.go 
 package observability
 
 import (
@@ -8,7 +8,7 @@ import (
 	"sync"
 	"sync/atomic" // Import atomic
 
-	"github.com/xkilldash9x/scalpel-cli/pkg/config"
+	"github.com/xkilldash9x/scalpel-cli/internal/config"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"gopkg.in/natefinch/lumberjack.v2"

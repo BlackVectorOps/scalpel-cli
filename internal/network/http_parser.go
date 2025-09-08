@@ -1,4 +1,4 @@
-// File:         pkg/network/http_parser.go
+// File:         internal/network/http_parser.go
 // Description:  This file contains a specialized parser for HTTP/1.1 pipelined responses,
 //               which is a critical component for the TimeSlip race condition analyzer.
 //
@@ -13,7 +13,7 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/xkilldash9x/scalpel-cli/pkg/observability"
+	"github.com/xkilldash9x/scalpel-cli/internal/observability"
 )
 
 // Optimization: Define a larger buffer size for parsing potentially large pipelined responses.

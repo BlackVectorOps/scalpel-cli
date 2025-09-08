@@ -1,3 +1,4 @@
+// cmd/scan.go
 package cmd
 
 import (
@@ -13,18 +14,18 @@ import (
 	"github.com/spf13/viper"
 	"go.uber.org/zap"
 
-	"github.com/xkilldash9x/scalpel-cli/pkg/agent"
-	"github.com/xkilldash9x/scalpel-cli/pkg/browser"
-	"github.com/xkilldash9x/scalpel-cli/pkg/config"
-	"github.com/xkilldash9x/scalpel-cli/pkg/discovery"
-	"github.com/xkilldash9x/scalpel-cli/pkg/engine"
-	"github.com/xkilldash9x/scalpel-cli/pkg/interfaces"
-	"github.com/xkilldash9x/scalpel-cli/pkg/knowledgegraph"
-	"github.com/xkilldash9x/scalpel-cli/pkg/llmclient"
-	"github.com/xkilldash9x/scalpel-cli/pkg/observability"
-	"github.com/xkilldash9x/scalpel-cli/pkg/orchestrator"
-	"github.com/xkilldash9x/scalpel-cli/pkg/reporting"
-	"github.com/xkilldash9x/scalpel-cli/pkg/store"
+	"github.com/xkilldash9x/scalpel-cli/internal/agent"
+	"github.com/xkilldash9x/scalpel-cli/internal/browser"
+	"github.com/xkilldash9x/scalpel-cli/internal/config"
+	"github.com/xkilldash9x/scalpel-cli/internal/discovery"
+	"github.com/xkilldash9x/scalpel-cli/internal/engine"
+	"github.com/xkilldash9x/scalpel-cli/internal/interfaces"
+	"github.com/xkilldash9x/scalpel-cli/internal/knowledgegraph"
+	"github.com/xkilldash9x/scalpel-cli/internal/llmclient"
+	"github.com/xkilldash9x/scalpel-cli/internal/observability"
+	"github.com/xkilldash9x/scalpel-cli/internal/orchestrator"
+	"github.com/xkilldash9x/scalpel-cli/internal/reporting"
+	"github.com/xkilldash9x/scalpel-cli/internal/store"
 )
 
 func newScanCmd() *cobra.Command {

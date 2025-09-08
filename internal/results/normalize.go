@@ -1,3 +1,4 @@
+// internal/results/normalize.go
 package results
 
 import "github.com/xkilldash9x/scalpel-cli/api/schemas"

@@ -1,4 +1,4 @@
-// -- pkg/network/dialer.go --
+// internal/network/dialer.go
 package network
 
 import (

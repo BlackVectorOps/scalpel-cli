@@ -1,4 +1,4 @@
-// -- pkg/worker/worker.go --
+// internal/worker/worker.go 
 package worker
 
 import (

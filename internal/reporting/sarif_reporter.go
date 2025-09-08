@@ -1,4 +1,4 @@
-// -- pkg/reporting/sarif_reporter.go --
+// internal/reporting/sarif_reporter.go 
 package reporting
 
 import (

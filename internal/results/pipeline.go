@@ -1,3 +1,4 @@
+// internal/results/pipeline.go
 package results
 
 import (

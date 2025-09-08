@@ -1,4 +1,4 @@
-// -- pkg/analysis/active/timeslip/analyzer.go --
+//  internal/analysis/active/timeslip/analyzer.go --
 package timeslip
 
 import (
@@ -12,9 +12,9 @@ import (
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 
-	"github.com/xkilldash9x/scalpel-cli/pkg/analysis/core"
-	"github.com/xkilldash9x/scalpel-cli/pkg/observability"
-	"github.com/xkilldash9x/scalpel-cli/pkg/schemas"
+	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
+	"github.com/xkilldash9x/scalpel-cli/internal/observability"
+	"github.com/xkilldash9x/scalpel-cli/internal/schemas"
 )
 
 // Analyzer orchestrates the TimeSlip module, managing strategy execution and result analysis.

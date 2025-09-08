@@ -1,4 +1,4 @@
-// internal/worker/adapters/reporter.go --
+// internal/worker/adapters/reporter.go
 package adapters
 
 import (

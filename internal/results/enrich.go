@@ -1,4 +1,4 @@
-// -- pkg/results/enrich.go --
+// internal/results/enrich.go
 package results
 
 import (

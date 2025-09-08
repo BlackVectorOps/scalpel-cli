@@ -1,4 +1,4 @@
-// File:         pkg/engine/engine.go
+// File:         internal/engine/engine.go
 // Description:  This file contains the core task engine, refactored for graceful shutdown,
 //               concurrency safety, and correct context propagation.
 //
