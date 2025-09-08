@@ -29,20 +29,20 @@ const (
 // Humanoid manages the state and execution of human-like interactions.
 type Humanoid struct {
 	// -- Configuration and State --
-	baseConfig         Config
-	dynamicConfig      Config
-	logger             *zap.Logger
-	rng                *rand.Rand
-	lastActionTime     time.Time
-	fatigueLevel       float64 // Tracks user fatigue
+	baseConfig    Config
+	dynamicConfig Config
+	logger        *zap.Logger
+	rng           *rand.Rand
+	lastActionTime  time.Time
+	fatigueLevel  float64 // Tracks user fatigue
 
 	// -- Mouse and Position State --
-	mu                   sync.Mutex    // Protects position and button state
-	currentPos           Vector2D      // The current mouse coordinates
-	currentButtonState   MouseButton   // This field was likely already present
-	lastMovementDistance float64       // ADDED: Tracks the distance of the last MoveTo action
-	noiseX               *perlin.Perlin
-	noiseY               *perlin.Perlin
+	mu                 sync.Mutex  // Protects position and button state
+	currentPos         Vector2D    // The current mouse coordinates
+	currentButtonState MouseButton   // This field was likely already present
+	lastMovementDistance float64     // ADDED: Tracks the distance of the last MoveTo action
+	noiseX             *perlin.Perlin
+	noiseY             *perlin.Perlin
 
 	// -- Browser Interaction --
 	browserContextID cdp.BrowserContextID
@@ -79,17 +79,17 @@ func NewWithExecutor(config Config, logger *zap.Logger, browserContextID cdp.Bro
 	alpha, beta, n := 2.0, 2.0, int32(3)
 
 	h := &Humanoid{
-		baseConfig:         config,
-		dynamicConfig:      config, // Start with the base config
-		browserContextID:   browserContextID,
-		logger:             logger,
-		rng:                rng,
-		lastActionTime:     time.Now(),
+		baseConfig:       config,
+		dynamicConfig:    config, // Start with the base config
+		browserContextID: browserContextID,
+		logger:           logger,
+		rng:              rng,
+		lastActionTime:   time.Now(),
 		currentButtonState: MouseButtonNone,
-		noiseX:             perlin.NewPerlin(alpha, beta, n, seed),
-		noiseY:             perlin.NewPerlin(alpha, beta, n, seed+1), // Offset seed for Y noise
-		currentPos:         Vector2D{},                               // Explicitly initialize the position vector
-		executor:           executor,
+		noiseX:           perlin.NewPerlin(alpha, beta, n, seed),
+		noiseY:           perlin.NewPerlin(alpha, beta, n, seed+1), // Offset seed for Y noise
+		currentPos:       Vector2D{},                               // Explicitly initialize the position vector
+		executor:         executor,
 	}
 
 	return h
@@ -157,8 +157,4 @@ func (h *Humanoid) InitializePosition(ctx context.Context) error {
 	// REFACTORED: Use the executor.
 	action := chromedp.MouseEvent(input.MouseMoved, startX, startY)
 	return h.executor.ExecuteAction(ctx, action)
-<<<<<<< HEAD
 }
-=======
-}
->>>>>>> fc7e743 (	modified:   ../../../../../api/schemas/graph.go)

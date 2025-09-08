@@ -6,9 +6,8 @@ import (
 	"math"
 	"time"
 
-	// CRITICAL: Low-level input access is fundamentally required for high-fidelity simulation.
 	"github.com/chromedp/cdproto/input"
-	// NOTE: The direct dependency on `chromedp` is removed from this file's logic.
+	"github.com/chromedp/chromedp"
 	"go.uber.org/zap"
 )
 
@@ -80,21 +79,8 @@ func (h *Humanoid) generateIdealPath(start, end Vector2D, field *PotentialField,
 	return path
 }
 
-// applyGaussianNoise applies a small, random offset to a point.
-// This function was not provided but is called in simulateTrajectory, so a plausible implementation is added.
-func (h *Humanoid) applyGaussianNoise(point Vector2D) Vector2D {
-	h.mu.Lock()
-	stdDev := h.dynamicConfig.GaussianNoiseStdDev
-	rng := h.rng
-	h.mu.Unlock()
-
-	offsetX := rng.NormFloat64() * stdDev
-	offsetY := rng.NormFloat64() * stdDev
-	return Vector2D{X: point.X + offsetX, Y: point.Y + offsetY}
-}
-
 // simulateTrajectory moves the mouse along a generated path, dispatching events.
-// This function is now decoupled from chromedp and uses the injected h.executor.
+// This function requires immediate execution and precise timing, utilizing the low-level cdproto/input API.
 func (h *Humanoid) simulateTrajectory(ctx context.Context, start, end Vector2D, field *PotentialField, buttonState input.MouseButton) (Vector2D, error) {
 	dist := start.Dist(end)
 	h.mu.Lock()
@@ -134,8 +120,7 @@ func (h *Humanoid) simulateTrajectory(ctx context.Context, start, end Vector2D, 
 		// Use context-aware sleep to adhere to Fitts's law timing.
 		sleepDur := time.Until(currentTime)
 		if sleepDur > 0 {
-			// REFACTORED: Use the executor interface instead of a direct chromedp call.
-			if err := h.executor.Sleep(ctx, sleepDur); err != nil {
+			if err := chromedp.Sleep(sleepDur).Do(ctx); err != nil {
 				return velocity, err
 			}
 		}
@@ -168,23 +153,15 @@ func (h *Humanoid) simulateTrajectory(ctx context.Context, start, end Vector2D, 
 		// Dispatch the mouse movement event.
 		dispatchMouse := input.DispatchMouseEvent(input.MouseMoved, finalPerturbedPoint.X, finalPerturbedPoint.Y)
 
-<<<<<<< HEAD
-		if buttonState != "none" {
+		if buttonState != input.ButtonNone {
 			dispatchMouse = dispatchMouse.WithButton(buttonState)
 			var buttons int64
-=======
-		// FIXED: Use the string literal "none" for comparison as requested in the input file context.
-		if buttonState != "none" {
-			dispatchMouse = dispatchMouse.WithButton(buttonState)
-			var buttons int64
-			// FIXED: Use string literals ("left", "right", "middle") for comparison.
->>>>>>> fc7e743 (	modified:   ../../../../../api/schemas/graph.go)
 			switch buttonState {
-			case "left":
+			case input.ButtonLeft:
 				buttons = 1
-			case "right":
+			case input.ButtonRight:
 				buttons = 2
-			case "middle":
+			case input.ButtonMiddle:
 				buttons = 4
 			}
 			if buttons > 0 {
@@ -192,8 +169,8 @@ func (h *Humanoid) simulateTrajectory(ctx context.Context, start, end Vector2D, 
 			}
 		}
 
-		// REFACTORED: Use the executor interface instead of a direct dispatchMouse.Do(ctx) call.
-		if err := h.executor.DispatchMouseEvent(ctx, dispatchMouse); err != nil {
+		// Execute the low-level command immediately.
+		if err := dispatchMouse.Do(ctx); err != nil {
 			h.logger.Warn("Humanoid: Failed to dispatch mouse move event during simulation", zap.Error(err))
 			return velocity, err
 		}
@@ -211,8 +188,7 @@ func (h *Humanoid) simulateTrajectory(ctx context.Context, start, end Vector2D, 
 		}
 		sleepDuration := time.Duration(2+randPart) * time.Millisecond
 
-		// REFACTORED: Use the executor interface for the final sleep.
-		if err := h.executor.Sleep(ctx, sleepDuration); err != nil {
+		if err := chromedp.Sleep(sleepDuration).Do(ctx); err != nil {
 			return velocity, err
 		}
 	}

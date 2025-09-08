@@ -1,4 +1,4 @@
-// internal/humanoid/clickmodel.go
+// Filename: internal/humanoid/clickmodel.go
 package humanoid
 
 import (

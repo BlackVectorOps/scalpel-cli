@@ -1,4 +1,4 @@
-// internal/humanoid/potentialfield.go
+// Filename: internal/humanoid/potentialfield.go
 package humanoid
 
 import "math"

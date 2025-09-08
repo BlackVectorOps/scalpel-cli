@@ -87,10 +87,18 @@ func (m *mockExecutor) Sleep(ctx context.Context, d time.Duration) error {
 
 // Stubs for other Executor methods not strictly required for trajectory tests.
 func (m *mockExecutor) ExecuteAction(ctx context.Context, a chromedp.Action) error { return nil }
-func (m *mockExecutor) GetLayoutMetrics(ctx context.Context) (*page.VisualViewport, error) { return nil, nil }
-func (m *mockExecutor) GetBoxModel(ctx context.Context, nodeID cdp.NodeID) (*dom.BoxModel, error) { return nil, nil }
-func (m *mockExecutor) CallFunctionOn(ctx context.Context, params *runtime.CallFunctionOnParams) (*runtime.RemoteObject, *runtime.ExceptionDetails, error) { return nil, nil, nil }
-func (m *mockExecutor) QueryNodes(ctx context.Context, selector string) ([]*cdp.Node, error) { return nil, nil }
+func (m *mockExecutor) GetLayoutMetrics(ctx context.Context) (*page.VisualViewport, error) {
+	return nil, nil
+}
+func (m *mockExecutor) GetBoxModel(ctx context.Context, nodeID cdp.NodeID) (*dom.BoxModel, error) {
+	return nil, nil
+}
+func (m *mockExecutor) CallFunctionOn(ctx context.Context, params *runtime.CallFunctionOnParams) (*runtime.RemoteObject, *runtime.ExceptionDetails, error) {
+	return nil, nil, nil
+}
+func (m *mockExecutor) QueryNodes(ctx context.Context, selector string) ([]*cdp.Node, error) {
+	return nil, nil
+}
 
 // newTestHumanoid creates a Humanoid instance with deterministic dependencies for testing.
 func newTestHumanoid(executor Executor) *Humanoid {
@@ -126,7 +134,21 @@ func floatAlmostEqual(a, b, tolerance float64) bool {
 // =============================================================================
 
 func TestComputeEaseInOutCubic(t *testing.T) {
-    // ... (Implementation identical to the report, omitted for brevity)
+	t.Parallel()
+	testCases := []struct {
+		input    float64
+		expected float64
+	}{
+		{0.0, 0.0},
+		{0.25, 0.125},
+		{0.5, 1.0},
+		{0.75, 0.875},
+		{1.0, 1.0},
+	}
+
+	for _, tc := range testCases {
+		assert.True(t, floatAlmostEqual(tc.expected, computeEaseInOutCubic(tc.input), 1e-9), "ease for %.2f", tc.input)
+	}
 }
 
 func TestCalculateFittsLaw(t *testing.T) {
@@ -140,7 +162,6 @@ func TestCalculateFittsLaw(t *testing.T) {
 		// Pre-calculated values based on seed 12345. A fresh RNG is used for each test.
 		// FittsA=100, FittsB=150. W=30.
 		// 1st RNG call is ~0.8444. rand_factor = 0.8444*0.3 - 0.15 = 0.1033.
-		
 		// For dist=0, mt = 100. mt_final = 100 * (1 + 0.1033) = 110.33ms
 		{name: "zero_distance", distance: 0.0, expectedDuration: 110 * time.Millisecond},
 		// For dist=100, mt = 417.25. mt_final = 417.25 * (1+0.1033) = 460.34ms
@@ -154,7 +175,7 @@ func TestCalculateFittsLaw(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			// Initialize a fresh Humanoid for each test case to ensure RNG isolation.
-			h := newTestHumanoid(nil) 
+			h := newTestHumanoid(nil)
 			duration := h.calculateFittsLaw(tc.distance)
 			// Allow a small tolerance of 1ms due to float conversions.
 			assert.InDelta(t, float64(tc.expectedDuration), float64(duration), float64(time.Millisecond))
@@ -163,7 +184,25 @@ func TestCalculateFittsLaw(t *testing.T) {
 }
 
 func TestGenerateIdealPath(t *testing.T) {
-    // ... (Implementation identical to the report, omitted for brevity)
+	t.Parallel()
+	h := newTestHumanoid(nil)
+	start := Vector2D{X: 100, Y: 100}
+	end := Vector2D{X: 500, Y: 500}
+	numSteps := 101 // For easy percentage-based checks
+
+	field := NewPotentialField()
+	// Add a repulsor to bend the path
+	field.AddSource(Vector2D{X: 300, Y: 200}, -20, 100)
+
+	path := h.generateIdealPath(start, end, field, numSteps)
+
+	require.Len(t, path, numSteps)
+	assert.Equal(t, start, path[0], "Path should start at the start point")
+	assert.Equal(t, end, path[numSteps-1], "Path should end at the end point")
+	// Check a midpoint; it should be shifted 'up' by the repulsor
+	midpoint := path[50]
+	assert.True(t, midpoint.X > 300, "Midpoint X should be right of center") // 300 is center
+	assert.True(t, midpoint.Y > 300, "Midpoint Y should be below center due to repulsion")
 }
 
 // =============================================================================
@@ -172,10 +211,6 @@ func TestGenerateIdealPath(t *testing.T) {
 
 func TestSimulateTrajectory(t *testing.T) {
 	t.Parallel()
-
-	// Define the button states using the string literals required by the implementation context.
-	const buttonNone input.MouseButton = "none"
-	const buttonLeft input.MouseButton = "left"
 
 	testCases := []struct {
 		name        string
@@ -189,7 +224,7 @@ func TestSimulateTrajectory(t *testing.T) {
 			name:        "happy_path_short_move_no_button",
 			start:       Vector2D{X: 100, Y: 100},
 			end:         Vector2D{X: 250, Y: 220},
-			buttonState: buttonNone,
+			buttonState: input.ButtonNone,
 			field:       NewPotentialField(),
 			setupMock:   func(m *mockExecutor, cancel context.CancelFunc) {},
 			validate: func(t *testing.T, m *mockExecutor, finalVelocity Vector2D, err error) {
@@ -207,7 +242,7 @@ func TestSimulateTrajectory(t *testing.T) {
 				// Check the first event
 				firstEvent := m.dispatchedEvents[0]
 				assert.Equal(t, input.MouseMoved, firstEvent.Type)
-				assert.Equal(t, buttonNone, firstEvent.Button)
+				assert.Equal(t, input.ButtonNone, firstEvent.Button)
 				// First point should be very close to the start point, plus some noise.
 				assert.InDelta(t, 100.0, firstEvent.X, 5.0)
 				assert.InDelta(t, 100.0, firstEvent.Y, 5.0)
@@ -215,7 +250,7 @@ func TestSimulateTrajectory(t *testing.T) {
 				// Check the last event
 				lastEvent := m.dispatchedEvents[len(m.dispatchedEvents)-1]
 				assert.Equal(t, input.MouseMoved, lastEvent.Type)
-				assert.Equal(t, buttonNone, lastEvent.Button)
+				assert.Equal(t, input.ButtonNone, lastEvent.Button)
 				// Last point should be very close to the end point.
 				assert.InDelta(t, 250.0, lastEvent.X, 5.0)
 				assert.InDelta(t, 220.0, lastEvent.Y, 5.0)
@@ -225,14 +260,14 @@ func TestSimulateTrajectory(t *testing.T) {
 			name:        "left_button_drag",
 			start:       Vector2D{X: 50, Y: 50},
 			end:         Vector2D{X: 100, Y: 100},
-			buttonState: buttonLeft,
+			buttonState: input.ButtonLeft,
 			field:       NewPotentialField(),
 			setupMock:   func(m *mockExecutor, cancel context.CancelFunc) {},
 			validate: func(t *testing.T, m *mockExecutor, finalVelocity Vector2D, err error) {
 				require.NoError(t, err)
 				require.NotEmpty(t, m.dispatchedEvents)
 				for _, event := range m.dispatchedEvents {
-					assert.Equal(t, buttonLeft, event.Button)
+					assert.Equal(t, input.ButtonLeft, event.Button)
 					assert.Equal(t, int64(1), event.Buttons)
 				}
 			},
@@ -241,7 +276,7 @@ func TestSimulateTrajectory(t *testing.T) {
 			name:        "context_cancellation_mid_trajectory",
 			start:       Vector2D{X: 0, Y: 0},
 			end:         Vector2D{X: 500, Y: 500},
-			buttonState: buttonNone,
+			buttonState: input.ButtonNone,
 			field:       NewPotentialField(),
 			setupMock: func(m *mockExecutor, cancel context.CancelFunc) {
 				// Configure the mock to trigger cancellation on the 10th mouse event dispatch.
@@ -259,7 +294,7 @@ func TestSimulateTrajectory(t *testing.T) {
 			name:        "dependency_failure_mid_trajectory",
 			start:       Vector2D{X: 0, Y: 0},
 			end:         Vector2D{X: 500, Y: 500},
-			buttonState: buttonNone,
+			buttonState: input.ButtonNone,
 			field:       NewPotentialField(),
 			setupMock: func(m *mockExecutor, cancel context.CancelFunc) {
 				// Configure the mock to return an error on the 5th DispatchMouseEvent call.
@@ -278,7 +313,7 @@ func TestSimulateTrajectory(t *testing.T) {
 			name:        "zero_distance_move",
 			start:       Vector2D{X: 300, Y: 300},
 			end:         Vector2D{X: 300, Y: 300},
-			buttonState: buttonNone,
+			buttonState: input.ButtonNone,
 			field:       NewPotentialField(),
 			setupMock:   func(m *mockExecutor, cancel context.CancelFunc) {},
 			validate: func(t *testing.T, m *mockExecutor, finalVelocity Vector2D, err error) {
@@ -291,7 +326,7 @@ func TestSimulateTrajectory(t *testing.T) {
 			name:        "nil_potential_field",
 			start:       Vector2D{X: 10, Y: 10},
 			end:         Vector2D{X: 20, Y: 20},
-			buttonState: buttonNone,
+			buttonState: input.ButtonNone,
 			field:       nil, // Explicitly test the nil guard.
 			setupMock:   func(m *mockExecutor, cancel context.CancelFunc) {},
 			validate: func(t *testing.T, m *mockExecutor, finalVelocity Vector2D, err error) {
