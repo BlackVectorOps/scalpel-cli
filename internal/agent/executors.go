@@ -15,7 +15,7 @@ import (
 // browser session management logic, allowing it to retrieve the currently active session.
 type SessionProvider func() interfaces.SessionContext // CORRECTED TYPE
 
-// --- Browser Executor ---
+// -- Browser Executor --
 
 // ActionHandler defines the function signature for a specific browser action implementation.
 type ActionHandler func(session interfaces.SessionContext, action schemas.Action) error // CORRECTED TYPE
@@ -52,7 +52,7 @@ func (e *BrowserExecutor) registerHandlers() {
 }
 
 // Execute looks up and runs the appropriate handler for a given browser action.
-func (e *BrowserExecutor) Execute(ctx context.Context, action schemas.Action) (*schemas.ExecutionResult, error) {
+func (e *BrowserExecutor) Execute(ctx context.Context, action schemas.Action) (*schemasss.ExecutionResult, error) {
 	session := e.sessionProvider()
 	if session == nil {
 		// This is a pre-execution failure; the action cannot be attempted.

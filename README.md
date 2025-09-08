@@ -8,7 +8,7 @@ Scalpel is an AI-native, autonomous security scanner designed for modern web app
 
 This tool is intended for educational purposes and for use in authorized security assessments only. **Do not** use this tool on any system or network without explicit permission from the owner, as it is unethical and illegal. The creator of this software is **not** responsible for any misuse or damage caused by this framework. **Use at your own risk.**
 
----
+--
 
 ## Table of Contents
 
@@ -18,7 +18,7 @@ This tool is intended for educational purposes and for use in authorized securit
 - [Getting Started](#getting-started)
 - [Usage](#usage)
 - [License](#license)
----
+--
 
 ## Key Features 
 
@@ -34,7 +34,7 @@ This tool is intended for educational purposes and for use in authorized securit
 * **Persistent & Extensible:** Uses a PostgreSQL backend for storing all findings and knowledge graph data, with a modular worker/adapter architecture that makes it easy to add new analysis capabilities.
 * **Professional Reporting:** Generates reports in standard formats like SARIF.
 
----
+--
 ## Architecture Overview 
 
 Scalpel is built on a modular, event-driven architecture that separates concerns for scalability and maintainability.
@@ -77,7 +77,7 @@ graph TD
 4.  **Browser Manager:** Manages a pool of headless browser instances, applying stealth and instrumentation.
 5.  **Analyzers (Adapters):** Modular components that perform specific security checks (Taint, IDOR, ATO, etc.).
 6.  **AI Agent:** An autonomous component with its own cognitive loop (OODA) that receives high-level missions and uses an LLM to decide on actions.
----
+--
 
 ## Technology Stack 
 
@@ -87,7 +87,7 @@ graph TD
 * **Mermaid**: For rendering diagrams in documentation.
 * **Gemini / OpenAI**: Pluggable LLM providers for the AI Agent.
 
----
+--
 
 ## Getting Started 
 
@@ -111,7 +111,7 @@ cd scalpel-cli
 go mod tidy
 go build -o scalpel-cli ./cmd/main.go
 ```
----
+--
 ### 2. Configuration
 
 `scalpel-cli` is configured using a `config.yaml` file and environment variables.
@@ -141,7 +141,7 @@ go build -o scalpel-cli ./cmd/main.go
     ```bash
     export SCALPEL_POSTGRES_URL="postgres://user:password@host:5432/scalpeldb"
     ```
----
+--
 
 ## Usage 
 
@@ -167,7 +167,7 @@ Run a scan against a target, limit the crawl depth to 2, and save the results to
 ```sh
 ./scalpel-cli scan [https://example.com](https://example.com) -c config.local.yaml -d 2 -o report.sarif -f sarif
 ```
----
+--
 
 ## License 
 

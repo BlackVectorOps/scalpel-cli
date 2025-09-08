@@ -1,4 +1,3 @@
-// internal/llmclient/factory.go
 package llmclient
 
 import (
@@ -11,16 +10,27 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/internal/interfaces"
 )
 
-// NewClient is a factory function that creates an LLMClient based on the configuration.
+// NewClient is our factory for spitting out the right LLMClient based on the config.
+// Assumes config.AgentConfig.LLM is a pointer: *config.LLMModelConfig
 func NewClient(cfg config.AgentConfig, logger *zap.Logger) (interfaces.LLMClient, error) {
-	provider := cfg.LLM.Provider
+
+	// Robustness check, because nil pointers are the bane of our existence.
+	if cfg.LLM == nil {
+		logger.Error("LLM configuration block is missing in AgentConfig during client initialization")
+		return nil, fmt.Errorf("LLM configuration block is missing in AgentConfig")
+	}
+
+	// Dereference the pointer to access the configuration values.
+	llmConfig := *cfg.LLM
+	provider := llmConfig.Provider
 
 	// Using constants defined in config package to avoid magic strings.
 	switch provider {
 	case config.ProviderGemini:
-		return NewGeminiClient(cfg, logger)
+		// Pass the specific LLMModelConfig (llmConfig) instead of the entire AgentConfig (cfg).
+		return NewGeminiClient(llmConfig, logger)
 	// case config.ProviderOpenAI:
-	// 	return NewOpenAIClient(cfg, logger)
+	//     return NewOpenAIClient(llmConfig, logger)
 	default:
 		// Assuming config.ProviderGemini is defined in the config package.
 		return nil, fmt.Errorf("unknown or unsupported LLM provider configured: '%s'. Supported: [%s]", provider, config.ProviderGemini)

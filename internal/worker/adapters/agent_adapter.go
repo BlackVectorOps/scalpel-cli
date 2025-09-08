@@ -1,53 +1,56 @@
-// internal/worker/adapters/agent_adapter.go
 package adapters
 
 import (
 	"context"
 	"fmt"
 
+	"github.com/xkilldash9x/scalpel-cli/api/schemas" // Import schemas
 	"github.com/xkilldash9x/scalpel-cli/internal/agent"
 	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
+	"go.uber.org/zap"
 )
 
-// AgentAdapter integrates the autonomous agent as a standard worker module.
+// AgentAdapter is the bridge that lets our autonomous agent play nice as a standard worker module.
 type AgentAdapter struct {
-	// The agent itself will be initialized on-demand when a mission is received.
+	core.BaseAnalyzer
 }
 
 // NewAgentAdapter creates a new adapter for agent missions.
 func NewAgentAdapter() *AgentAdapter {
-	return &AgentAdapter{}
+	return &AgentAdapter{
+		BaseAnalyzer: core.NewBaseAnalyzer("AgentAdapter", core.TypeAgent),
+	}
 }
 
-// Name returns the identifier for this adapter.
-func (a *AgentAdapter) Name() string {
-	return "AgentAdapter"
-}
-
-// Type returns the analyzer type.
-func (a *AgentAdapter) Type() core.AnalyzerType {
-	return core.TypeAgent
-}
-
-// Analyze is the entry point for an agent mission.
+// Analyze kicks off an agent mission.
 func (a *AgentAdapter) Analyze(ctx context.Context, analysisCtx *core.AnalysisContext) error {
 	analysisCtx.Logger.Info("Agent mission received. Initializing agent...")
 
-	// Extract mission parameters from the task.
-	missionBrief, ok := analysisCtx.Task.Parameters["mission_brief"].(string)
-	if !ok || missionBrief == "" {
-		return fmt.Errorf("agent mission task is missing a 'mission_brief' parameter")
+	// Use strongly typed parameters for robustness and clarity.
+	// This assumes schemas.AgentMissionParams exists and replaces the original map lookup.
+	params, ok := analysisCtx.Task.Parameters.(schemas.AgentMissionParams)
+	if !ok {
+		actualType := fmt.Sprintf("%T", analysisCtx.Task.Parameters)
+		analysisCtx.Logger.Error("Invalid parameter type assertion for Agent mission",
+			zap.String("expected", "schemas.AgentMissionParams"),
+			zap.String("actual", actualType))
+		return fmt.Errorf("invalid parameters type for Agent mission; expected schemas.AgentMissionParams, got %s", actualType)
+	}
+
+	// Validate required parameters.
+	if params.MissionBrief == "" {
+		return fmt.Errorf("validation error: agent mission task is missing required 'MissionBrief'")
 	}
 
 	// The agent needs access to the global context to use shared services
 	// like the logger, browser manager, and knowledge graph.
 	agentCfg := agent.Config{
-		Mission: missionBrief,
+		Mission: params.MissionBrief,
 		Target:  analysisCtx.Task.TargetURL,
+		// Add other parameters from the schema if they exist (e.g., Constraints, MaxDepth)
 	}
 
-	// Here's the magic: The agent gets the full global context, allowing it to
-	// access the TaskEngine (if we add it there) to submit new tasks.
+	// Initialize the agent instance, passing the full global context.
 	agentInstance, err := agent.New(ctx, agentCfg, analysisCtx.Global)
 	if err != nil {
 		return fmt.Errorf("failed to initialize agent: %w", err)
@@ -59,13 +62,24 @@ func (a *AgentAdapter) Analyze(ctx context.Context, analysisCtx *core.AnalysisCo
 	// This is a blocking call that will run until the mission is complete or the context is cancelled.
 	missionResult, err := agentInstance.RunMission(ctx)
 	if err != nil {
+		// Check if the error was due to context cancellation (timeout or interruption).
+		if ctx.Err() != nil {
+			analysisCtx.Logger.Warn("Agent mission interrupted or timed out.", zap.Error(err))
+			return ctx.Err()
+		}
 		return fmt.Errorf("agent mission failed: %w", err)
 	}
 
-	// The agent's findings and graph updates would be part of the missionResult
-	// and should be added to the analysisCtx here.
+	// Integrate the results from the agent back into the analysis context.
 	analysisCtx.Logger.Info("Agent mission completed.", "summary", missionResult.Summary)
-	analysisCtx.Findings = append(analysisCtx.Findings, missionResult.Findings...)
+
+	// Merge findings and Knowledge Graph updates.
+	if len(missionResult.Findings) > 0 {
+		for _, finding := range missionResult.Findings {
+			analysisCtx.AddFinding(finding)
+		}
+	}
+
 	analysisCtx.KGUpdates.Nodes = append(analysisCtx.KGUpdates.Nodes, missionResult.KGUpdates.Nodes...)
 	analysisCtx.KGUpdates.Edges = append(analysisCtx.KGUpdates.Edges, missionResult.KGUpdates.Edges...)
 

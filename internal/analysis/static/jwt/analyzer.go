@@ -1,4 +1,4 @@
-// pkg/analysis/static/jwt/analyzer.go
+// internal/analysis/static/jwt/analyzer.go
 package jwt
 
 import (
@@ -76,7 +76,7 @@ func (a *JWTAnalyzer) Analyze(ctx context.Context, analysisCtx *core.AnalysisCon
 func (a *JWTAnalyzer) extractAndAnalyze(analysisCtx *core.AnalysisContext, req *http.Request, resp *browser.Response, analyzedTokens map[string]bool) {
 	targetURL := req.URL.String()
 
-	// --- Extraction ---
+	// -- Extraction --
 	tokens := make(map[string]string) // Map of Token -> Location Found
 
 	// A. Request Headers (includes Authorization Bearer and Cookies)

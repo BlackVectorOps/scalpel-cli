@@ -11,7 +11,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.comcom/xkilldash9x/scalpel-cli/internal/analysis/core"
+	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
 )
 
 // NOTE: The type and struct definitions (IdentifierType, IdentifierLocation, ObservedIdentifier)
@@ -63,6 +63,14 @@ func ClassifyIdentifier(value string) core.IdentifierType {
 		}
 		return core.TypeNumericID
 	}
+
+	// Heuristic FIX: A string composed only of digits but is too long to be a standard
+	// numeric ID (int64) should be classified as Unknown, not fall through to the Base64 check.
+	if regexOnlyNumbers.MatchString(value) {
+		// This path is only reached if regexNumeric (1-19 digits) did NOT match.
+		return core.TypeUnknown
+	}
+
 	// Check Base64 heuristic (length >= 8 and matches regex).
 	if len(value) >= 8 && regexBase64.MatchString(value) {
 		if isLikelyBase64(value) {
@@ -74,9 +82,8 @@ func ClassifyIdentifier(value string) core.IdentifierType {
 
 // isLikelyBase64 is a helper function to attempt decoding using various Base64 schemes.
 func isLikelyBase64(value string) bool {
-	// Heuristic: If it's just letters or just numbers, it's unlikely to be a Base64 ID.
-	// This helps avoid classifying common words like "username" or long numeric strings as Base64.
-	// While a valid Base64 string could be all letters/numbers, it's less common for IDs.
+	// Heuristic FIX: If it's just letters or just numbers, it's very unlikely to be a Base64 ID.
+	// This is the key fix for the "username" and long numeric string false positives.
 	if regexOnlyLetters.MatchString(value) || regexOnlyNumbers.MatchString(value) {
 		return false
 	}

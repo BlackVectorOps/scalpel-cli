@@ -221,7 +221,7 @@ func (h *Humanoid) introduceTypo(ctx context.Context, cfg Config, runes []rune, 
 	return h.introduceInsertion(ctx, char)
 }
 
-// --- Typo Implementations ---
+// -- Typo Implementations --
 
 func (h *Humanoid) introduceNeighborTypo(ctx context.Context, char rune) (bool, error) {
 	lowerChar := unicode.ToLower(char)

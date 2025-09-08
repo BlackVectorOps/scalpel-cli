@@ -1,13 +1,13 @@
-// internal/worker/adapters/taint_adapter.go 
 package adapters
 
 import (
 	"context"
 	"fmt"
+	"time" // Ensure time is imported
 
 	"github.com/xkilldash9x/scalpel-cli/internal/analysis/active/taint"
 	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
-	"github.com/xkilldash9x/scalpel-cli/api/schemas"
+	// "github.com/xkilldash9x/scalpel-cli/api/schemas" // Not strictly needed here if config comes from core
 	"go.uber.org/zap"
 )
 
@@ -25,19 +25,20 @@ func (a *TaintAdapter) Analyze(ctx context.Context, analysisCtx *core.AnalysisCo
 	logger := analysisCtx.Logger.With(zap.String("adapter", a.Name()))
 	logger.Info("Initializing taint analysis")
 
-	// CORRECTED: Use the simplified BrowserManager to get a session.
+	// Architectural note: The Analyzer is the boss of the browser session lifecycle.
+	// The adapter must provide the dependencies (BrowserManager, OASTProvider).
+
+	// 1. Verify Dependencies
 	if analysisCtx.Global.BrowserManager == nil {
 		return fmt.Errorf("critical error: browser manager not initialized in global context")
 	}
-	session, err := analysisCtx.Global.BrowserManager.InitializeSession(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to initialize browser session: %w", err)
-	}
-	defer session.Close(ctx) // Ensures the browser tab is always closed.
-	logger.Debug("Browser session initialized")
+
+	// OASTProvider may be nil if disabled, the analyzer handles this gracefully.
+	oastProvider := analysisCtx.Global.OASTProvider
 
 	reporter := NewContextReporter(analysisCtx)
-	
+
+	// 2. Configure Analyzer
 	// Translate global config and task params into the specific Taint configuration.
 	cfg := analysisCtx.Global.Config.Scanners.Active.Taint
 	taintConfig := taint.Config{
@@ -50,17 +51,23 @@ func (a *TaintAdapter) Analyze(ctx context.Context, analysisCtx *core.AnalysisCo
 		FinalizationGracePeriod: 5 * time.Second,
 		ProbeExpirationDuration: 5 * time.Minute,
 		CleanupInterval:         1 * time.Minute,
+		OASTPollingInterval:     20 * time.Second, // Default or from config
 		Interaction: taint.InteractionConfig{
 			MaxDepth: cfg.Depth,
 		},
 	}
 
-	analyzer, err := taint.NewAnalyzer(taintConfig, session, reporter, logger)
+	// 3. Initialize Analyzer
+	// Pass the dependencies (BrowserManager, Reporter, OASTProvider) to the Analyzer.
+	analyzer, err := taint.NewAnalyzer(taintConfig, analysisCtx.Global.BrowserManager, reporter, oastProvider, logger)
 	if err != nil {
 		return fmt.Errorf("failed to initialize taint analyzer: %w", err)
 	}
 
+	// 4. Execute Analysis
 	logger.Info("Starting taint analysis execution", zap.String("target_url", analysisCtx.TargetURL.String()))
+
+	// This call handles the entire lifecycle: Init Session, Instrument, Probe, Interact, Finalize, Close Session.
 	if err := analyzer.Analyze(ctx); err != nil {
 		if ctx.Err() != nil {
 			logger.Warn("Taint analysis interrupted or timed out", zap.Error(err))

@@ -16,8 +16,8 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/internal/worker/adapters"
 )
 
-// MonolithicWorker processes tasks directly without a message queue.
-// It acts as a dispatcher to various analysis modules (adapters).
+// processes tasks directly without a message queue.
+// It acts as a dispatcher to various analysis modules/adapaters.
 type MonolithicWorker struct {
 	cfg             *config.Config
 	logger          *zap.Logger
@@ -26,7 +26,7 @@ type MonolithicWorker struct {
 	adapterRegistry map[string]core.Analyzer
 }
 
-// NewMonolithicWorker creates a new worker instance for the monolithic architecture.
+// creates a new worker instance for the monolithic architecture.
 func NewMonolithicWorker(
 	cfg *config.Config,
 	logger *zap.Logger,
@@ -51,7 +51,7 @@ func NewMonolithicWorker(
 	return w, nil
 }
 
-// registerAdapters populates the worker's registry of available analyzers.
+// populates the worker's registry of available analyzers.
 func (w *MonolithicWorker) registerAdapters() error {
 	// Each adapter is initialized and mapped to the TaskType it handles.
 	w.adapterRegistry[schemas.TaskAnalyzeWebPageTaint] = adapters.NewTaintAdapter()
@@ -65,7 +65,7 @@ func (w *MonolithicWorker) registerAdapters() error {
 	return nil
 }
 
-// ProcessTask is the main entry point for executing an analysis task.
+// main entry point for executing an analysis task.
 // It finds the correct adapter and runs the analysis.
 func (w *MonolithicWorker) ProcessTask(ctx context.Context, analysisCtx *core.AnalysisContext) error {
 	task := analysisCtx.Task

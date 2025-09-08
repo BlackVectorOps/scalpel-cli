@@ -157,4 +157,8 @@ func (h *Humanoid) InitializePosition(ctx context.Context) error {
 	// REFACTORED: Use the executor.
 	action := chromedp.MouseEvent(input.MouseMoved, startX, startY)
 	return h.executor.ExecuteAction(ctx, action)
+<<<<<<< HEAD
 }
+=======
+}
+>>>>>>> fc7e743 (	modified:   ../../../../../api/schemas/graph.go)

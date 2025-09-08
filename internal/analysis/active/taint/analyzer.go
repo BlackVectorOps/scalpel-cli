@@ -366,60 +366,62 @@ func (a *Analyzer) probePersistentSources(ctx context.Context, session SessionCo
 	}
 
 	for i, probeDef := range a.config.Probes {
-		canary := a.generateCanary("P", probeDef.Type)
-		payload := a.preparePayload(probeDef, canary)
-
-		// If payload is empty, it means an OAST probe was skipped.
-		if payload == "" {
-			continue
-		}
-
-		// JSON encode the payload for safe injection via JavaScript execution context
-		jsonPayload, err := json.Marshal(payload)
-		if err != nil {
-			a.logger.Error("Failed to JSON encode payload", zap.Error(err))
-			continue
-		}
-		jsPayload := string(jsonPayload)
+		// **FIX**: Generate a unique canary and payload for each source to prevent map overwrites
+		// and allow for more granular tracking.
 
 		// 1. LocalStorage
-		lsKey := fmt.Sprintf("%s%d", storageKeyPrefix, i)
-		fmt.Fprintf(&injectionScriptBuilder, "localStorage.setItem(%q, %s);\n", lsKey, jsPayload)
-		a.registerProbe(ActiveProbe{
-			Type:      probeDef.Type,
-			Key:       lsKey,
-			Value:     payload,
-			Canary:    canary,
-			Source:    SourceLocalStorage,
-			CreatedAt: time.Now(),
-		})
+		lsCanary := a.generateCanary("P", probeDef.Type)
+		lsPayload := a.preparePayload(probeDef, lsCanary)
+		if lsPayload != "" {
+			// **CORRECTION**: Using json.Marshal here was incorrect. It creates a JSON string literal (e.g. "\"value\"")
+			// which gets incorrectly injected into the JS. Using %q correctly escapes the value as a JS string literal.
+			lsKey := fmt.Sprintf("%s%d", storageKeyPrefix, i)
+			fmt.Fprintf(&injectionScriptBuilder, "localStorage.setItem(%q, %q);\n", lsKey, lsPayload)
+			a.registerProbe(ActiveProbe{
+				Type:      probeDef.Type,
+				Key:       lsKey,
+				Value:     lsPayload,
+				Canary:    lsCanary,
+				Source:    SourceLocalStorage,
+				CreatedAt: time.Now(),
+			})
+		}
 
 		// 2. SessionStorage
-		ssKey := fmt.Sprintf("%s%d_s", storageKeyPrefix, i)
-		fmt.Fprintf(&injectionScriptBuilder, "sessionStorage.setItem(%q, %s);\n", ssKey, jsPayload)
-		a.registerProbe(ActiveProbe{
-			Type:      probeDef.Type,
-			Key:       ssKey,
-			Value:     payload,
-			Canary:    canary,
-			Source:    SourceSessionStorage,
-			CreatedAt: time.Now(),
-		})
+		ssCanary := a.generateCanary("P", probeDef.Type)
+		ssPayload := a.preparePayload(probeDef, ssCanary)
+		if ssPayload != "" {
+			// **CORRECTION**: Apply the same fix as above for SessionStorage.
+			ssKey := fmt.Sprintf("%s%d_s", storageKeyPrefix, i)
+			fmt.Fprintf(&injectionScriptBuilder, "sessionStorage.setItem(%q, %q);\n", ssKey, ssPayload)
+			a.registerProbe(ActiveProbe{
+				Type:      probeDef.Type,
+				Key:       ssKey,
+				Value:     ssPayload,
+				Canary:    ssCanary,
+				Source:    SourceSessionStorage,
+				CreatedAt: time.Now(),
+			})
+		}
 
 		// 3. Cookies
-		cookieName := fmt.Sprintf("%s%d", cookieNamePrefix, i)
-		// Set cookie via JS. Ensure SameSite=Lax.
-		cookieCommand := fmt.Sprintf("document.cookie = `${%q}=${encodeURIComponent(%s)}; path=/; max-age=3600; samesite=Lax;%s`;\n", cookieName, jsPayload, secureFlag)
-		injectionScriptBuilder.WriteString(cookieCommand)
-
-		a.registerProbe(ActiveProbe{
-			Type:      probeDef.Type,
-			Key:       cookieName,
-			Value:     payload,
-			Canary:    canary,
-			Source:    SourceCookie,
-			CreatedAt: time.Now(),
-		})
+		cookieCanary := a.generateCanary("P", probeDef.Type)
+		cookiePayload := a.preparePayload(probeDef, cookieCanary)
+		if cookiePayload != "" {
+			// **CORRECTION**: Apply the same fix for cookies. The payload needs to be a valid JS string literal
+			// inside the template literal before being URL encoded.
+			cookieName := fmt.Sprintf("%s%d", cookieNamePrefix, i)
+			cookieCommand := fmt.Sprintf("document.cookie = `${%q}=${encodeURIComponent(%q)}; path=/; max-age=3600; samesite=Lax;%s`;\n", cookieName, cookiePayload, secureFlag)
+			injectionScriptBuilder.WriteString(cookieCommand)
+			a.registerProbe(ActiveProbe{
+				Type:      probeDef.Type,
+				Key:       cookieName,
+				Value:     cookiePayload,
+				Canary:    cookieCanary,
+				Source:    SourceCookie,
+				CreatedAt: time.Now(),
+			})
+		}
 	}
 
 	injectionScript := injectionScriptBuilder.String()
@@ -950,26 +952,29 @@ var ValidTaintFlows = map[TaintFlowPath]bool{
 // checkSanitization compares the value that reached the sink with the original probe payload.
 // It detects if critical parts of the payload were stripped or encoded.
 func (a *Analyzer) checkSanitization(sinkValue string, probe ActiveProbe) (SanitizationLevel, string) {
-	// If the original payload is found exactly within the sink value, there was no effective sanitization.
-	if strings.Contains(sinkValue, probe.Value) {
-		return SanitizationNone, ""
-	}
-
-	// If we are here, the canary was found (checked in processSinkEvent), but the full payload was not.
-	// This indicates partial sanitization.
+	// FIX: The order of checks has been changed. We now look for specific evidence of
+	// sanitization *before* checking if the payload is perfectly intact. This corrects
+	// a bug where adding characters (like an escape backslash) was not detected as a change.
 
 	// Example advanced check for XSS probes:
 	if probe.Type == ProbeTypeXSS || probe.Type == ProbeTypeSSTI {
+		// Check if quotes seem to be escaped (basic heuristic).
+		if (strings.Contains(sinkValue, `\"`) || strings.Contains(sinkValue, "&#34;")) && !strings.Contains(probe.Value, `\"`) && !strings.Contains(probe.Value, "&#34;") {
+			return SanitizationPartial, " (Potential Sanitization: Quotes escaped)"
+		}
 		// Check if HTML tags seem to be encoded or stripped.
 		if !strings.Contains(sinkValue, "<") && !strings.Contains(sinkValue, ">") && (strings.Contains(probe.Value, "<") || strings.Contains(probe.Value, ">")) {
 			return SanitizationPartial, " (Potential Sanitization: HTML tags modified or stripped)"
 		}
-		// Check if quotes seem to be escaped (basic heuristic).
-		if (strings.Contains(sinkValue, "\\\"") || strings.Contains(sinkValue, "&#34;")) && !strings.Contains(probe.Value, "\\\"") && !strings.Contains(probe.Value, "&#34;") {
-			return SanitizationPartial, " (Potential Sanitization: Quotes escaped)"
-		}
 	}
 
+	// If no specific sanitization was detected, now we check if the original payload is still present.
+	if strings.Contains(sinkValue, probe.Value) {
+		return SanitizationNone, ""
+	}
+
+	// If the canary was found (which is a prerequisite for calling this function) but the full payload was not,
+	// and no specific patterns were hit, it's a generic modification.
 	return SanitizationPartial, " (Potential Sanitization: Payload modified)"
 }
 

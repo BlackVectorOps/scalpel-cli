@@ -1,455 +1,427 @@
-// internal/analysis/auth/ato/analyzer.go 
-package ato
+// internal/analysis/auth/idor/analyzer.go
+package idor
 
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/cookiejar"
-	"net/url"
-	"regexp"
-	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
 	"go.uber.org/zap"
-	"golang.org/x/net/publicsuffix"
-	"golang.org/x/time/rate"
 
 	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
 )
 
-// Constants for user enumeration heuristics and operational limits.
-const (
-	// EnumContentLengthThreshold is the minimum difference in bytes to suspect enumeration.
-	EnumContentLengthThreshold = 100
-	// EnumTimingThresholdMs is the minimum difference in milliseconds to suspect enumeration via timing analysis.
-	EnumTimingThresholdMs = 200
-	// MaxBodyReadSize limits response body reading to prevent OOM errors on large responses.
-	MaxBodyReadSize = 2 * 1024 * 1024 // 2 MB
-	// MaxConsecutiveErrors is the number of consecutive network errors before aborting a spray.
-	MaxConsecutiveErrors = 5
-)
+// Note: Core data structures for this package, such as SessionContext
+// and ObservedRequest, are defined in the types.go file.
 
-// Config holds the configuration for the ATO analyzer.
-type Config struct {
-	ScanID            uuid.UUID
-	LoginURL          string
-	ContentType       string
-	UserField         string
-	PassField         string
-	CSRFField         string
-	KnownUsers        []string
-	MaxGlobalAttempts int
-	DelayBetween      time.Duration
-}
-
-// Analyzer is the brains of the operation for trying to steal passwords.
+// Analyzer orchestrates the IDOR testing process (User A vs User B).
 type Analyzer struct {
-	config   Config
-	client   *http.Client
-	logger   *zap.Logger
-	reporter core.Reporter
+	ScanID      uuid.UUID
+	logger      *zap.Logger
+	sessions    map[string]*SessionContext
+	reporter    core.Reporter
+	mu          sync.RWMutex // Mutex for protecting the sessions map
+	concurrency int
 }
 
-var (
-	// Regex 1: name attribute appears before value attribute.
-	csrfTokenRegexNameFirst = regexp.MustCompile(`(?i)<input[^>]*?name=["']?(?:csrf|token|_csrf|authenticity_token|__RequestVerificationToken)["']?[^>]*?value=["']?([a-zA-Z0-9+/=_-]{16,})["']?`)
-	// Regex 2: value attribute appears before name attribute.
-	csrfTokenRegexValueFirst = regexp.MustCompile(`(?i)<input[^>]*?value=["']?([a-zA-Z0-9+/=_-]{16,})["']?[^>]*?name=["']?(?:csrf|token|_csrf|authenticity_token|__RequestVerificationToken)["']?`)
-)
-
-// NewAnalyzer initializes the ATO analyzer.
-func NewAnalyzer(cfg Config, logger *zap.Logger, reporter core.Reporter) *Analyzer {
-	// Set configuration defaults during initialization.
-	if cfg.ContentType == "" {
-		cfg.ContentType = "application/x-www-form-urlencoded"
+// NewAnalyzer initializes the IDOR analyzer.
+// Concurrency level determines the number of parallel test requests.
+func NewAnalyzer(scanID uuid.UUID, logger *zap.Logger, reporter core.Reporter, concurrency int) *Analyzer {
+	if concurrency <= 0 {
+		concurrency = 10 // Default concurrency
 	}
-	if cfg.CSRFField == "" {
-		// A reasonable default if not specified by the user.
-		cfg.CSRFField = "csrf_token"
-	}
-
-	jar, err := cookiejar.New(&cookiejar.Options{PublicSuffixList: publicsuffix.List})
-	if err != nil {
-		logger.Error("Failed to initialize cookie jar", zap.Error(err))
-	}
-
 	return &Analyzer{
-		config: cfg,
-		client: &http.Client{
-			Timeout: 20 * time.Second,
-			CheckRedirect: func(req *http.Request, via []*http.Request) error {
-				return http.ErrUseLastResponse
-			},
-			Jar: jar,
-		},
-		logger:   logger.Named("ato_analyzer"),
-		reporter: reporter,
+		ScanID:      scanID,
+		logger:      logger.Named("idor_analyzer"),
+		sessions:    make(map[string]*SessionContext),
+		reporter:    reporter,
+		concurrency: concurrency,
 	}
 }
 
-// Run executes the full ATO testing workflow.
-func (a *Analyzer) Run(ctx context.Context) error {
-	a.logger.Info("Starting ATO analysis", zap.String("target", a.config.LoginURL))
-	var allFindings []core.AnalysisResult
-
-	// 1. Check for CSRF protection and fetch initial token.
-	initialCSRFToken, requiresCSRF, err := a.fetchCSRFToken(ctx)
+// InitializeSession creates a new user persona for testing, with its own cookie jar.
+func (a *Analyzer) InitializeSession(role string) error {
+	jar, err := cookiejar.New(nil)
 	if err != nil {
-		a.logger.Warn("Failed to fetch initial page for CSRF check. Proceeding without CSRF handling.", zap.Error(err))
-		requiresCSRF = false
+		return fmt.Errorf("failed to create cookie jar for role %s: %w", role, err)
+	}
+	client := &http.Client{
+		Jar:     jar,
+		Timeout: 15 * time.Second,
+		// Crucial: Disable redirects to observe authorization responses (e.g., 302 vs 403).
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
 	}
 
-	// 2. Check for user enumeration.
-	enumFindings, err := a.checkUserEnumeration(ctx, initialCSRFToken, requiresCSRF)
-	if err != nil {
-		a.logger.Warn("User enumeration check failed or encountered errors", zap.Error(err))
-	}
-	allFindings = append(allFindings, enumFindings...)
+	// Lock the Analyzer before modifying the sessions map
+	a.mu.Lock()
+	defer a.mu.Unlock()
 
-	// 3. Execute password spraying.
-	sprayFindings, err := a.executePasswordSpraying(ctx, initialCSRFToken, requiresCSRF)
-	if err != nil {
-		return fmt.Errorf("password spraying attack failed: %w", err)
+	if _, exists := a.sessions[role]; exists {
+		return fmt.Errorf("session role %s already initialized", role)
 	}
-	allFindings = append(allFindings, sprayFindings...)
 
-	// 4. Report all findings collected during the run.
-	for _, finding := range allFindings {
-		if err := a.reporter.Publish(finding); err != nil {
-			a.logger.Error("Failed to publish finding", zap.Error(err), zap.String("title", finding.Title))
+	a.sessions[role] = &SessionContext{
+		Role:             role,
+		Client:           client,
+		ObservedRequests: make(map[string]ObservedRequest),
+	}
+	return nil
+}
+
+// ObserveAndExecute is called during the crawl phase. It executes requests within a session and saves interesting ones.
+func (a *Analyzer) ObserveAndExecute(ctx context.Context, role string, req *http.Request, body []byte) (*http.Response, error) {
+	// RLock Analyzer to safely access the session
+	a.mu.RLock()
+	session, exists := a.sessions[role]
+	a.mu.RUnlock()
+
+	if !exists {
+		return nil, fmt.Errorf("session role %s not initialized", role)
+	}
+
+	// Prepare request body
+	if len(body) > 0 {
+		req.Body = io.NopCloser(bytes.NewReader(body))
+	}
+
+	// Execute the request
+	resp, err := session.Client.Do(req.WithContext(ctx))
+	if err != nil {
+		return resp, err
+	}
+	defer resp.Body.Close()
+
+	// Read response body
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		a.logger.Warn("Failed to read response body during observation, skipping", zap.Error(err), zap.String("url", req.URL.String()))
+		// Do not return the error, but also do not process the observation.
+		// We still need to give back the response object with a reset body.
+		resp.Body = io.NopCloser(bytes.NewReader(respBody))
+		return resp, nil
+	}
+	resp.Body = io.NopCloser(bytes.NewReader(respBody)) // Reset body
+
+	// Analyze the request for identifiers
+	identifiers := ExtractIdentifiers(req, body)
+
+	if len(identifiers) > 0 {
+		requestKey := fmt.Sprintf("%s %s", req.Method, req.URL.Path)
+
+		// Clone the request before acquiring the lock to reduce contention
+		clonedReq := req.Clone(ctx)
+
+		// Lock the SessionContext for safe concurrent writes during observation
+		session.mu.Lock()
+		defer session.mu.Unlock()
+
+		session.ObservedRequests[requestKey] = ObservedRequest{
+			Request:        clonedReq,
+			Body:           body,
+			Identifiers:    identifiers,
+			BaselineStatus: resp.StatusCode,
+			BaselineLength: int64(len(respBody)),
 		}
 	}
+
+	return resp, nil
+}
+
+// RunAnalysis is the main testing phase. Optimized for concurrent execution.
+func (a *Analyzer) RunAnalysis(ctx context.Context, primaryRole, secondaryRole string) error {
+	// RLock Analyzer to safely access sessions
+	a.mu.RLock()
+	primarySession, okP := a.sessions[primaryRole]
+	secondarySession, okS := a.sessions[secondaryRole]
+	a.mu.RUnlock()
+
+	if !okP || !okS {
+		return fmt.Errorf("both primary (%s) and secondary (%s) roles must be initialized", primaryRole, secondaryRole)
+	}
+
+	// Safely access the count of observed requests
+	primarySession.mu.RLock()
+	observedCount := len(primarySession.ObservedRequests)
+	primarySession.mu.RUnlock()
+
+	a.logger.Info("Starting IDOR analysis",
+		zap.String("Victim", primaryRole),
+		zap.String("Attacker", secondaryRole),
+		zap.Int("ObservedRequests", observedCount))
+
+	var wg sync.WaitGroup
+
+	// Strategy 1: Horizontal IDOR (Attacker accesses Victim's resources)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		a.testHorizontal(ctx, primarySession, secondarySession)
+	}()
+
+	// Strategy 2: Predictive IDOR (Can we guess IDs of other resources?)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		a.testPredictive(ctx, primarySession)
+	}()
+
+	wg.Wait()
+	a.logger.Info("IDOR analysis completed")
 
 	return nil
 }
 
-// fetchCSRFToken makes a GET request to the login URL to extract a CSRF token.
-func (a *Analyzer) fetchCSRFToken(ctx context.Context) (string, bool, error) {
-	a.logger.Debug("Fetching login page to check for CSRF tokens.")
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.config.LoginURL, nil)
-	if err != nil {
-		return "", false, err
-	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/101.0.4951.54 Safari/537.36")
+// testHorizontal replays User A's requests using User B's session.
+// Optimized using a worker pool pattern.
+func (a *Analyzer) testHorizontal(ctx context.Context, primarySession *SessionContext, secondarySession *SessionContext) {
+	jobs := make(chan ObservedRequest, len(primarySession.ObservedRequests))
 
-	resp, err := a.client.Do(req)
-	if err != nil {
-		return "", false, err
+	// Fill the job channel (safe read access)
+	primarySession.mu.RLock()
+	for _, observed := range primarySession.ObservedRequests {
+		jobs <- observed
 	}
-	defer resp.Body.Close()
+	primarySession.mu.RUnlock()
+	close(jobs)
 
-	if resp.StatusCode != http.StatusOK {
-		return "", false, fmt.Errorf("received non-200 status code: %d", resp.StatusCode)
-	}
+	var wg sync.WaitGroup
 
-	// Check 1: Common CSRF Headers (often used by SPAs/APIs)
-	commonHeaders := []string{"X-CSRF-Token", "X-XSRF-TOKEN", "Csrf-Token", "X-Auth-Token"}
-	for _, header := range commonHeaders {
-		if token := resp.Header.Get(header); token != "" {
-			a.logger.Info("Found potential CSRF token in response header.", zap.String("header", header))
-			return token, true, nil
-		}
+	// Start worker Goroutines
+	for i := 0; i < a.concurrency; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			a.horizontalWorker(ctx, primarySession, secondarySession, jobs)
+		}()
 	}
 
-	// Check 2: Parse HTML Body
-	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, MaxBodyReadSize))
-	if err != nil {
-		return "", false, err
-	}
-
-	// Attempt to find the token using regex directly on the byte slice.
-	// Attempt 1: Name attribute before Value
-	matches := csrfTokenRegexNameFirst.FindSubmatch(bodyBytes)
-	if len(matches) > 1 {
-		token := string(matches[1])
-		a.logger.Info("Found potential CSRF token in HTML input (name first).")
-		return token, true, nil
-	}
-
-	// Attempt 2: Value attribute before Name
-	matches = csrfTokenRegexValueFirst.FindSubmatch(bodyBytes)
-	if len(matches) > 1 {
-		token := string(matches[1])
-		a.logger.Info("Found potential CSRF token in HTML input (value first).")
-		return token, true, nil
-	}
-
-	a.logger.Debug("No CSRF token found in headers or HTML inputs.")
-	return "", false, nil
+	wg.Wait()
 }
 
-// checkUserEnumeration actively probes the login page for info leaks and returns any findings.
-func (a *Analyzer) checkUserEnumeration(ctx context.Context, csrfToken string, requiresCSRF bool) ([]core.AnalysisResult, error) {
-	var findings []core.AnalysisResult
-
-	// Helper to create a finding and append it to the slice.
-	createFinding := func(title, description string, evidence *core.Evidence) {
-		findings = append(findings, core.AnalysisResult{
-			ScanID:            a.config.ScanID,
-			AnalyzerName:      "ATOAnalyzer (Active)",
-			Timestamp:         time.Now().UTC(),
-			VulnerabilityType: "UserEnumeration",
-			Title:             title,
-			Description:       description,
-			Severity:          core.SeverityMedium,
-			Status:            core.StatusOpen,
-			Confidence:        0.9,
-			TargetURL:         a.config.LoginURL,
-			Evidence:          evidence,
-		})
-	}
-
-	// Attempt 1: Baseline (known valid user with a bogus password).
-	var baselineResponse *LoginResponse
-	if len(a.config.KnownUsers) > 0 {
-		attempt := LoginAttempt{
-			Username:  a.config.KnownUsers[0],
-			Password:  "InvalidPassword!Scalpel_Enum",
-			CSRFToken: csrfToken,
+// horizontalWorker processes jobs from the channel for horizontal IDOR testing.
+func (a *Analyzer) horizontalWorker(ctx context.Context, primarySession *SessionContext, secondarySession *SessionContext, jobs <-chan ObservedRequest) {
+	for observed := range jobs {
+		select {
+		case <-ctx.Done():
+			return
+		default:
 		}
-		resp, err := a.sendLoginRequest(ctx, attempt, requiresCSRF)
+
+		// Prepare the request clone
+		req := observed.Request.Clone(ctx)
+		var reqBody []byte
+		if len(observed.Body) > 0 {
+			reqBody = observed.Body
+			req.Body = io.NopCloser(bytes.NewReader(observed.Body))
+		}
+
+		// Replay the request using the secondary session (Attacker's context)
+		resp, err := secondarySession.Client.Do(req)
 		if err != nil {
-			a.logger.Warn("Failed to establish baseline response with known user", zap.Error(err))
-		} else {
-			baselineResponse = resp
-		}
-	}
-
-	// Attempt 2: Invalid user.
-	invalidUsername := fmt.Sprintf("scalpel_enum_test_%d", time.Now().UnixNano())
-	attemptInvalid := LoginAttempt{
-		Username:  invalidUsername,
-		Password:  "InvalidPassword!Scalpel_Enum",
-		CSRFToken: csrfToken,
-	}
-	respInvalid, err := a.sendLoginRequest(ctx, attemptInvalid, requiresCSRF)
-	if err != nil {
-		return findings, fmt.Errorf("request for invalid user failed: %w", err)
-	}
-
-	// Check 1: Verbose Error Messages
-	if respInvalid.IsUserEnumeration || (baselineResponse != nil && baselineResponse.IsUserEnumeration) {
-		detail := respInvalid.EnumerationDetail
-		if detail == "" && baselineResponse != nil {
-			detail = baselineResponse.EnumerationDetail
-		}
-		createFinding("User Enumeration via Verbose Error Messages", detail, respInvalid.Evidence)
-		return findings, nil
-	}
-
-	// If no verbose messages, compare responses (if baseline exists).
-	if baselineResponse != nil {
-		// Check 2: Status Code Differentiation
-		if baselineResponse.StatusCode != respInvalid.StatusCode {
-			detail := fmt.Sprintf("Valid user resulted in status %d, invalid user resulted in status %d.", baselineResponse.StatusCode, respInvalid.StatusCode)
-			createFinding("User Enumeration via Status Code Differentiation", detail, respInvalid.Evidence)
-		}
-
-		// Check 3: Content Length Differentiation
-		if abs(len(baselineResponse.ResponseBody)-len(respInvalid.ResponseBody)) > EnumContentLengthThreshold {
-			detail := fmt.Sprintf("Valid user resulted in length %d, invalid user resulted in length %d.", len(baselineResponse.ResponseBody), len(respInvalid.ResponseBody))
-			createFinding("User Enumeration via Content Length Differentiation", detail, respInvalid.Evidence)
-		}
-
-		// Check 4: Timing Analysis
-		timeDiff := baselineResponse.ResponseTimeMs - respInvalid.ResponseTimeMs
-		if timeDiff > EnumTimingThresholdMs {
-			detail := fmt.Sprintf("The application takes significantly longer to respond to valid users. Valid user: %dms, Invalid user: %dms.", baselineResponse.ResponseTimeMs, respInvalid.ResponseTimeMs)
-			createFinding("User Enumeration via Timing Analysis", detail, respInvalid.Evidence)
-		}
-	}
-
-	return findings, nil
-}
-
-// executePasswordSpraying runs the low and slow attack.
-func (a *Analyzer) executePasswordSpraying(ctx context.Context, initialCSRFToken string, requiresCSRF bool) ([]core.AnalysisResult, error) {
-	var findings []core.AnalysisResult
-	if len(a.config.KnownUsers) == 0 {
-		return findings, nil
-	}
-
-	payloads := GenerateSprayingPayloads(a.config.KnownUsers)
-	attempts := 0
-	consecutiveErrors := 0
-	lockoutDetected := false
-	currentCSRFToken := initialCSRFToken
-
-	// Setup a rate limiter for precise control and graceful context cancellation.
-	rps := float64(1000) // A high default if delay is zero.
-	if a.config.DelayBetween > 0 {
-		rps = 1.0 / a.config.DelayBetween.Seconds()
-	}
-	limiter := rate.NewLimiter(rate.Limit(rps), 1)
-
-	for _, attempt := range payloads {
-		if attempts >= a.config.MaxGlobalAttempts {
-			a.logger.Info("Max global attempts reached. Stopping attack.")
-			break
-		}
-
-		// Wait for the rate limiter before proceeding. This handles context cancellation correctly.
-		if err := limiter.Wait(ctx); err != nil {
-			return findings, err // Context was canceled while waiting.
-		}
-
-		if requiresCSRF && currentCSRFToken == "" {
-			newToken, _, err := a.fetchCSRFToken(ctx)
-			if err != nil || newToken == "" {
-				a.logger.Warn("CSRF required but failed to refresh token. Halting attack.", zap.Error(err))
-				break
-			}
-			currentCSRFToken = newToken
-		}
-
-		attempt.CSRFToken = currentCSRFToken
-		
-		resp, err := a.sendLoginRequest(ctx, attempt, requiresCSRF)
-		attempts++ // Increment attempt counter regardless of network error.
-
-		if err != nil {
-			if ctx.Err() != nil {
-				return findings, ctx.Err() // Context cancelled during request.
-			}
-			a.logger.Warn("Failed to send login request", zap.Error(err), zap.String("user", attempt.Username))
-			consecutiveErrors++
-			if consecutiveErrors >= MaxConsecutiveErrors {
-				return findings, fmt.Errorf("aborting password spraying due to %d consecutive errors: %w", consecutiveErrors, err)
-			}
+			a.logger.Debug("Network error during IDOR replay", zap.Error(err), zap.String("url", req.URL.String()))
 			continue
 		}
-		consecutiveErrors = 0 // Reset error counter on a successful request.
+		// Crucial: Guarantee the body is closed to prevent connection leaks
+		defer resp.Body.Close()
 
-		if resp.Success {
-			detail := fmt.Sprintf("Successful authentication with Username: '%s' and Password: '%s' via Password Spraying.", attempt.Username, attempt.Password)
-			findings = append(findings, core.AnalysisResult{
-				ScanID:            a.config.ScanID,
-				AnalyzerName:      "ATOAnalyzer (Active)",
-				Timestamp:         time.Now().UTC(),
-				VulnerabilityType: "AccountTakeover",
-				Title:             "Account Takeover Successful (Password Spraying)",
-				Description:       detail,
-				Severity:          core.SeverityCritical,
-				Status:            core.StatusOpen,
-				Confidence:        1.0, // We did it ourselves.
-				TargetURL:         a.config.LoginURL,
-				Evidence:          resp.Evidence,
-			})
-		}
-
-		if resp.IsLockout {
-			a.logger.Info("Account lockout mechanism detected. Halting attack.")
-			lockoutDetected = true
-			break
-		}
-	}
-
-	if !lockoutDetected && attempts > 15 {
-		detail := fmt.Sprintf("The application allowed %d failed login attempts without enforcing an effective account lockout policy.", attempts)
-		findings = append(findings, core.AnalysisResult{
-			ScanID:            a.config.ScanID,
-			AnalyzerName:      "ATOAnalyzer (Active)",
-			Timestamp:         time.Now().UTC(),
-			VulnerabilityType: "WeakLockoutPolicy",
-			Title:             "Weak or Non-Existent Account Lockout Policy",
-			Description:       detail,
-			Severity:          core.SeverityHigh,
-			Status:            core.StatusOpen,
-			Confidence:        0.9,
-			TargetURL:         a.config.LoginURL,
-			Evidence:          nil,
-		})
-	}
-
-	return findings, nil
-}
-
-// sendLoginRequest handles JSON or form data, including CSRF tokens.
-func (a *Analyzer) sendLoginRequest(ctx context.Context, attempt LoginAttempt, includeCSRF bool) (*LoginResponse, error) {
-	var bodyReader io.Reader
-	var serializedReqBody string
-	contentType := a.config.ContentType
-
-	if strings.Contains(contentType, "application/json") {
-		payload := map[string]string{
-			a.config.UserField: attempt.Username,
-			a.config.PassField: attempt.Password,
-		}
-		if includeCSRF && attempt.CSRFToken != "" {
-			payload[a.config.CSRFField] = attempt.CSRFToken
-		}
-
-		jsonPayload, err := json.Marshal(payload)
+		// Analyze the response
+		respBody, err := io.ReadAll(resp.Body)
 		if err != nil {
-			return nil, err
-		}
-		serializedReqBody = string(jsonPayload)
-		bodyReader = bytes.NewReader(jsonPayload)
-	} else {
-		data := url.Values{}
-		data.Set(a.config.UserField, attempt.Username)
-		data.Set(a.config.PassField, attempt.Password)
-
-		if includeCSRF && attempt.CSRFToken != "" {
-			data.Set(a.config.CSRFField, attempt.CSRFToken)
+			a.logger.Warn("Failed to read response body during IDOR analysis", zap.Error(err), zap.String("url", req.URL.String()))
+			continue // Cannot analyze without the full body
 		}
 
-		serializedReqBody = data.Encode()
-		// Use strings.NewReader for efficiency, it avoids an extra copy.
-		bodyReader = strings.NewReader(serializedReqBody)
-		contentType = "application/x-www-form-urlencoded"
-	}
+		currentLength := int64(len(respBody))
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.config.LoginURL, bodyReader)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", contentType)
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/101.0.4951.54 Safari/537.36")
-	req.Header.Set("Origin", req.URL.Scheme+"://"+req.URL.Host)
-	req.Header.Set("Referer", a.config.LoginURL)
+		// Detection Logic: Same status code and similar content length.
+		if resp.StatusCode == observed.BaselineStatus {
+			lengthDiff := abs(currentLength - observed.BaselineLength)
+			tolerance := int64(float64(observed.BaselineLength) * 0.1) // 10% tolerance for dynamic content
 
-	startTime := time.Now()
-	resp, err := a.client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	responseTimeMs := time.Since(startTime).Milliseconds()
+			if lengthDiff <= tolerance {
+				// Vulnerability found
+				key := fmt.Sprintf("%s %s", req.Method, req.URL.Path)
+				description := fmt.Sprintf("A resource belonging to %s (Victim) was successfully accessed by %s (Attacker). The status code (%d) and content length (%d vs baseline %d) match the original request, indicating an access control failure (BOLA).",
+					primarySession.Role, secondarySession.Role, resp.StatusCode, currentLength, observed.BaselineLength)
 
-	// Use LimitReader to prevent excessive memory usage from a large response.
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, MaxBodyReadSize))
-	if err != nil {
-		return nil, err
-	}
+				evidence := &core.Evidence{
+					Summary: fmt.Sprintf("Horizontal access to %s", key),
+					Request: &core.SerializedRequest{
+						Method:  req.Method,
+						URL:     req.URL.String(),
+						Headers: req.Header,
+						Body:    string(reqBody),
+					},
+					Response: &core.SerializedResponse{
+						StatusCode: resp.StatusCode,
+						Headers:    resp.Header,
+						Body:       string(respBody),
+					},
+				}
 
-	analyzedResponse := AnalyzeResponse(attempt, resp.StatusCode, string(respBody), responseTimeMs)
-	analyzedResponse.Evidence = &core.Evidence{
-		Summary: fmt.Sprintf("Attempt with user: %s", attempt.Username),
-		Request: &core.SerializedRequest{
-			Method:  req.Method,
-			URL:     a.config.LoginURL,
-			Headers: req.Header,
-			Body:    serializedReqBody,
-		},
-		Response: &core.SerializedResponse{
-			StatusCode: resp.StatusCode,
-			Headers:    resp.Header,
-			Body:       string(respBody),
-		},
+				a.reportFinding(
+					"Horizontal Insecure Direct Object Reference (IDOR)",
+					description,
+					core.SeverityHigh,
+					req.URL.String(),
+					evidence,
+					"CWE-284", // Improper Access Control
+				)
+			}
+		}
 	}
-
-	return &analyzedResponse, nil
 }
 
-func abs(x int) int {
-	if x < 0 {
-		return -x
+//  checks if modifying identifiers leads to accessing other valid resources.
+// Optimized using a worker pool pattern.
+func (a *Analyzer) testPredictive(ctx context.Context, session *SessionContext) {
+	// PredictiveJob is defined in types.go
+	jobs := make(chan PredictiveJob, 100) // Buffer the channel
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		// Prepare job list (safe read access)
+		session.mu.RLock()
+		for _, observed := range session.ObservedRequests {
+			for _, identifier := range observed.Identifiers {
+				job := PredictiveJob{Observed: observed, Identifier: identifier}
+				select {
+				case jobs <- job:
+				case <-ctx.Done():
+					session.mu.RUnlock()
+					close(jobs)
+					return
+				}
+			}
+		}
+		session.mu.RUnlock()
+		close(jobs)
+	}()
+
+	// Start worker Goroutines
+	for i := 0; i < a.concurrency; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			a.predictiveWorker(ctx, session, jobs)
+		}()
 	}
-	return x
+
+	wg.Wait()
+}
+
+//  processes jobs from the channel for predictive IDOR testing.
+func (a *Analyzer) predictiveWorker(ctx context.Context, session *SessionContext, jobs <-chan PredictiveJob) {
+	for job := range jobs {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		observed := job.Observed
+		identifier := job.Identifier
+
+		// Generate the test value
+		testValue, err := GenerateTestValue(identifier)
+		if err != nil {
+			// Skip if we cannot generate a predictable value (e.g., UUIDs)
+			continue
+		}
+
+		// Create the modified request
+		testReq, testBody, err := ApplyTestValue(observed.Request, observed.Body, identifier, testValue)
+		if err != nil {
+			a.logger.Debug("Failed to apply test value", zap.Error(err))
+			continue
+		}
+
+		if len(testBody) > 0 {
+			testReq.Body = io.NopCloser(bytes.NewReader(testBody))
+		}
+
+		// Send the modified request using the original user's session
+		resp, err := session.Client.Do(testReq.WithContext(ctx))
+		if err != nil {
+			continue
+		}
+		defer resp.Body.Close()
+
+		respBody, err := io.ReadAll(resp.Body)
+		if err != nil {
+			a.logger.Warn("Failed to read response body during predictive IDOR analysis", zap.Error(err), zap.String("url", testReq.URL.String()))
+			continue
+		}
+
+		// Detection Logic: A successful response (2xx).
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			// Vulnerability found
+			key := fmt.Sprintf("%s %s", observed.Request.Method, observed.Request.URL.Path)
+			description := fmt.Sprintf("The application granted access to a resource by predicting an identifier. The original identifier '%s' (Type: %s) at location '%s' (Key: %s) was modified to '%s', and the request succeeded (Status: %d).",
+				identifier.Value, identifier.Type, identifier.Location, identifier.Key, testValue, resp.StatusCode)
+
+			evidence := &core.Evidence{
+				Summary: fmt.Sprintf("Predictive access to %s using modified ID %s", key, testValue),
+				Request: &core.SerializedRequest{
+					Method:  testReq.Method,
+					URL:     testReq.URL.String(),
+					Headers: testReq.Header,
+					Body:    string(testBody),
+				},
+				Response: &core.SerializedResponse{
+					StatusCode: resp.StatusCode,
+					Headers:    resp.Header,
+					Body:       string(respBody),
+				},
+			}
+
+			a.reportFinding(
+				"Predictive Insecure Direct Object Reference (IDOR)",
+				description,
+				core.SeverityMedium,
+				testReq.URL.String(),
+				evidence,
+				"CWE-639", // Authorization Bypass Through User-Controlled Key
+			)
+		}
+	}
+}
+
+//  publishes the vulnerability details via the core reporter interface.
+func (a *Analyzer) reportFinding(title, description string, severity core.SeverityLevel, targetURL string, evidence *core.Evidence, cwe string) {
+	finding := core.AnalysisResult{
+		ScanID:            a.ScanID,
+		AnalyzerName:      "IDORAnalyzer",
+		Timestamp:         time.Now().UTC(),
+		VulnerabilityType: "BrokenObjectLevelAuthorization",
+		Title:             title,
+		Description:       description,
+		Severity:          severity,
+		Status:            core.StatusOpen,
+		Confidence:        0.95, // High confidence for active tests.
+		TargetURL:         targetURL,
+		Evidence:          evidence,
+		CWE:               cwe,
+	}
+	if err := a.reporter.Publish(finding); err != nil {
+		a.logger.Error("Failed to publish finding", zap.Error(err), zap.String("title", title))
+	}
+}
+
+// Helper function for absolute value of int64
+func abs(n int64) int64 {
+	if n < 0 {
+		return -n
+	}
+	return n
 }

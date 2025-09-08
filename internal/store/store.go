@@ -28,8 +28,8 @@ func New(ctx context.Context, pool *pgxpool.Pool, logger *zap.Logger) (*Store, e
 	}, nil
 }
 
-// PersistData handles the database transaction for inserting all data from a result envelope.
-func (s *Store) PersistData(ctx context.Context, envelope *schemas.ResultEnvelope) error {
+// handles the database transaction for inserting all data from a result envelope.
+func (s *Store) PersistData(ctx context.Context, envelope *schemasss.ResultEnvelope) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
@@ -75,7 +75,7 @@ func (s *Store) PersistData(ctx context.Context, envelope *schemas.ResultEnvelop
 	return tx.Commit(ctx)
 }
 
-// persistFindings bulk inserts findings using the high-performance pgx CopyFrom protocol.
+// inserts findings using the high performance pgx CopyFrom protocol.
 func (s *Store) persistFindings(ctx context.Context, tx pgx.Tx, scanID string, findings []schemas.Finding) error {
 	rows := make([][]interface{}, len(findings))
 	for i, f := range findings {
@@ -96,7 +96,7 @@ func (s *Store) persistFindings(ctx context.Context, tx pgx.Tx, scanID string, f
 }
 
 
-// persistNodes bulk upserts knowledge graph nodes.
+// upserts knowledge graph nodes.
 func (s *Store) persistNodes(ctx context.Context, tx pgx.Tx, nodes []schemas.NodeInput) error {
 	rows := make([][]interface{}, len(nodes))
 	for i, n := range nodes {
@@ -110,7 +110,7 @@ func (s *Store) persistNodes(ctx context.Context, tx pgx.Tx, nodes []schemas.Nod
 	return err
 }
 
-// persistEdges bulk upserts knowledge graph edges.
+// upserts knowledge graph edges.
 func (s *Store) persistEdges(ctx context.Context, tx pgx.Tx, edges []schemas.EdgeInput) error {
 	rows := make([][]interface{}, len(edges))
 	for i, e := range edges {
