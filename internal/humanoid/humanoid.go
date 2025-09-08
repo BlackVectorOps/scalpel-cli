@@ -1,4 +1,4 @@
-// internal/humanoid/humanoid.go --
+// Filename: internal/humanoid/humanoid.go
 package humanoid
 
 import (
@@ -11,7 +11,6 @@ import (
 	"github.com/aquilax/go-perlin"
 	"github.com/chromedp/cdproto/cdp"
 	"github.com/chromedp/cdproto/input"
-	"github.com/chromedp/cdproto/page"
 	"github.com/chromedp/chromedp"
 	"go.uber.org/zap"
 )
@@ -29,37 +28,35 @@ const (
 
 // Humanoid manages the state and execution of human-like interactions.
 type Humanoid struct {
-	// Base configuration (defines the session persona)
-	baseConfig Config
-	// Dynamic configuration (current state, affected by fatigue)
-	dynamicConfig Config
+	// -- Configuration and State --
+	baseConfig         Config
+	dynamicConfig      Config
+	logger             *zap.Logger
+	rng                *rand.Rand
+	lastActionTime     time.Time
+	fatigueLevel       float64 // Tracks user fatigue
 
-	// Browser context and logging
+	// -- Mouse and Position State --
+	mu                   sync.Mutex    // Protects position and button state
+	currentPos           Vector2D      // The current mouse coordinates
+	currentButtonState   MouseButton   // This field was likely already present
+	lastMovementDistance float64       // ADDED: Tracks the distance of the last MoveTo action
+	noiseX               *perlin.Perlin
+	noiseY               *perlin.Perlin
+
+	// -- Browser Interaction --
 	browserContextID cdp.BrowserContextID
-	logger           *zap.Logger
-
-	// Internal state synchronization
-	mu sync.Mutex
-
-	// Current cursor position and state
-	currentPos         Vector2D
-	currentButtonState MouseButton // Tracks the currently pressed mouse button
-
-	// Fatigue modeling
-	fatigueLevel float64 // Ranges from 0.0 (rested) to 1.0 (exhausted)
-
-	// State tracking
-	lastActionTime       time.Time
-	lastMovementDistance float64 // Tracks the distance of the last MoveTo action for Fitts's Law.
-
-	// Noise generation
-	rng    *rand.Rand
-	noiseX *perlin.Perlin
-	noiseY *perlin.Perlin
+	executor         Executor // Your new executor field
 }
 
-// New creates a new Humanoid instance with the given configuration.
+// New creates a new Humanoid instance with the default production executor (CDPExecutor).
 func New(config Config, logger *zap.Logger, browserContextID cdp.BrowserContextID) *Humanoid {
+	// Maintain backward compatibility with the original signature.
+	return NewWithExecutor(config, logger, browserContextID, NewCDPExecutor())
+}
+
+// NewWithExecutor creates a new Humanoid instance with the given configuration and injected executor.
+func NewWithExecutor(config Config, logger *zap.Logger, browserContextID cdp.BrowserContextID, executor Executor) *Humanoid {
 	// 1. Initialize RNG
 	var seed int64
 	var rng *rand.Rand
@@ -68,7 +65,8 @@ func New(config Config, logger *zap.Logger, browserContextID cdp.BrowserContextI
 		source := rand.NewSource(seed)
 		rng = rand.New(source)
 	} else {
-		// If an RNG is provided, use it. Use a randomized seed for Perlin noise.
+		// If an RNG is provided, use it.
+		// Use a randomized seed for Perlin noise.
 		seed = time.Now().UnixNano()
 		rng = config.Rng
 	}
@@ -90,6 +88,8 @@ func New(config Config, logger *zap.Logger, browserContextID cdp.BrowserContextI
 		currentButtonState: MouseButtonNone,
 		noiseX:             perlin.NewPerlin(alpha, beta, n, seed),
 		noiseY:             perlin.NewPerlin(alpha, beta, n, seed+1), // Offset seed for Y noise
+		currentPos:         Vector2D{},                               // Explicitly initialize the position vector
+		executor:           executor,
 	}
 
 	return h
@@ -107,7 +107,8 @@ func (h *Humanoid) GetCurrentPos() Vector2D {
 func (h *Humanoid) SetButtonState(newState MouseButton, action chromedp.Action) chromedp.Action {
 	return chromedp.ActionFunc(func(ctx context.Context) error {
 		// 1. Execute the actual browser action (MouseDown/Up).
-		if err := action.Do(ctx); err != nil {
+		// REFACTORED: Use the executor.
+		if err := h.executor.ExecuteAction(ctx, action); err != nil {
 			return err
 		}
 
@@ -122,14 +123,14 @@ func (h *Humanoid) SetButtonState(newState MouseButton, action chromedp.Action) 
 // InitializePosition sets the initial cursor position realistically within the viewport.
 func (h *Humanoid) InitializePosition(ctx context.Context) error {
 	// 1. Get the layout metrics.
-	// VERIFIED: Using the modern 7-value return signature.
-	_, _, _, _, cssVisualViewport, _, err := page.GetLayoutMetrics().Do(ctx)
+	// REFACTORED: Use the executor.
+	cssVisualViewport, err := h.executor.GetLayoutMetrics(ctx)
 	if err != nil {
 		h.logger.Warn("Humanoid: failed to get layout metrics", zap.Error(err))
+		// Continue with fallback if error occurs, don't return immediately.
 	}
 
 	var width, height float64
-	// Use the cssVisualViewport returned from the modern signature.
 	if cssVisualViewport != nil {
 		width = cssVisualViewport.ClientWidth
 		height = cssVisualViewport.ClientHeight
@@ -153,5 +154,7 @@ func (h *Humanoid) InitializePosition(ctx context.Context) error {
 	h.mu.Unlock()
 
 	// 3. Dispatch the initial mouse move event.
-	return chromedp.MouseEvent(input.MouseMoved, startX, startY).Do(ctx)
+	// REFACTORED: Use the executor.
+	action := chromedp.MouseEvent(input.MouseMoved, startX, startY)
+	return h.executor.ExecuteAction(ctx, action)
 }
