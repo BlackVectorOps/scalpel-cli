@@ -1,4 +1,4 @@
-// pkg/analysis/active/timeslip/h1_singlebyte.go
+// -- internal/analysis/active/timeslip/h1_singlebyte.go --
 package timeslip
 
 import (

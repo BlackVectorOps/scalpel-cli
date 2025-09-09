@@ -1,9 +1,10 @@
-// pkg/analysis/active/timeslip/h1_concurrent.go
+// -- internal/analysis/active/timeslip/h1_concurrent.go --
 package timeslip
 
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -42,7 +43,7 @@ func ExecuteH1Concurrent(ctx context.Context, candidate *RaceCandidate, config *
 		go func() {
 			defer wg.Done()
 
-			// --- Mutation Phase ---
+			// -- Mutation Phase --
 			mutatedBody, mutatedHeaders, err := MutateRequest(candidate.Body, candidate.Headers)
 			if err != nil {
 				resultsChan <- &RaceResponse{Error: fmt.Errorf("%w: %v", ErrPayloadMutationFail, err)}
@@ -50,12 +51,12 @@ func ExecuteH1Concurrent(ctx context.Context, candidate *RaceCandidate, config *
 				return
 			}
 
-			// --- Initialization Phase (Connection Priming Simulation) ---
+			// -- Initialization Phase (Connection Priming Simulation) --
 			// If ConnectionDelay is specified, wait here before signaling readiness.
 			if config.ConnectionDelay > 0 {
 				select {
 				case <-time.After(config.ConnectionDelay):
-					// Delay complete
+				// Delay complete
 				case <-ctx.Done():
 					// Interrupted during initialization
 					resultsChan <- &RaceResponse{Error: ctx.Err()}
@@ -67,7 +68,7 @@ func ExecuteH1Concurrent(ctx context.Context, candidate *RaceCandidate, config *
 			// Signal that this goroutine is initialized and ready to fire.
 			initWg.Done()
 
-			// --- Synchronization Phase ---
+			// -- Synchronization Phase --
 			select {
 			case <-startGate:
 			// Proceed
@@ -84,7 +85,7 @@ func ExecuteH1Concurrent(ctx context.Context, candidate *RaceCandidate, config *
 				time.Sleep(jitter)
 			}
 
-			// --- Execution Phase ---
+			// -- Execution Phase --
 			reqStart := time.Now()
 
 			req, err := http.NewRequestWithContext(ctx, candidate.Method, candidate.URL, bytes.NewReader(mutatedBody))
@@ -105,7 +106,7 @@ func ExecuteH1Concurrent(ctx context.Context, candidate *RaceCandidate, config *
 			}
 			defer resp.Body.Close()
 
-			// --- Response Processing Phase ---
+			// -- Response Processing Phase --
 
 			// Use pooled buffer for reading the response body to reduce GC pressure.
 			buf := getBuffer()

@@ -1,5 +1,3 @@
-
-// internal/config/config.go
 // The application's root configuration, updated with an expanded list of supported LLM providers.
 //
 package config
@@ -30,17 +28,31 @@ type Config struct {
 	Agent    AgentConfig    `mapstructure:"agent"`
 }
 
-// LoggerConfig holds settings for the logging system.
+// ColorConfig defines the color settings for different log levels.
+// These are used for console output to make logs more readable.
+type ColorConfig struct {
+	Debug  string `mapstructure:"debug" json:"debug" yaml:"debug"`
+	Info   string `mapstructure:"info" json:"info" yaml:"info"`
+	Warn   string `mapstructure:"warn" json:"warn" yaml:"warn"`
+	Error  string `mapstructure:"error" json:"error" yaml:"error"`
+	DPanic string `mapstructure:"dpanic" json:"dpanic" yaml:"dpanic"`
+	Panic  string `mapstructure:"panic" json:"panic" yaml:"panic"`
+	Fatal  string `mapstructure:"fatal" json:"fatal" yaml:"fatal"`
+}
+
+// LoggerConfig holds all the configuration for the logger.
+// This is the single source of truth for this struct.
 type LoggerConfig struct {
-	ServiceName string `mapstructure:"service_name"`
-	LogFile     string `mapstructure:"log_file"`
-	Level       string `mapstructure:"level"`
-	Format      string `mapstructure:"format"`
-	AddSource   bool   `mapstructure:"add_source"`
-	MaxSize     int    `mapstructure:"max_size"`
-	MaxBackups  int    `mapstructure:"max_backups"`
-	MaxAge      int    `mapstructure:"max_age"`
-	Compress    bool   `mapstructure:"compress"`
+	Level       string      `mapstructure:"level" json:"level" yaml:"level"`
+	Format      string      `mapstructure:"format" json:"format" yaml:"format"`
+	AddSource   bool        `mapstructure:"add_source" json:"add_source" yaml:"add_source"`
+	ServiceName string      `mapstructure:"service_name" json:"service_name" yaml:"service_name"`
+	LogFile     string      `mapstructure:"log_file" json:"log_file" yaml:"log_file"`
+	MaxSize     int         `mapstructure:"max_size" json:"max_size" yaml:"max_size"`
+	MaxBackups  int         `mapstructure:"max_backups" json:"max_backups" yaml:"max_backups"`
+	MaxAge      int         `mapstructure:"max_age" json:"max_age" yaml:"max_age"`
+	Compress    bool        `mapstructure:"compress" json:"compress" yaml:"compress"`
+	Colors      ColorConfig `mapstructure:"colors" json:"colors" yaml:"colors"`
 }
 
 // PostgresConfig holds settings for the database connection.
@@ -50,23 +62,23 @@ type PostgresConfig struct {
 
 // EngineConfig holds settings for the task execution engine.
 type EngineConfig struct {
-	QueueSize          int           `mapstructure:"queue_size"`
-	WorkerConcurrency  int           `mapstructure:"worker_concurrency"`
+	QueueSize         int           `mapstructure:"queue_size"`
+	WorkerConcurrency int           `mapstructure:"worker_concurrency"`
 	DefaultTaskTimeout time.Duration `mapstructure:"default_task_timeout"`
 }
 
 // BrowserConfig holds settings for the headless browser.
 type BrowserConfig struct {
-	Headless        bool           `mapstructure:"headless"`
-	IgnoreTLSErrors bool           `mapstructure:"ignore_tls_errors"`
-	Args            []string       `mapstructure:"args"`
-	Viewport        map[string]int `mapstructure:"viewport"`
+	Headless        bool            `mapstructure:"headless"`
+	IgnoreTLSErrors bool            `mapstructure:"ignore_tls_errors"`
+	Args            []string        `mapstructure:"args"`
+	Viewport        map[string]int  `mapstructure:"viewport"`
 	Humanoid        humanoid.Config `mapstructure:"humanoid"`
 }
 
 // NetworkConfig holds settings for HTTP requests.
 type NetworkConfig struct {
-	Timeout time.Duration `mapstructure:"timeout"`
+	Timeout time.Duration     `mapstructure:"timeout"`
 	Headers map[string]string `mapstructure:"headers"`
 }
 
@@ -98,10 +110,10 @@ type JWTConfig struct {
 
 // ActiveScannersConfig holds settings for active analysis.
 type ActiveScannersConfig struct {
-	Taint          TaintConfig          `mapstructure:"taint"`
+	Taint        TaintConfig          `mapstructure:"taint"`
 	ProtoPollution ProtoPollutionConfig `mapstructure:"protopollution"`
-	TimeSlip       TimeSlipConfig       `mapstructure:"timeslip"`
-	Auth           AuthConfig           `mapstructure:"auth"`
+	TimeSlip     TimeSlipConfig       `mapstructure:"timeslip"`
+	Auth         AuthConfig           `mapstructure:"auth"`
 }
 
 type TaintConfig struct {
@@ -127,14 +139,14 @@ type AuthConfig struct {
 }
 
 type ATOConfig struct {
-	Enabled                bool     `mapstructure:"enabled"`
-	UsernameFields         []string `mapstructure:"username_fields"`
-	PasswordFields         []string `mapstructure:"password_fields"`
-	UsernameWordlist       string   `mapstructure:"username_wordlist"`
-	PasswordSprayWordlist  string   `mapstructure:"password_spray_wordlist"`
-	SuccessRegex           string   `mapstructure:"success_regex"`
-	FailureRegex           string   `mapstructure:"failure_regex"`
-	LockoutRegex           string   `mapstructure:"lockout_regex"`
+	Enabled              bool     `mapstructure:"enabled"`
+	UsernameFields       []string `mapstructure:"username_fields"`
+	PasswordFields       []string `mapstructure:"password_fields"`
+	UsernameWordlist     string   `mapstructure:"username_wordlist"`
+	PasswordSprayWordlist string   `mapstructure:"password_spray_wordlist"`
+	SuccessRegex         string   `mapstructure:"success_regex"`
+	FailureRegex         string   `mapstructure:"failure_regex"`
+	LockoutRegex         string   `mapstructure:"lockout_regex"`
 	DelayBetweenAttemptsMs int      `mapstructure:"delay_between_attempts_ms"`
 }
 
@@ -156,7 +168,7 @@ type ScanConfig struct {
 
 // AgentConfig holds settings for the autonomous agent.
 type AgentConfig struct {
-	Enabled bool             `mapstructure:"enabled"`
+	Enabled bool            `mapstructure:"enabled"`
 	LLM     LLMRouterConfig `mapstructure:"llm"`
 }
 
@@ -173,8 +185,8 @@ const (
 
 // LLMRouterConfig holds the configuration for the multi-model LLM setup.
 type LLMRouterConfig struct {
-	DefaultFastModel     string                    `mapstructure:"default_fast_model"`
-	DefaultPowerfulModel string                    `mapstructure:"default_powerful_model"`
+	DefaultFastModel     string                      `mapstructure:"default_fast_model"`
+	DefaultPowerfulModel string                      `mapstructure:"default_powerful_model"`
 	Models               map[string]LLMModelConfig `mapstructure:"models"`
 }
 
@@ -213,4 +225,3 @@ func Get() *Config {
 	}
 	return instance
 }
-
