@@ -1,16 +1,20 @@
-// -- pkg/analysis/active/timeslip/analyzer.go --
+// -- internal/analysis/active/timeslip/analyzer.go --
 package timeslip
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"time"
+	"unicode/utf8"
 
+	"github.com/google/uuid"
+	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
 	"github.com/xkilldash9x/scalpel-cli/internal/observability"
-	"github.com/xkilldash9x/scalpel-cli/api/schemas"
+	"go.uber.org/zap"
 )
-
 
 // Analyzer orchestrates the TimeSlip module, managing strategy execution and result analysis.
 type Analyzer struct {
@@ -24,7 +28,9 @@ type Analyzer struct {
 // The signature is updated to return an error if the configuration, like its regex patterns, is invalid.
 func NewAnalyzer(scanID uuid.UUID, config *Config, logger *zap.Logger, reporter core.Reporter) (*Analyzer, error) {
 	if logger == nil {
-		logger = observability.NewNopLogger()
+		// This is a safety net. If no logger is provided, we use a no-op one
+		// so we don't have to deal with nil pointer panics down the line.
+		logger = observability.GetLogger().Named("timeslip_analyzer_nop")
 	}
 	log := logger.Named("timeslip_analyzer")
 
@@ -160,9 +166,9 @@ func (a *Analyzer) determineStrategies(candidate *RaceCandidate) []RaceStrategy 
 
 // TimeSlipEvidence provides structured data for race condition findings.
 type TimeSlipEvidence struct {
-	Strategy        RaceStrategy            `json:"strategy"`
-	TotalDurationMs int64                   `json:"total_duration_ms"`
-	Statistics      ResponseStatistics      `json:"statistics"`
+	Strategy        RaceStrategy             `json:"strategy"`
+	TotalDurationMs int64                    `json:"total_duration_ms"`
+	Statistics      ResponseStatistics       `json:"statistics"`
 	SampleResponses []core.SerializedResponse `json:"sample_responses"`
 }
 

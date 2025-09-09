@@ -1,4 +1,3 @@
-// internal/observability/logger.go 
 package observability
 
 import (
@@ -6,7 +5,7 @@ import (
 	"os"
 	"strings"
 	"sync"
-	"sync/atomic" // Import atomic
+	"sync/atomic"
 
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
 	"go.uber.org/zap"
@@ -15,7 +14,7 @@ import (
 )
 
 var (
-	// Use an atomic pointer for safe concurrent access
+	// Use an atomic pointer for safe concurrent access.
 	globalLogger atomic.Pointer[zap.Logger]
 	once         sync.Once
 )
@@ -85,54 +84,56 @@ func InitializeLogger(cfg config.LoggerConfig) {
 	})
 }
 
-// Custom level encoder that pulls from our config.
-func customColorLevelEncoder(level zapcore.Level, enc zapcore.Encoder, colorConfig config.ColorConfig) {
-	var color string
-	levelStr := strings.ToUpper(level.String())
+// newColorizedLevelEncoder creates a zapcore.LevelEncoder that colorizes the log level
+// based on the provided color configuration. This function returns a closure that
+// matches the required zapcore.LevelEncoder type signature.
+func newColorizedLevelEncoder(colors config.ColorConfig) zapcore.LevelEncoder {
+	return func(level zapcore.Level, enc zapcore.PrimitiveArrayEncoder) {
+		var color string
+		levelStr := strings.ToUpper(level.String())
 
-	// Grab the right color from the config map.
-	switch level {
-	case zapcore.DebugLevel:
-		color = colorMap[colorConfig.Debug]
-	case zapcore.InfoLevel:
-		color = colorMap[colorConfig.Info]
-	case zapcore.WarnLevel:
-		color = colorMap[colorConfig.Warn]
-	case zapcore.ErrorLevel:
-		color = colorMap[colorConfig.Error]
-	case zapcore.DPanicLevel:
-		color = colorMap[colorConfig.DPanic]
-	case zapcore.PanicLevel:
-		color = colorMap[colorConfig.Panic]
-	case zapcore.FatalLevel:
-		color = colorMap[colorConfig.Fatal]
-	default:
-		// Fallback for any other levels.
-		color = colorReset
-	}
+		// Grab the right color from the config map.
+		switch level {
+		case zapcore.DebugLevel:
+			color = colorMap[colors.Debug]
+		case zapcore.InfoLevel:
+			color = colorMap[colors.Info]
+		case zapcore.WarnLevel:
+			color = colorMap[colors.Warn]
+		case zapcore.ErrorLevel:
+			color = colorMap[colors.Error]
+		case zapcore.DPanicLevel:
+			color = colorMap[colors.DPanic]
+		case zapcore.PanicLevel:
+			color = colorMap[colors.Panic]
+		case zapcore.FatalLevel:
+			color = colorMap[colors.Fatal]
+		default:
+			// Fallback for any other levels.
+			color = colorReset
+		}
 
-	// If a color was found, wrap the level string in ANSI codes.
-	if color != "" {
-		enc.AppendString(fmt.Sprintf("%s%s%s", color, levelStr, colorReset))
-	} else {
-		enc.AppendString(levelStr)
+		// Apply color if it's defined.
+		if color != "" {
+			enc.AppendString(fmt.Sprintf("%s%s%s", color, levelStr, colorReset))
+		} else {
+			enc.AppendString(levelStr)
+		}
 	}
 }
 
 func getEncoder(cfg config.LoggerConfig) zapcore.Encoder {
 	encoderConfig := zap.NewProductionEncoderConfig()
 	encoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
-	encoderConfig.EncodeLevel = zapcore.CapitalLevelEncoder // This is the default.
 
 	if cfg.Format == "console" {
-		// If we're in console mode, we override the level encoder.
-		encoderConfig.EncodeLevel = func(level zapcore.Level, enc zapcore.Encoder) {
-			// This little closure passes our color config to the real encoder function.
-			customColorLevelEncoder(level, enc, cfg.Colors)
-		}
+		// If we're in console mode, we override the level encoder with our custom one.
+		encoderConfig.EncodeLevel = newColorizedLevelEncoder(cfg.Colors)
 		return zapcore.NewConsoleEncoder(encoderConfig)
 	}
-	// For JSON format, we don't want color codes.
+
+	// For JSON format, we don't want color codes, so we use the default.
+	encoderConfig.EncodeLevel = zapcore.CapitalLevelEncoder
 	return zapcore.NewJSONEncoder(encoderConfig)
 }
 
@@ -162,3 +163,4 @@ func Sync() {
 		}
 	}
 }
+

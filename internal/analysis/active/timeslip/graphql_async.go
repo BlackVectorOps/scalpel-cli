@@ -1,4 +1,4 @@
-// pkg/analysis/active/timeslip/graphql_async.go
+// -- internal/analysis/active/timeslip/graphql_async.go --
 package timeslip
 
 import (
