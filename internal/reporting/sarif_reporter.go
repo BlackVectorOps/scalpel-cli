@@ -13,13 +13,14 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
+	// Import the cmd package to access the injected version variable
+	"github.com/xkilldash9x/scalpel-cli/cmd"
 	"github.com/xkilldash9x/scalpel-cli/internal/reporting/sarif"
 )
 
 // Constants for tool identification in the SARIF report.
 const (
 	ToolName     = "Scalpel CLI"
-	ToolVersion  = "2.0.0"
 	ToolInfoURI  = "https://github.com/xkilldash9x/scalpel-cli"
 	SARIFVersion = "2.1.0"
 	SARIFSchema  = "https://schemastore.azurewebsites.net/schemas/json/sarif-2.1.0-rtm.5.json"
@@ -30,7 +31,7 @@ const (
 var ruleIDSanitizer = regexp.MustCompile(`[^a-zA-Z0-9_.-]+`)
 
 // SARIFReporter implements the Reporter interface for the SARIF 2.1.0 format.
-// It is thread-safe.
+// It is thread safe.
 type SARIFReporter struct {
 	writer    io.WriteCloser
 	logger    *zap.Logger
@@ -43,6 +44,7 @@ type SARIFReporter struct {
 // NewSARIFReporter creates a new reporter that writes SARIF output.
 func NewSARIFReporter(writer io.WriteCloser, logger *zap.Logger) *SARIFReporter {
 	// Initialize the SARIF log structure with tool information.
+	// The tool version is sourced dynamically from the cmd package.
 	log := &sarif.Log{
 		Version: SARIFVersion,
 		Schema:  SARIFSchema,
@@ -51,9 +53,9 @@ func NewSARIFReporter(writer io.WriteCloser, logger *zap.Logger) *SARIFReporter 
 				Tool: &sarif.Tool{
 					Driver: &sarif.ToolComponent{
 						Name:           ToolName,
-						Version:        pString(ToolVersion),
+						Version:        pString(cmd.Version),
 						InformationURI: pString(ToolInfoURI),
-						// Initialize empty slices (not nil)
+						// Initialize empty slices (not nil) for proper JSON marshalling
 						Rules: []*sarif.ReportingDescriptor{},
 					},
 				},
