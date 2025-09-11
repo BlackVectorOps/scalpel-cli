@@ -10,13 +10,26 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/xkilldash9x/scalpel-cli/internal/observability"
+	"go.uber.org/zap"
 )
+
+// HTTPParser handles the parsing of raw HTTP messages.
+// We define a struct to hold the logger dependency.
+type HTTPParser struct {
+	logger *zap.Logger
+}
+
+// NewHTTPParser creates a new HTTPParser instance.
+func NewHTTPParser(logger *zap.Logger) *HTTPParser {
+	return &HTTPParser{
+		logger: logger.Named("http_parser"),
+	}
+}
 
 // ParsePipelinedResponses reads from a reader and attempts to parse a specified
 // number of HTTP responses. This is crucial for handling HTTP pipelining, where
 // multiple responses are sent over the same connection in sequence.
-func ParsePipelinedResponses(conn io.Reader, expectedTotal int) ([]*http.Response, error) {
+func (p *HTTPParser) ParsePipelinedResponses(conn io.Reader, expectedTotal int) ([]*http.Response, error) {
 	if expectedTotal <= 0 {
 		return nil, nil
 	}
@@ -29,11 +42,11 @@ func ParsePipelinedResponses(conn io.Reader, expectedTotal int) ([]*http.Respons
 		// We pass nil for the request because in a client context, we only care about parsing the response.
 		resp, err := http.ReadResponse(bufReader, nil)
 		if err != nil {
-			// -- Correction for TestParsePipelinedResponses_IncompleteRead_Headers --
-			// This is the critical fix. If reading a response fails at any point (e.g., a malformed
-			// header), we must stop processing and propagate the error. The original code might have
-			// swallowed this error, causing the test to fail on an incorrect assertion later.
-			logger.Error("Failed to parse pipelined response", "response_index", i, "expected_total", expectedTotal, "error", err)
+			p.logger.Error("Failed to parse pipelined response",
+				zap.Int("response_index", i),
+				zap.Int("expected_total", expectedTotal),
+				zap.Error(err),
+			)
 			return responses, err
 		}
 
@@ -43,7 +56,11 @@ func ParsePipelinedResponses(conn io.Reader, expectedTotal int) ([]*http.Respons
 		bodyBytes, err := io.ReadAll(resp.Body)
 		if err != nil {
 			// This case handles situations where the body is shorter than Content-Length.
-			logger.Warn("Failed reading response body (incomplete content)", "status", resp.StatusCode, "response_index", i, "error", err)
+			p.logger.Warn("Failed reading response body (incomplete content)",
+				zap.Int("status", resp.StatusCode),
+				zap.Int("response_index", i),
+				zap.Error(err),
+			)
 			// We still append the response with its partially read body, as it's a server-side issue.
 		}
 		resp.Body.Close() // Close the original body reader.
@@ -54,12 +71,12 @@ func ParsePipelinedResponses(conn io.Reader, expectedTotal int) ([]*http.Respons
 		case "gzip":
 			reader, err = gzip.NewReader(bytes.NewReader(bodyBytes))
 			if err != nil {
-				logger.Error("Failed to create gzip reader", "error", err)
+				p.logger.Error("Failed to create gzip reader", zap.Error(err))
 			}
 		case "deflate":
 			reader, err = zlib.NewReader(bytes.NewReader(bodyBytes))
 			if err != nil {
-				logger.Error("Failed to create zlib reader", "error", err)
+				p.logger.Error("Failed to create zlib reader", zap.Error(err))
 			}
 		default:
 			reader = io.NopCloser(bytes.NewReader(bodyBytes))
@@ -85,7 +102,10 @@ func ParsePipelinedResponses(conn io.Reader, expectedTotal int) ([]*http.Respons
 		// A "Connection: close" header indicates this is the last response the server intends to send.
 		if strings.EqualFold(resp.Header.Get("Connection"), "close") {
 			if i < expectedTotal-1 {
-				logger.Warn("Connection closed prematurely by server", "received", len(responses), "expected", expectedTotal)
+				p.logger.Warn("Connection closed prematurely by server",
+					zap.Int("received", len(responses)),
+					zap.Int("expected", expectedTotal),
+				)
 			}
 			break // Stop parsing further responses.
 		}
@@ -93,4 +113,3 @@ func ParsePipelinedResponses(conn io.Reader, expectedTotal int) ([]*http.Respons
 
 	return responses, nil
 }
-
