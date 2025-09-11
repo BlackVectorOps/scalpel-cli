@@ -7,7 +7,7 @@ Copyright © 2025  Kyle McAllister (xkilldash9x@proton.me)
 package main
 
 
-import "github.com/project-scalpel/scalpel-cli/cmd"
+import "github.com/xkilldash9x/scalpel-cli/cmd"
 
 
 // The main event, you could say.
