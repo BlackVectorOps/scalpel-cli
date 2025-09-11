@@ -1,3 +1,4 @@
+// internal/analysis/auth/ato/analyzer.go
 package ato
 
 import (
@@ -13,7 +14,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/chromedp/cdproto/cdp"
 	"github.com/chromedp/chromedp"
+	"github.com/google/uuid"
 	"go.uber.org/zap"
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
@@ -28,10 +31,11 @@ type loginResult int
 const (
 	loginUnknown loginResult = iota
 	loginSuccess
-	loginFailureUser    // Indicates the username was likely invalid.
-	loginFailurePass    // Indicates the username was valid, but the password was not.
-	loginFailureGeneric // A generic failure message that doesn't leak information.
+	loginFailureUser         // Indicates the username was likely invalid (via keyword).
+	loginFailurePass         // Indicates the username was valid, but the password was not (via keyword).
+	loginFailureGeneric      // A generic failure message that doesn't leak information.
 	loginFailureLockout
+	loginFailureDifferential // A failure response that differs from the baseline, indicating enumeration.
 )
 
 // loginAttempt holds all necessary, parsed information to replay a login request.
@@ -45,6 +49,19 @@ type loginAttempt struct {
 	Headers     map[string]string
 }
 
+// baselineFailure captures the signature of a known-invalid login response.
+type baselineFailure struct {
+	Status   int
+	Length   int
+	BodyHash [32]byte
+}
+
+// csrfToken holds the name and value for an anti-forgery token.
+type csrfToken struct {
+	Name  string
+	Value string
+}
+
 // endpointIdentifier creates a unique string for a given method and URL to track tested endpoints.
 func (la *loginAttempt) endpointIdentifier() string {
 	return fmt.Sprintf("%s-%s", la.Method, la.URL)
@@ -54,6 +71,14 @@ func (la *loginAttempt) endpointIdentifier() string {
 var credentialFieldHeuristics = map[string]string{
 	"username": "user", "user": "user", "email": "user", "login": "user", "user_id": "user", "uid": "user",
 	"password": "pass", "pass": "pass", "secret": "pass", "credential": "pass", "pwd": "pass",
+}
+
+// csrfFieldHeuristics provides CSS selectors to find common CSRF tokens.
+var csrfFieldHeuristics = []string{
+	`input[type=hidden][name*=csrf]`,
+	`input[type=hidden][name*=token]`,
+	`input[type=hidden][name*=_token]`,
+	`input[type=hidden][name*=nonce]`,
 }
 
 // ATOAnalyzer actively and concurrently tests login mechanisms for vulnerabilities.
@@ -114,17 +139,15 @@ func (a *ATOAnalyzer) Analyze(ctx context.Context, analysisCtx *browser.Analysis
 		return fmt.Errorf("ATO analyzer failed to collect artifacts: %w", err)
 	}
 
-	// 1. Discover all unique, potential login endpoints from the browser history.
 	loginAttempts := a.discoverLoginEndpoints(artifacts)
 	if len(loginAttempts) == 0 {
 		a.Logger.Info("No potential login endpoints were found to test.")
 		return nil
 	}
 
-	// 2. Set up a concurrent worker pool.
 	var wg sync.WaitGroup
 	jobs := make(chan *loginAttempt, len(loginAttempts))
-	results := make(chan schemas.Finding, len(loginAttempts)*2) // Buffered for multiple findings per job.
+	results := make(chan schemas.Finding, len(loginAttempts)*2)
 
 	numWorkers := a.cfg.Concurrency
 	if numWorkers <= 0 {
@@ -136,19 +159,15 @@ func (a *ATOAnalyzer) Analyze(ctx context.Context, analysisCtx *browser.Analysis
 		go a.worker(ctx, &wg, analysisCtx, jobs, results)
 	}
 
-	// 3. Dispatch jobs to the workers.
 	for _, attempt := range loginAttempts {
 		jobs <- attempt
 	}
 	close(jobs)
 
-	// 4. Wait for all workers to finish, then close the results channel.
 	wg.Wait()
 	close(results)
 
-	// 5. Aggregate all findings from the results channel.
 	for finding := range results {
-		// The analysisCtx is not thread-safe, so we add findings here in the main goroutine.
 		analysisCtx.AddFinding(finding)
 	}
 
@@ -200,7 +219,6 @@ func (a *ATOAnalyzer) identifyLoginRequest(req schemas.Request) (*loginAttempt, 
 		if err := json.Unmarshal([]byte(req.PostData.Text), &bodyParams); err != nil {
 			return nil, fmt.Errorf("could not parse JSON body: %w", err)
 		}
-		// find credential fields from the parsed map
 		for key := range bodyParams {
 			keyLower := strings.ToLower(key)
 			if fieldType, ok := credentialFieldHeuristics[keyLower]; ok {
@@ -211,9 +229,7 @@ func (a *ATOAnalyzer) identifyLoginRequest(req schemas.Request) (*loginAttempt, 
 				}
 			}
 		}
-
 	case strings.Contains(contentType, "application/x-www-form-urlencoded"):
-		// find credential fields from NVPair and populate bodyParams
 		for _, p := range req.PostData.Params {
 			bodyParams[p.Name] = p.Value
 			keyLower := strings.ToLower(p.Name)
@@ -225,14 +241,13 @@ func (a *ATOAnalyzer) identifyLoginRequest(req schemas.Request) (*loginAttempt, 
 				}
 			}
 		}
-
 	default:
 		return nil, fmt.Errorf("unsupported content type: %s", contentType)
 	}
 
 	if userField != "" && passField != "" {
 		headers := make(map[string]string)
-		for _, h := range req.Headers { // req.Headers is []schemas.NVPair
+		for _, h := range req.Headers {
 			if !strings.EqualFold(h.Name, "Content-Length") {
 				headers[h.Name] = h.Value
 			}
@@ -256,6 +271,13 @@ func (a *ATOAnalyzer) testEndpoint(ctx context.Context, analysisCtx *browser.Ana
 	var findings []schemas.Finding
 	userEnumerationDetected := false
 
+	a.Logger.Debug("Establishing baseline failure response", zap.String("url", attempt.URL))
+	baseline, err := a.establishBaseline(ctx, analysisCtx, attempt)
+	if err != nil {
+		a.Logger.Error("Could not establish a baseline for login endpoint, enumeration checks will be less reliable.",
+			zap.String("url", attempt.URL), zap.Error(err))
+	}
+
 	for _, creds := range a.credentialSet {
 		if ctx.Err() != nil {
 			a.Logger.Warn("ATO analysis cancelled during testing.", zap.Error(ctx.Err()))
@@ -263,29 +285,104 @@ func (a *ATOAnalyzer) testEndpoint(ctx context.Context, analysisCtx *browser.Ana
 		}
 		a.humanoidPause(ctx)
 
+		token, err := a.getFreshCSRFToken(ctx, analysisCtx, attempt.URL)
+		if err != nil {
+			a.Logger.Warn("Failed to fetch fresh CSRF token, continuing without it.", zap.Error(err))
+		}
+
 		a.Logger.Debug("Attempting login", zap.String("username", creds.Username), zap.String("url", attempt.URL))
-		response, err := a.executeLoginAttempt(ctx, analysisCtx, attempt, creds)
+		response, err := a.executeLoginAttempt(ctx, analysisCtx, attempt, creds, token)
 		if err != nil {
 			a.Logger.Error("Failed to execute login attempt", zap.Error(err), zap.String("url", attempt.URL))
 			continue
 		}
 
-		result := a.analyzeLoginResponse(response)
+		result := a.analyzeLoginResponse(response, baseline)
 		if result == loginSuccess {
 			evidence := fmt.Sprintf("Successfully logged in to %s with username '%s' and password '%s'.", attempt.URL, creds.Username, creds.Password)
 			findings = append(findings, a.createCredentialStuffingFinding(attempt, evidence, userEnumerationDetected))
-			return findings // Stop testing this endpoint after a success.
+			return findings
 		}
-		if result == loginFailurePass {
+
+		if result == loginFailurePass || result == loginFailureDifferential {
 			userEnumerationDetected = true
 		}
 	}
 
 	if userEnumerationDetected {
-		evidence := fmt.Sprintf("The login mechanism at %s provides distinct responses for invalid usernames versus invalid passwords, allowing an attacker to confirm valid usernames.", attempt.URL)
+		evidence := fmt.Sprintf("The login mechanism at %s provides distinct responses for invalid passwords versus invalid usernames. This was detected by observing a response that differed from the baseline 'invalid user' response, allowing an attacker to confirm valid usernames.", attempt.URL)
 		findings = append(findings, a.createUserEnumerationFinding(attempt, evidence))
 	}
 	return findings
+}
+
+// establishBaseline sends a request with random credentials to establish a baseline of a failed login.
+func (a *ATOAnalyzer) establishBaseline(ctx context.Context, analysisCtx *browser.AnalysisContext, attempt *loginAttempt) (*baselineFailure, error) {
+	randomCreds := schemas.Credential{
+		Username: uuid.NewString(),
+		Password: uuid.NewString(),
+	}
+
+	token, err := a.getFreshCSRFToken(ctx, analysisCtx, attempt.URL)
+	if err != nil {
+		a.Logger.Warn("Failed to get CSRF token for baseline request.", zap.Error(err))
+	}
+
+	res, err := a.executeLoginAttempt(ctx, analysisCtx, attempt, randomCreds, token)
+	if err != nil {
+		return nil, fmt.Errorf("baseline attempt failed: %w", err)
+	}
+
+	return &baselineFailure{
+		Status:   res.Status,
+		Length:   len(res.Body),
+		BodyHash: sha256.Sum256([]byte(res.Body)),
+	}, nil
+}
+
+// getFreshCSRFToken navigates to the login page and attempts to scrape a CSRF token value.
+func (a *ATOAnalyzer) getFreshCSRFToken(ctx context.Context, analysisCtx *browser.AnalysisContext, pageURL string) (*csrfToken, error) {
+	var tokenName, tokenValue string
+	var nodes []*cdp.Node
+
+	tasks := chromedp.Tasks{
+		chromedp.Navigate(pageURL),
+	}
+
+	for _, selector := range csrfFieldHeuristics {
+		tasks = append(tasks, chromedp.ActionFunc(func(c context.Context) error {
+			// If we already found a token, no need to keep searching.
+			if tokenName != "" {
+				return nil
+			}
+			err := chromedp.Nodes(selector, &nodes, chromedp.AtLeast(0)).Do(c)
+			if err != nil || len(nodes) == 0 {
+				return nil // Continue to next selector
+			}
+			var attrs map[string]string
+			if err := chromedp.Attributes(selector, &attrs, chromedp.FromNode(nodes[0])).Do(c); err != nil {
+				return err
+			}
+			if name, ok := attrs["name"]; ok {
+				if val, ok := attrs["value"]; ok {
+					tokenName = name
+					tokenValue = val
+					a.Logger.Debug("Found CSRF token", zap.String("name", name), zap.String("value", "REDACTED"))
+				}
+			}
+			return nil
+		}))
+	}
+
+	if err := chromedp.Run(analysisCtx.GetContext(), tasks); err != nil {
+		return nil, fmt.Errorf("could not navigate to page to get CSRF token: %w", err)
+	}
+
+	if tokenName != "" {
+		return &csrfToken{Name: tokenName, Value: tokenValue}, nil
+	}
+
+	return nil, nil // No token found, but not an error
 }
 
 // fetchResponse is a struct to unmarshal the structured JSON response from the browser fetch call.
@@ -297,13 +394,16 @@ type fetchResponse struct {
 }
 
 // executeLoginAttempt safely replays a modified login request using the browser's fetch API.
-func (a *ATOAnalyzer) executeLoginAttempt(ctx context.Context, analysisCtx *browser.AnalysisContext, attempt *loginAttempt, creds schemas.Credential) (*fetchResponse, error) {
+func (a *ATOAnalyzer) executeLoginAttempt(ctx context.Context, analysisCtx *browser.AnalysisContext, attempt *loginAttempt, creds schemas.Credential, token *csrfToken) (*fetchResponse, error) {
 	bodyParams := make(map[string]interface{})
 	for k, v := range attempt.BodyParams {
 		bodyParams[k] = v
 	}
 	bodyParams[attempt.UserField] = creds.Username
 	bodyParams[attempt.PassField] = creds.Password
+	if token != nil && token.Name != "" {
+		bodyParams[token.Name] = token.Value
+	}
 
 	var bodyString string
 	if strings.Contains(attempt.ContentType, "application/json") {
@@ -320,7 +420,6 @@ func (a *ATOAnalyzer) executeLoginAttempt(ctx context.Context, analysisCtx *brow
 		bodyString = values.Encode()
 	}
 
-	// Marshal headers and body into JSON strings to safely pass into the JavaScript context.
 	headersJSON, err := json.Marshal(attempt.Headers)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal headers to JSON: %w", err)
@@ -330,25 +429,23 @@ func (a *ATOAnalyzer) executeLoginAttempt(ctx context.Context, analysisCtx *brow
 		return nil, fmt.Errorf("failed to marshal body to JSON: %w", err)
 	}
 
-	// The script is now a single string that defines and immediately calls an async function.
-	// This avoids passing multiple arguments to chromedp.Evaluate, which was causing the build error.
 	script := fmt.Sprintf(`
-        (async (url, method, headers, body) => {
-            try {
-                const response = await fetch(url, {
-                    method: method, headers: headers, body: body,
-                    credentials: 'omit', redirect: 'manual',
-                });
-                const responseBody = await response.text();
-                return JSON.stringify({
-                    body: responseBody, status: response.status,
-                    statusText: response.statusText, error: ''
-                });
-            } catch (e) {
-                return JSON.stringify({ body: '', status: 0, error: e.message });
-            }
-        })(%q, %q, %s, %s);
-    `, attempt.URL, attempt.Method, string(headersJSON), string(bodyJSON))
+		(async (url, method, headers, body) => {
+			try {
+				const response = await fetch(url, {
+					method: method, headers: headers, body: body,
+					credentials: 'omit', redirect: 'manual',
+				});
+				const responseBody = await response.text();
+				return JSON.stringify({
+					body: responseBody, status: response.status,
+					statusText: response.statusText, error: ''
+				});
+			} catch (e) {
+				return JSON.stringify({ body: '', status: 0, error: e.message });
+			}
+		})(%q, %q, %s, %s);
+	`, attempt.URL, attempt.Method, string(headersJSON), string(bodyJSON))
 
 	var responseJSON string
 	if err := chromedp.Run(analysisCtx.GetContext(),
@@ -368,7 +465,16 @@ func (a *ATOAnalyzer) executeLoginAttempt(ctx context.Context, analysisCtx *brow
 }
 
 // analyzeLoginResponse inspects the response for keywords indicating the login outcome.
-func (a *ATOAnalyzer) analyzeLoginResponse(res *fetchResponse) loginResult {
+func (a *ATOAnalyzer) analyzeLoginResponse(res *fetchResponse, baseline *baselineFailure) loginResult {
+	// 1. Perform differential analysis first for the highest reliability.
+	if baseline != nil {
+		currentBodyHash := sha256.Sum256([]byte(res.Body))
+		if res.Status != baseline.Status || len(res.Body) != baseline.Length || currentBodyHash != baseline.BodyHash {
+			return loginFailureDifferential
+		}
+	}
+
+	// 2. Fallback to keyword-based analysis.
 	bodyLower := strings.ToLower(res.Body)
 	if res.Status >= 200 && res.Status < 400 {
 		isSuccess := res.Status >= 300 && res.Status < 400
@@ -458,7 +564,7 @@ func (a *ATOAnalyzer) createUserEnumerationFinding(attempt *loginAttempt, eviden
 		Description:    "The login endpoint's responses allow for username enumeration. The server provides a distinct response when a username exists but the password is incorrect versus when the username does not exist. This allows an attacker to build a list of valid usernames.",
 		Severity:       schemas.SeverityMedium,
 		Evidence:       evidence,
-		Recommendation: "Modify the login failure logic to return a single, generic error message (e.g., 'Invalid username or password') regardless of the reason for failure. Ensure the HTTP status code is also identical in both cases.",
+		Recommendation: "Modify the login failure logic to return a single, generic error message (e.g., 'Invalid username or password') regardless of the reason for failure. Ensure the HTTP status code and response body are identical in all failure cases.",
 		Vulnerability:  schemas.Vulnerability{Name: "Username Enumeration"},
 		CWE:            []string{"CWE-203"},
 	}
