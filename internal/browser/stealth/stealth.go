@@ -3,6 +3,7 @@ package stealth
 
 import (
 	"context"
+	_ "embed" // Import embed for potential use with EvasionsJS
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -10,7 +11,7 @@ import (
 	"github.com/chromedp/cdproto/emulation"
 	"github.com/chromedp/cdproto/page"
 	"github.com/chromedp/chromedp"
-	"go.uber.org/zap" // Added import for logger used in Apply
+	"go.uber.org/zap"
 )
 
 // ClientHints defines the User-Agent Client Hints data.
@@ -36,15 +37,38 @@ type Persona struct {
 	AvailHeight int64 `json:"availHeight"`
 	ColorDepth  int64 `json:"colorDepth"`
 	PixelDepth  int64 `json:"pixelDepth"`
-	Mobile      bool  `json:"mobile"` // Added based on concepts
+	Mobile      bool  `json:"mobile"`
 
-	Timezone        string       `json:"timezoneId"` // Kept JSON tag for JS compatibility
+	Timezone        string       `json:"timezoneId"`
 	Locale          string       `json:"locale"`
 	ClientHintsData *ClientHints `json:"clientHintsData,omitempty"`
 	NoiseSeed       int64        `json:"noiseSeed"`
 }
 
-// var EvasionsJS string
+// EvasionsJS holds the JavaScript code for browser fingerprint evasions.
+// This should ideally be populated using //go:embed if the file exists in the repo.
+// Defined here to resolve compilation errors. If empty, stealth features will be degraded.
+// Example using embed (if evasions.js exists in this directory):
+// //go:embed evasions.js
+var EvasionsJS string
+
+// DefaultPersona provides a fallback persona if none is specified.
+// Added based on usage in internal/browser/manager.go and internal/browser/analysis_context.go
+var DefaultPersona = Persona{
+	UserAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36",
+	Platform:  "Win32",
+	Languages: []string{"en-US", "en"},
+	Width: 1920,
+	Height: 1080,
+	AvailWidth: 1920,
+	AvailHeight: 1040,
+	ColorDepth: 24,
+	PixelDepth: 24,
+	Mobile: false,
+	Timezone: "America/Los_Angeles",
+	Locale: "en-US",
+}
+
 
 // Apply returns a chromedp.Action that applies the stealth configurations.
 // This function is required by analysis_context.go.
@@ -94,11 +118,14 @@ func ApplyStealthEvasions(ctx context.Context, persona Persona) error {
 	var tasks chromedp.Tasks
 
 	// 3. Add script to be evaluated on new document. This is the core of the evasion.
-	tasks = append(tasks, chromedp.ActionFunc(func(c context.Context) error {
-		// Call Do(c) and ignore the ScriptIdentifier return value.
-		_, err := page.AddScriptToEvaluateOnNewDocument(fullScript).Do(c)
-		return err
-	}))
+	// Only inject if EvasionsJS actually contains content.
+	if EvasionsJS != "" {
+		tasks = append(tasks, chromedp.ActionFunc(func(c context.Context) error {
+			// Call Do(c) and ignore the ScriptIdentifier return value.
+			_, err := page.AddScriptToEvaluateOnNewDocument(fullScript).Do(c)
+			return err
+		}))
+	}
 
 	// 4. Set overrides that must be done via CDP commands.
 	tasks = append(tasks,
@@ -112,6 +139,7 @@ func ApplyStealthEvasions(ctx context.Context, persona Persona) error {
 	}
 
 	if persona.Locale != "" {
+		// Use WithLocale() chained to the builder
 		tasks = append(tasks, emulation.SetLocaleOverride().WithLocale(persona.Locale))
 	}
 

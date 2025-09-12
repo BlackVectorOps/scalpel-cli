@@ -1,4 +1,4 @@
-// pkg/browser/shim/shim.go
+// internal/browser/shim/shim.go
 package shim
 
 import (

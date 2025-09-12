@@ -1,4 +1,4 @@
-// pkg/browser/shim/embed.go
+// internal/browser/shim/embed.go
 package shim
 
 import (

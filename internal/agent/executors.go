@@ -1,32 +1,34 @@
-// internal/agent/executors.go
 package agent
 
 import (
 	"context"
 	"fmt"
 	"strings"
-	"go.uber.org/zap"
-	"github.com/xkilldash9x/scalpel-cli/api/schemas" 
-)
 
-// ActionExecutor is defined in pkg/interfaces
+	"github.com/xkilldash9x/scalpel-cli/api/schemas"
+	"go.uber.org/zap"
+)
 
 // SessionProvider is a function type that decouples the executor from the specific
 // browser session management logic, allowing it to retrieve the currently active session.
-type SessionProvider func() interfaces.SessionContext // CORRECTED TYPE
+type SessionProvider func() interfaces.SessionContext
 
 // -- Browser Executor --
 
 // ActionHandler defines the function signature for a specific browser action implementation.
-type ActionHandler func(session interfaces.SessionContext, action schemas.Action) error // CORRECTED TYPE
+type ActionHandler func(session interfaces.SessionContext, action schemas.Action) error
 
-// BrowserExecutor implements the ActionExecutor interface for browser interaction actions.
+// BrowserExecutor implements the schemas.ActionExecutor interface for browser interaction actions.
 type BrowserExecutor struct {
 	logger          *zap.Logger
 	sessionProvider SessionProvider
 	// handlers provides an O(1) lookup for the correct action implementation.
 	handlers map[schemas.ActionType]ActionHandler
 }
+
+// Statically assert that BrowserExecutor implements the ActionExecutor interface from the schemas package.
+// This is a compile time check that prevents the implementation from drifting away from the API contract.
+var _ schemas.ActionExecutor = (*BrowserExecutor)(nil)
 
 // NewBrowserExecutor creates a new BrowserExecutor and registers all action handlers.
 func NewBrowserExecutor(logger *zap.Logger, provider SessionProvider) *BrowserExecutor {
@@ -52,7 +54,7 @@ func (e *BrowserExecutor) registerHandlers() {
 }
 
 // Execute looks up and runs the appropriate handler for a given browser action.
-func (e *BrowserExecutor) Execute(ctx context.Context, action schemas.Action) (*schemasss.ExecutionResult, error) {
+func (e *BrowserExecutor) Execute(ctx context.Context, action schemas.Action) (*schemas.ExecutionResult, error) {
 	session := e.sessionProvider()
 	if session == nil {
 		// This is a pre-execution failure; the action cannot be attempted.
@@ -126,7 +128,7 @@ func (e *BrowserExecutor) handleWaitForAsync(session interfaces.SessionContext, 
 	durationMs := 1000 // Default wait time
 	val, exists := action.Metadata["duration_ms"]
 	if exists {
-		// ROBUSTNESS: Handle different numeric types robustly using a type switch,
+		// Handle different numeric types robustly using a type switch,
 		// as JSON unmarshalling into interface{} often yields float64 for numbers.
 		switch v := val.(type) {
 		case float64:

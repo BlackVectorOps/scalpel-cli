@@ -1,5 +1,5 @@
 // internal/reporting/reporter_test.go
-package reporting_test
+package sarif_test
 
 import (
 	"testing"

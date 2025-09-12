@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"go.uber.org/zap"
 )
 
@@ -323,7 +324,7 @@ func (a *Analyzer) executeProbes(ctx context.Context, session SessionContext) er
 }
 
 // generateCanary creates a unique canary string.
-func (a *Analyzer) generateCanary(prefix string, probeType ProbeType) string {
+func (a *Analyzer) generateCanary(prefix string, probeType schemas.ProbeType) string {
 	// Format: SCALPEL_{Prefix}_{Type}_{UUID_Short}
 	return fmt.Sprintf("SCALPEL_%s_%s_%s", prefix, probeType, uuid.New().String()[:8])
 }
@@ -382,7 +383,7 @@ func (a *Analyzer) probePersistentSources(ctx context.Context, session SessionCo
 				Key:       lsKey,
 				Value:     lsPayload,
 				Canary:    lsCanary,
-				Source:    SourceLocalStorage,
+				Source:    schemas.SourceLocalStorage,
 				CreatedAt: time.Now(),
 			})
 		}
@@ -399,7 +400,7 @@ func (a *Analyzer) probePersistentSources(ctx context.Context, session SessionCo
 				Key:       ssKey,
 				Value:     ssPayload,
 				Canary:    ssCanary,
-				Source:    SourceSessionStorage,
+				Source:    schemas.SourceSessionStorage,
 				CreatedAt: time.Now(),
 			})
 		}
@@ -418,7 +419,7 @@ func (a *Analyzer) probePersistentSources(ctx context.Context, session SessionCo
 				Key:       cookieName,
 				Value:     cookiePayload,
 				Canary:    cookieCanary,
-				Source:    SourceCookie,
+				Source:    schemas.SourceCookie,
 				CreatedAt: time.Now(),
 			})
 		}
@@ -474,7 +475,7 @@ func (a *Analyzer) probeURLSources(ctx context.Context, session SessionContext) 
 			Key:       paramName,
 			Value:     payload,
 			Canary:    canary,
-			Source:    SourceURLParam,
+			Source:    schemas.SourceURLParam,
 			CreatedAt: time.Now(),
 		})
 		probesInjected++
@@ -513,7 +514,7 @@ func (a *Analyzer) probeURLSources(ctx context.Context, session SessionContext) 
 			Key:       paramName,
 			Value:     payload,
 			Canary:    canary,
-			Source:    SourceHashFragment,
+			Source:    schemas.SourceHashFragment,
 			CreatedAt: time.Now(),
 		})
 		probesInjected++
@@ -634,7 +635,7 @@ func (a *Analyzer) fetchAndEnqueueOAST() {
 
 	for canary, probe := range a.activeProbes {
 		// We are interested if the probe type is OAST, or if it's an XSS/SSTI/etc probe that included an OAST payload.
-		if probe.Type == ProbeTypeOAST || strings.Contains(probe.Value, oastServerURL) {
+		if probe.Type == schemas.ProbeTypeOAST || strings.Contains(probe.Value, oastServerURL) {
 			relevantCanaries = append(relevantCanaries, canary)
 		}
 	}
@@ -717,9 +718,9 @@ func (a *Analyzer) processOASTInteraction(interaction OASTInteraction) {
 
 	// Determine the detail message based on the probe type.
 	detail := fmt.Sprintf("Out of Band interaction confirmed via %s protocol.", interaction.Protocol)
-	if probe.Type == ProbeTypeXSS || probe.Type == ProbeTypeSSTI {
+	if probe.Type == schemas.ProbeTypeXSS || probe.Type == schemas.ProbeTypeSSTI {
 		detail = "Blind XSS/SSTI confirmed via OAST callback."
-	} else if probe.Type == ProbeTypeOAST {
+	} else if probe.Type == schemas.ProbeTypeOAST {
 		detail = "Blind vulnerability (e.g., SSRF, RCE) confirmed via OAST callback."
 	}
 
@@ -727,7 +728,7 @@ func (a *Analyzer) processOASTInteraction(interaction OASTInteraction) {
 	finding := CorrelatedFinding{
 		TaskID:            a.config.TaskID,
 		TargetURL:         a.config.Target.String(),
-		Sink:              SinkOASTInteraction,
+		Sink:              schemas.SinkOASTInteraction,
 		Origin:            probe.Source,
 		Value:             probe.Value, // The original payload value.
 		Canary:            interaction.Canary,
@@ -754,7 +755,7 @@ func (a *Analyzer) processExecutionProof(proof ExecutionProofEvent) {
 
 	// Ensure the probe type is one that expects execution.
 	switch probe.Type {
-	case ProbeTypeXSS, ProbeTypeSSTI, ProbeTypeSQLi, ProbeTypeCmdInjection, ProbeTypeDOMClobbering:
+	case schemas.ProbeTypeXSS, schemas.ProbeTypeSSTI, schemas.ProbeTypeSQLi, schemas.ProbeTypeCmdInjection, schemas.ProbeTypeDOMClobbering:
 		// Valid execution types.
 	default:
 		a.logger.Debug("Execution proof received for unexpected probe type.", zap.String("canary", proof.Canary), zap.String("type", string(probe.Type)))
@@ -771,7 +772,7 @@ func (a *Analyzer) processExecutionProof(proof ExecutionProofEvent) {
 	finding := CorrelatedFinding{
 		TaskID:            a.config.TaskID,
 		TargetURL:         a.config.Target.String(),
-		Sink:              SinkExecution,
+		Sink:              schemas.SinkExecution,
 		Origin:            probe.Source,
 		Value:             probe.Value, // The original payload value.
 		Canary:            proof.Canary,
@@ -787,7 +788,7 @@ func (a *Analyzer) processExecutionProof(proof ExecutionProofEvent) {
 // processSinkEvent checks a sink event to see if it matches one of our canaries.
 func (a *Analyzer) processSinkEvent(event SinkEvent) {
 	// Handle Prototype Pollution Confirmation separately as it's a unique sink type.
-	if event.Type == SinkPrototypePollution {
+	if event.Type == schemas.SinkPrototypePollution {
 		a.processPrototypePollutionConfirmation(event)
 		return
 	}
@@ -862,7 +863,7 @@ func (a *Analyzer) processPrototypePollutionConfirmation(event SinkEvent) {
 		return
 	}
 
-	if probe.Type != ProbeTypePrototypePollution {
+	if probe.Type != schemas.ProbeTypePrototypePollution {
 		a.logger.Warn("Prototype Pollution confirmation received for non pollution probe type.", zap.String("canary", canary), zap.String("type", string(probe.Type)))
 		return
 	}
@@ -876,7 +877,7 @@ func (a *Analyzer) processPrototypePollutionConfirmation(event SinkEvent) {
 	finding := CorrelatedFinding{
 		TaskID:            a.config.TaskID,
 		TargetURL:         a.config.Target.String(),
-		Sink:              SinkPrototypePollution,
+		Sink:              schemas.SinkPrototypePollution,
 		Origin:            probe.Source,
 		Value:             probe.Value, // The payload used for pollution.
 		Canary:            canary,
@@ -892,60 +893,60 @@ func (a *Analyzer) processPrototypePollutionConfirmation(event SinkEvent) {
 // -- Validation and False Positive Reduction --
 // Define a key representing a specific taint flow path.
 type TaintFlowPath struct {
-	ProbeType ProbeType
-	SinkType  TaintSink
+	ProbeType schemas.ProbeType
+	SinkType  schemas.TaintSink
 }
 
 // ValidTaintFlows defines the set of acceptable source-to-sink paths.
 var ValidTaintFlows = map[TaintFlowPath]bool{
 	// Rule 1: XSS (Examples)
-	{ProbeTypeXSS, SinkEval}:              true,
-	{ProbeTypeXSS, SinkInnerHTML}:         true,
-	{ProbeTypeXSS, SinkOuterHTML}:         true,
-	{ProbeTypeXSS, SinkDocumentWrite}:     true,
-	{ProbeTypeXSS, SinkIframeSrcDoc}:      true,
-	{ProbeTypeXSS, SinkFunctionConstructor}: true,
-	{ProbeTypeXSS, SinkScriptSrc}:         true,
-	{ProbeTypeXSS, SinkIframeSrc}:         true,
-	{ProbeTypeXSS, SinkNavigation}:        true, // Requires exceptional handling
-	{ProbeTypeXSS, SinkPostMessage}:       true,
-	{ProbeTypeXSS, SinkWorkerPostMessage}: true,
+	{schemas.ProbeTypeXSS, schemas.SinkEval}:              true,
+	{schemas.ProbeTypeXSS, schemas.SinkInnerHTML}:         true,
+	{schemas.ProbeTypeXSS, schemas.SinkOuterHTML}:         true,
+	{schemas.ProbeTypeXSS, schemas.SinkDocumentWrite}:     true,
+	{schemas.ProbeTypeXSS, schemas.SinkIframeSrcDoc}:      true,
+	{schemas.ProbeTypeXSS, schemas.SinkFunctionConstructor}: true,
+	{schemas.ProbeTypeXSS, schemas.SinkScriptSrc}:         true,
+	{schemas.ProbeTypeXSS, schemas.SinkIframeSrc}:         true,
+	{schemas.ProbeTypeXSS, schemas.SinkNavigation}:        true, // Requires exceptional handling
+	{schemas.ProbeTypeXSS, schemas.SinkPostMessage}:       true,
+	{schemas.ProbeTypeXSS, schemas.SinkWorkerPostMessage}: true,
 
 	// DOM Clobbering can lead to XSS sinks
-	{ProbeTypeDOMClobbering, SinkEval}:              true,
-	{ProbeTypeDOMClobbering, SinkInnerHTML}:         true,
-	{ProbeTypeDOMClobbering, SinkNavigation}:        true,
+	{schemas.ProbeTypeDOMClobbering, schemas.SinkEval}:              true,
+	{schemas.ProbeTypeDOMClobbering, schemas.SinkInnerHTML}:         true,
+	{schemas.ProbeTypeDOMClobbering, schemas.SinkNavigation}:        true,
 
 	// SSTI leading to client-side execution
-	{ProbeTypeSSTI, SinkEval}:              true,
-	{ProbeTypeSSTI, SinkInnerHTML}:         true,
-	{ProbeTypeSSTI, SinkOuterHTML}:         true,
-	{ProbeTypeSSTI, SinkDocumentWrite}:     true,
-	{ProbeTypeSSTI, SinkIframeSrcDoc}:      true,
-	{ProbeTypeSSTI, SinkFunctionConstructor}: true,
+	{schemas.ProbeTypeSSTI, schemas.SinkEval}:              true,
+	{schemas.ProbeTypeSSTI, schemas.SinkInnerHTML}:         true,
+	{schemas.ProbeTypeSSTI, schemas.SinkOuterHTML}:         true,
+	{schemas.ProbeTypeSSTI, schemas.SinkDocumentWrite}:     true,
+	{schemas.ProbeTypeSSTI, schemas.SinkIframeSrcDoc}:      true,
+	{schemas.ProbeTypeSSTI, schemas.SinkFunctionConstructor}: true,
 
 	// Backend injections reflecting as XSS
-	{ProbeTypeSQLi, SinkInnerHTML}:         true,
-	{ProbeTypeCmdInjection, SinkInnerHTML}: true,
+	{schemas.ProbeTypeSQLi, schemas.SinkInnerHTML}:         true,
+	{schemas.ProbeTypeCmdInjection, schemas.SinkInnerHTML}: true,
 
 	// Rule 3: Generic/OAST Probes for Data Leakage
-	{ProbeTypeGeneric, SinkWebSocketSend}:      true,
-	{ProbeTypeGeneric, SinkXMLHTTPRequest}:     true,
-	{ProbeTypeGeneric, SinkXMLHTTPRequest_URL}: true,
-	{ProbeTypeGeneric, SinkFetch}:              true,
-	{ProbeTypeGeneric, SinkFetch_URL}:          true,
-	{ProbeTypeGeneric, SinkNavigation}:         true,
-	{ProbeTypeGeneric, SinkSendBeacon}:         true,
-	{ProbeTypeGeneric, SinkWorkerSrc}:          true,
+	{schemas.ProbeTypeGeneric, schemas.SinkWebSocketSend}:      true,
+	{schemas.ProbeTypeGeneric, schemas.SinkXMLHTTPRequest}:     true,
+	{schemas.ProbeTypeGeneric, schemas.SinkXMLHTTPRequest_URL}: true,
+	{schemas.ProbeTypeGeneric, schemas.SinkFetch}:              true,
+	{schemas.ProbeTypeGeneric, schemas.SinkFetch_URL}:          true,
+	{schemas.ProbeTypeGeneric, schemas.SinkNavigation}:         true,
+	{schemas.ProbeTypeGeneric, schemas.SinkSendBeacon}:         true,
+	{schemas.ProbeTypeGeneric, schemas.SinkWorkerSrc}:          true,
 
-	{ProbeTypeOAST, SinkWebSocketSend}:      true,
-	{ProbeTypeOAST, SinkXMLHTTPRequest}:     true,
-	{ProbeTypeOAST, SinkXMLHTTPRequest_URL}: true,
-	{ProbeTypeOAST, SinkFetch}:              true,
-	{ProbeTypeOAST, SinkFetch_URL}:          true,
-	{ProbeTypeOAST, SinkNavigation}:         true,
-	{ProbeTypeOAST, SinkSendBeacon}:         true,
-	{ProbeTypeOAST, SinkWorkerSrc}:          true,
+	{schemas.ProbeTypeOAST, schemas.SinkWebSocketSend}:      true,
+	{schemas.ProbeTypeOAST, schemas.SinkXMLHTTPRequest}:     true,
+	{schemas.ProbeTypeOAST, schemas.SinkXMLHTTPRequest_URL}: true,
+	{schemas.ProbeTypeOAST, schemas.SinkFetch}:              true,
+	{schemas.ProbeTypeOAST, schemas.SinkFetch_URL}:          true,
+	{schemas.ProbeTypeOAST, schemas.SinkNavigation}:         true,
+	{schemas.ProbeTypeOAST, schemas.SinkSendBeacon}:         true,
+	{schemas.ProbeTypeOAST, schemas.SinkWorkerSrc}:          true,
 }
 
 
@@ -957,7 +958,7 @@ func (a *Analyzer) checkSanitization(sinkValue string, probe ActiveProbe) (Sanit
 	// a bug where adding characters (like an escape backslash) was not detected as a change.
 
 	// Example advanced check for XSS probes:
-	if probe.Type == ProbeTypeXSS || probe.Type == ProbeTypeSSTI {
+	if probe.Type == schemas.ProbeTypeXSS || probe.Type == schemas.ProbeTypeSSTI {
 		// Check if quotes seem to be escaped (basic heuristic).
 		if (strings.Contains(sinkValue, `\"`) || strings.Contains(sinkValue, "&#34;")) && !strings.Contains(probe.Value, `\"`) && !strings.Contains(probe.Value, "&#34;") {
 			return SanitizationPartial, " (Potential Sanitization: Quotes escaped)"
@@ -984,8 +985,8 @@ func (a *Analyzer) isContextValid(event SinkEvent, probe ActiveProbe) bool {
 
 	// Handle probes that can manifest as XSS (e.g., Reflected SQLi)
 	probeTypeString := string(probe.Type)
-	if strings.Contains(probeTypeString, "XSS") || strings.Contains(probeTypeString, "SQLi") || strings.Contains(probeTypeString, "CmdInjection") {
-		flow.ProbeType = ProbeTypeXSS // Treat as XSS for validation purposes
+	if strings.Contains(probeTypeString, "XSS") || strings.Contains(probeTypeString, "SQLI") || strings.Contains(probeTypeString, "CMD_INJECTION") {
+		flow.ProbeType = schemas.ProbeTypeXSS // Treat as XSS for validation purposes
 	}
 
 	// Check the declarative rules map.
@@ -996,7 +997,7 @@ func (a *Analyzer) isContextValid(event SinkEvent, probe ActiveProbe) bool {
 	// Handle specific condition-based exceptions that cannot be declared statically.
 
 	// Exception 1: Navigation sinks require specific protocols for XSS/Clobbering.
-	if (flow.ProbeType == ProbeTypeXSS || flow.ProbeType == ProbeTypeDOMClobbering) && event.Type == SinkNavigation {
+	if (flow.ProbeType == schemas.ProbeTypeXSS || flow.ProbeType == schemas.ProbeTypeDOMClobbering) && event.Type == schemas.SinkNavigation {
 		normalizedValue := strings.ToLower(strings.TrimSpace(event.Value))
 		if strings.HasPrefix(normalizedValue, "javascript:") || strings.HasPrefix(normalizedValue, "data:text/html") {
 			return true

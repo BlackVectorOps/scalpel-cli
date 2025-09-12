@@ -1,4 +1,4 @@
-// pkg/analysis/active/timeslip/h2_multiplex.go
+// internal/analysis/active/timeslip/h2_multiplex.go
 package timeslip
 
 import (
@@ -48,7 +48,7 @@ func ExecuteH2Multiplexing(ctx context.Context, candidate *RaceCandidate, config
 		go func(streamIndex int) {
 			defer wg.Done()
 
-			// --- Mutation Phase ---
+			// -- Mutation Phase --
 			mutatedBody, mutatedHeaders, err := MutateRequest(candidate.Body, candidate.Headers)
 			if err != nil {
 				resultsChan <- &RaceResponse{Error: fmt.Errorf("%w: %v", ErrPayloadMutationFail, err)}
@@ -59,7 +59,7 @@ func ExecuteH2Multiplexing(ctx context.Context, candidate *RaceCandidate, config
 			// Signal readiness.
 			initWg.Done()
 
-			// --- Synchronization Phase ---
+			// -- Synchronization Phase --
 			select {
 			case <-startGate:
 			// Proceed
@@ -76,7 +76,7 @@ func ExecuteH2Multiplexing(ctx context.Context, candidate *RaceCandidate, config
 				time.Sleep(jitter)
 			}
 
-			// --- Execution Phase ---
+			// -- Execution Phase --
 			reqStart := time.Now()
 
 			req, err := http.NewRequestWithContext(ctx, candidate.Method, candidate.URL, bytes.NewReader(mutatedBody))
@@ -101,7 +101,7 @@ func ExecuteH2Multiplexing(ctx context.Context, candidate *RaceCandidate, config
 				return
 			}
 
-			// --- Response Processing Phase ---
+			// -- Response Processing Phase --
 			// Use pooled buffer for reading the response body.
 			buf := getBuffer()
 

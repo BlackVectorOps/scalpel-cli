@@ -29,8 +29,9 @@ func TestNewCA(t *testing.T) {
 	assert.Contains(t, ca.Cert.Subject.Organization, "Scalpel-CLI Test CA", "The organization should be set correctly")
 
 	// -- Verify the certificate and key are a valid pair --
+	// This checks that the certificate is properly self signed.
 	err = ca.Cert.CheckSignature(ca.Cert.SignatureAlgorithm, ca.Cert.RawTBSCertificate, ca.Cert.Signature)
-	assert.NoError(t, err, "The certificate's signature should be valid, verifying it's self-signed correctly")
+	assert.NoError(t, err, "The certificate's signature should be valid")
 
 	// -- Verify the cert pool --
 	// We'll create a dummy certificate signed by our CA and see if the pool can verify it.

@@ -1,4 +1,4 @@
-// pkg/analysis/active/timeslip/fingerprint.go
+// internal/analysis/active/timeslip/fingerprint.go
 package timeslip
 
 import (

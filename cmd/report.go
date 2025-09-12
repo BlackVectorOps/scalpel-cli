@@ -1,9 +1,10 @@
-// -- cmd/scalpel-cli/report.go 
+// cmd/report.go
 package cmd
 
 import (
 	"fmt"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
 
@@ -28,16 +29,22 @@ func newReportCmd() *cobra.Command {
 			ctx := cmd.Context()
 			logger := observability.GetLogger()
 
-			cfg, err := config.Load(logger, "./config.yaml")
-			if err != nil {
-				return fmt.Errorf("failed to load configuration: %w", err)
-			}
+			// Get the configuration initialized by the root command
+			cfg := config.Get()
 
-			storeService, err := store.New(ctx, cfg.Postgres.URL, logger)
+			// Initialize the database connection pool
+			pool, err := pgxpool.New(ctx, cfg.Postgres.URL)
+			if err != nil {
+				return fmt.Errorf("failed to connect to database: %w", err)
+			}
+			defer pool.Close()
+
+			// Initialize the store service with the connection pool
+			storeService, err := store.New(ctx, pool, logger)
 			if err != nil {
 				return fmt.Errorf("failed to initialize store service: %w", err)
 			}
-			defer storeService.Close()
+			// Note: store.New no longer needs a Close() method as it uses pgxpool managed by the caller.
 
 			pipeline := results.NewPipeline(storeService, logger)
 			report, err := pipeline.ProcessScanResults(ctx, scanID)
@@ -52,7 +59,7 @@ func newReportCmd() *cobra.Command {
 			}
 
 			// Print the final report to standard output.
-			fmt.Println(reportJSON)
+			fmt.Println(string(reportJSON))
 
 			return nil
 		},

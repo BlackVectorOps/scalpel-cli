@@ -1,3 +1,4 @@
+// internal/config/config.go
 package config
 
 import (
@@ -14,42 +15,45 @@ var (
 	once     sync.Once
 )
 
-// Config is the root configuration structure for the entire application.
+// Config holds the entire application configuration.
+// This is the root configuration structure.
 type Config struct {
-	Logger   LoggerConfig   `mapstructure:"logger"`
-	Postgres PostgresConfig `mapstructure:"postgres"`
-	Engine   EngineConfig   `mapstructure:"engine"`
-	Browser  BrowserConfig  `mapstructure:"browser" yaml:"browser"`
-	Network  NetworkConfig  `mapstructure:"network"`
-	Scanners ScannersConfig `mapstructure:"scanners"`
-	Scan     ScanConfig     `mapstructure:"scan"`
-	Agent    AgentConfig    `mapstructure:"agent"`
-	IAST     IASTConfig     `mapstructure:"iast" yaml:"iast"`
-}
-
-// ColorConfig defines the color settings for different log levels.
-type ColorConfig struct {
-	Debug  string `mapstructure:"debug" yaml:"debug"`
-	Info   string `mapstructure:"info" yaml:"info"`
-	Warn   string `mapstructure:"warn" yaml:"warn"`
-	Error  string `mapstructure:"error" yaml:"error"`
-	DPanic string `mapstructure:"dpanic" yaml:"dpanic"`
-	Panic  string `mapstructure:"panic" yaml:"panic"`
-	Fatal  string `mapstructure:"fatal" yaml:"fatal"`
+	Logger    LoggerConfig    `mapstructure:"logger" yaml:"logger"`
+	Postgres  PostgresConfig  `mapstructure:"postgres" yaml:"postgres"`
+	Engine    EngineConfig    `mapstructure:"engine" yaml:"engine"`
+	Browser   BrowserConfig   `mapstructure:"browser" yaml:"browser"`
+	Network   NetworkConfig   `mapstructure:"network" yaml:"network"`
+	IAST      IASTConfig      `mapstructure:"iast" yaml:"iast"`
+	Scanners  ScannersConfig  `mapstructure:"scanners" yaml:"scanners"`
+	Agent     AgentConfig     `mapstructure:"agent" yaml:"agent"`
+	Discovery DiscoveryConfig `mapstructure:"discovery" yaml:"discovery"`
 }
 
 // LoggerConfig holds all the configuration for the logger.
+// This should be the single source of truth for this struct.
 type LoggerConfig struct {
-	Level       string      `mapstructure:"level" yaml:"level"`
-	Format      string      `mapstructure:"format" yaml:"format"`
-	AddSource   bool        `mapstructure:"add_source" yaml:"add_source"`
-	ServiceName string      `mapstructure:"service_name" yaml:"service_name"`
-	LogFile     string      `mapstructure:"log_file" yaml:"log_file"`
-	MaxSize     int         `mapstructure:"max_size" yaml:"max_size"`
-	MaxBackups  int         `mapstructure:"max_backups" yaml:"max_backups"`
-	MaxAge      int         `mapstructure:"max_age" yaml:"max_age"`
-	Compress    bool        `mapstructure:"compress" yaml:"compress"`
-	Colors      ColorConfig `mapstructure:"colors" yaml:"colors"`
+	Level       string      `mapstructure:"level" json:"level" yaml:"level"`
+	Format      string      `mapstructure:"format" json:"format" yaml:"format"`
+	AddSource   bool        `mapstructure:"add_source" json:"add_source" yaml:"add_source"`
+	ServiceName string      `mapstructure:"service_name" json:"service_name" yaml:"service_name"`
+	LogFile     string      `mapstructure:"log_file" json:"log_file" yaml:"log_file"`
+	MaxSize     int         `mapstructure:"max_size" json:"max_size" yaml:"max_size"`
+	MaxBackups  int         `mapstructure:"max_backups" json:"max_backups" yaml:"max_backups"`
+	MaxAge      int         `mapstructure:"max_age" json:"max_age" yaml:"max_age"`
+	Compress    bool        `mapstructure:"compress" json:"compress" yaml:"compress"`
+	Colors      ColorConfig `mapstructure:"colors" json:"colors" yaml:"colors"`
+}
+
+// ColorConfig defines the color settings for different log levels.
+// These are used for console output to make logs more readable.
+type ColorConfig struct {
+	Debug  string `mapstructure:"debug" json:"debug" yaml:"debug"`
+	Info   string `mapstructure:"info" json:"info" yaml:"info"`
+	Warn   string `mapstructure:"warn" json:"warn" yaml:"warn"`
+	Error  string `mapstructure:"error" json:"error" yaml:"error"`
+	DPanic string `mapstructure:"dpanic" json:"dpanic" yaml:"dpanic"`
+	Panic  string `mapstructure:"panic" json:"panic" yaml:"panic"`
+	Fatal  string `mapstructure:"fatal" json:"fatal" yaml:"fatal"`
 }
 
 // PostgresConfig holds settings for the database connection.
@@ -59,8 +63,8 @@ type PostgresConfig struct {
 
 // EngineConfig holds settings for the task execution engine.
 type EngineConfig struct {
-	QueueSize         int           `mapstructure:"queue_size"`
-	WorkerConcurrency int           `mapstructure:"worker_concurrency"`
+	QueueSize          int           `mapstructure:"queue_size"`
+	WorkerConcurrency  int           `mapstructure:"worker_concurrency"`
 	DefaultTaskTimeout time.Duration `mapstructure:"default_task_timeout"`
 }
 
@@ -147,16 +151,16 @@ type AuthConfig struct {
 
 // ATOConfig holds configuration specific to the Account Takeover analysis module.
 type ATOConfig struct {
-	Enabled              bool     `mapstructure:"enabled" yaml:"enabled"`
-	CredentialFile       string   `mapstructure:"credentialFile" yaml:"credential_file"`
-	Concurrency          int      `mapstructure:"concurrency" yaml:"concurrency"`
-	MinRequestDelayMs    int      `mapstructure:"minRequestDelayMs" yaml:"min_request_delay_ms"`
-	RequestDelayJitterMs int      `mapstructure:"requestDelayJitterMs" yaml:"request_delay_jitter_ms"`
-	SuccessKeywords      []string `mapstructure:"successKeywords" yaml:"success_keywords"`
-	UserFailureKeywords  []string `mapstructure:"userFailureKeywords" yaml:"user_failure_keywords"`
-	PassFailureKeywords  []string `mapstructure:"passFailureKeywords" yaml:"pass_failure_keywords"`
+	Enabled                bool     `mapstructure:"enabled" yaml:"enabled"`
+	CredentialFile         string   `mapstructure:"credentialFile" yaml:"credential_file"`
+	Concurrency            int      `mapstructure:"concurrency" yaml:"concurrency"`
+	MinRequestDelayMs      int      `mapstructure:"minRequestDelayMs" yaml:"min_request_delay_ms"`
+	RequestDelayJitterMs   int      `mapstructure:"requestDelayJitterMs" yaml:"request_delay_jitter_ms"`
+	SuccessKeywords        []string `mapstructure:"successKeywords" yaml:"success_keywords"`
+	UserFailureKeywords    []string `mapstructure:"userFailureKeywords" yaml:"user_failure_keywords"`
+	PassFailureKeywords    []string `mapstructure:"passFailureKeywords" yaml:"pass_failure_keywords"`
 	GenericFailureKeywords []string `mapstructure:"genericFailureKeywords" yaml:"generic_failure_keywords"`
-	LockoutKeywords      []string `mapstructure:"lockoutKeywords" yaml:"lockout_keywords"`
+	LockoutKeywords        []string `mapstructure:"lockoutKeywords" yaml:"lockout_keywords"`
 }
 
 type IDORConfig struct {
@@ -173,6 +177,17 @@ type ScanConfig struct {
 	Concurrency int
 	Depth       int
 	Scope       string
+}
+
+// DiscoveryConfig holds settings for the discovery engine.
+type DiscoveryConfig struct {
+	MaxDepth           int           `mapstructure:"maxDepth" yaml:"maxDepth"`
+	Concurrency        int           `mapstructure:"concurrency" yaml:"concurrency"`
+	Timeout            time.Duration `mapstructure:"timeout" yaml:"timeout"`
+	PassiveEnabled     *bool         `mapstructure:"passiveEnabled" yaml:"passiveEnabled"`
+	CrtShRateLimit     float64       `mapstructure:"crtShRateLimit" yaml:"crtShRateLimit"`
+	CacheDir           string        `mapstructure:"cacheDir" yaml:"cacheDir"`
+	PassiveConcurrency int           `mapstructure:"passiveConcurrency" yaml:"passiveConcurrency"`
 }
 
 // AgentConfig holds settings for the autonomous agent.
@@ -210,6 +225,7 @@ type LLMModelConfig struct {
 }
 
 // Load initializes the configuration singleton from Viper.
+// Deprecated: Use Set() during initialization in the root command instead.
 func Load(v *viper.Viper) error {
 	var loadErr error
 	once.Do(func() {
@@ -226,8 +242,15 @@ func Load(v *viper.Viper) error {
 // Get returns the loaded configuration instance.
 func Get() *Config {
 	if instance == nil {
-		panic("Configuration not initialized. Call config.Load() in the root command.")
+		// This panic is intentional to catch initialization errors early.
+		panic("Configuration not initialized. Ensure initialization happens in the root command.")
 	}
 	return instance
 }
 
+// Set initializes the global configuration instance if not already set.
+func Set(cfg *Config) {
+	once.Do(func() {
+		instance = cfg
+	})
+}
