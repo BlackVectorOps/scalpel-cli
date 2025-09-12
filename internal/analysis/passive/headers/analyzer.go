@@ -1,270 +1,241 @@
-// pkg/analysis/passive/headers/analyzer.go
+// internal/analysis/passive/headers/analyzer.go
 package headers
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
-	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
-	"go.uber.org/zap"
-
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
+	"go.uber.org/zap"
 )
 
-// Define the analyzer's unique ID
-const AnalyzerID = "passive_security_headers"
+// -- Constants for HSTS Analysis --
 
-// Define the minimum acceptable HSTS max-age (6 months in seconds)
+// Defines the minimum acceptable HSTS max-age (6 months in seconds).
 const MinHstsMaxAge = 15552000
 
-// Pre-compile regex for extracting max-age
+// Pre-compiles the regex for extracting max-age from the HSTS header.
 var regexMaxAge = regexp.MustCompile(`(?i)max-age=(\d+)`)
 
-type Analyzer struct {
-	*core.BaseAnalyzer
-	logger *zap.Logger
+// HeadersAnalyzer performs passive analysis of HTTP response headers.
+type HeadersAnalyzer struct {
+	core.BaseAnalyzer
 }
 
-// NewAnalyzer creates a new security headers analyzer.
-func NewAnalyzer(logger *zap.Logger) *Analyzer {
-	namedLogger := logger.Named(AnalyzerID)
-
-	base := core.NewBaseAnalyzer(
-		"Security Headers Analyzer",
-		AnalyzerID,
-		core.TypePassive,
-		namedLogger,
-	)
-
-	return &Analyzer{
-		BaseAnalyzer: base,
-		logger:       namedLogger,
+// NewHeadersAnalyzer creates a new HeadersAnalyzer.
+func NewHeadersAnalyzer() *HeadersAnalyzer {
+	// The logger will be properly initialized when the adapter sets it up via the context.
+	// A Nop logger is used as a placeholder during initial construction.
+	logger := zap.NewNop()
+	return &HeadersAnalyzer{
+		BaseAnalyzer: *core.NewBaseAnalyzer("HeadersAnalyzer", "Analyzes security headers", core.TypePassive, logger),
 	}
 }
 
-// Analyze passively inspects HTTP response headers collected in the AnalysisContext artifacts.
-func (a *Analyzer) Analyze(ctx context.Context, analysisCtx *core.AnalysisContext) error {
-	if analysisCtx.Artifacts == nil || len(analysisCtx.Artifacts.Responses) == 0 {
-		return nil // No responses to analyze
+// Analyze runs the header analysis on the provided context.
+func (a *HeadersAnalyzer) Analyze(ctx context.Context, analysisCtx *core.AnalysisContext) error {
+	// Update the analyzer's logger to use the one from the context for rich, contextual logging.
+	a.Logger = analysisCtx.Logger
+
+	// This analyzer requires HAR artifacts to be present in the context.
+	if analysisCtx.Artifacts == nil || analysisCtx.Artifacts.HAR == nil {
+		a.Logger.Debug("No artifacts or HAR data available for header analysis.")
+		return nil
 	}
 
-	for _, resp := range analysisCtx.Artifacts.Responses {
-		// Ensure the request associated with the response is available.
-		if resp.Request == nil {
-			continue
-		}
+	// Iterate through HAR entries to find the main document request for the target URL.
+	var mainResponse *schemas.Response
+	targetURL := analysisCtx.TargetURL.String()
 
-		// Security headers are most relevant for HTML content, but some apply universally.
-		contentType := strings.ToLower(strings.Join(resp.Header["Content-Type"], ","))
-
-		isHTML := strings.Contains(contentType, "text/html")
-		isAPI := strings.Contains(contentType, "application/json") || strings.Contains(contentType, "application/xml")
-
-		if isHTML || isAPI {
-			parsedURL, err := url.Parse(resp.Request.URL.String())
-			if err != nil {
-				continue
-			}
-			a.checkHeaders(analysisCtx, parsedURL, resp.Header, isHTML)
+	for i, entry := range analysisCtx.Artifacts.HAR.Log.Entries {
+		// A simple check: if the request URL matches the target URL.
+		// A more robust implementation might check for the main document frame type.
+		if entry.Request.URL == targetURL {
+			mainResponse = &analysisCtx.Artifacts.HAR.Log.Entries[i].Response
+			break
 		}
 	}
+
+	if mainResponse == nil {
+		a.Logger.Debug("Could not find the main document response in HAR for header analysis.", zap.String("target_url", targetURL))
+		return nil
+	}
+
+	// Convert HAR headers (which are a list of name-value pairs) into a map for easier lookup.
+	headerMap := make(map[string]string)
+	for _, h := range mainResponse.Headers {
+		headerMap[strings.ToLower(h.Name)] = h.Value
+	}
+
+	// Run all specific header checks.
+	a.checkMissingSecurityHeaders(analysisCtx, headerMap)
+	a.checkHSTS(analysisCtx, headerMap) // HSTS gets its own detailed check.
+	a.checkCSP(analysisCtx, headerMap)
+	a.checkInformationDisclosure(analysisCtx, headerMap)
 
 	return nil
 }
 
-// checkHeaders evaluates the security posture based on the presence and configuration of headers.
-func (a *Analyzer) checkHeaders(analysisCtx *core.AnalysisContext, targetURL *url.URL, headers http.Header, isHTML bool) {
-	urlString := targetURL.String()
-
-	// 1. Content-Security-Policy (CSP) - Primarily relevant for HTML
-	cspValues := headers.Values("Content-Security-Policy")
-	cspOk := len(cspValues) > 0
-
-	if isHTML {
-		if !cspOk {
-			a.createMissingHeaderFinding(analysisCtx, urlString, "Content-Security-Policy", schemas.SeverityMedium, "The CSP header is not set. This significantly increases the risk of Cross-Site Scripting (XSS) attacks.", "CWE-693")
-		} else {
-			a.analyzeCSP(analysisCtx, urlString, cspValues)
-		}
-	}
-
-	// 2. Strict-Transport-Security (HSTS) - Relevant for all HTTPS traffic
-	if strings.EqualFold(targetURL.Scheme, "https") {
-		hstsValues := headers.Values("Strict-Transport-Security")
-		if len(hstsValues) == 0 {
-			a.createMissingHeaderFinding(analysisCtx, urlString, "Strict-Transport-Security", schemas.SeverityMedium, "The HSTS header is not set over HTTPS. This can expose users to man-in-the-middle attacks (e.g., SSL stripping).", "CWE-319")
-		} else {
-			a.analyzeHSTS(analysisCtx, urlString, hstsValues)
-		}
-	}
-
-	// 3. X-Content-Type-Options - Relevant for all traffic
-	val := headers.Get("X-Content-Type-Options")
-	if strings.ToLower(val) != "nosniff" {
-		a.createMissingHeaderFinding(analysisCtx, urlString, "X-Content-Type-Options", schemas.SeverityLow, "The header should be set to 'nosniff' to prevent the browser from MIME-sniffing a response away from the declared content-type.", "CWE-693")
-	}
-
-	// 4. X-Frame-Options - Primarily relevant for HTML
-	if isHTML {
-		if len(headers.Values("X-Frame-Options")) == 0 {
-			// Check if CSP frame-ancestors is used instead.
-			if !cspOk || !strings.Contains(strings.ToLower(strings.Join(cspValues, ",")), "frame-ancestors") {
-				a.createMissingHeaderFinding(analysisCtx, urlString, "X-Frame-Options (or CSP frame-ancestors)", schemas.SeverityMedium, "Neither X-Frame-Options nor CSP frame-ancestors are set. This may allow the page to be rendered in a frame, leading to Clickjacking attacks.", "CWE-1021")
-			}
-		}
-	}
-
-	// 5. Referrer-Policy
-	if len(headers.Values("Referrer-Policy")) == 0 {
-		a.createMissingHeaderFinding(analysisCtx, urlString, "Referrer-Policy", schemas.SeverityLow, "The Referrer-Policy header is missing. This controls how much referrer information (URL) is included with requests.", "CWE-200")
-	}
-
-	// 6. Permissions-Policy / Feature-Policy
-	if isHTML {
-		if len(headers.Values("Permissions-Policy")) == 0 {
-			if len(headers.Values("Feature-Policy")) == 0 {
-				a.createMissingHeaderFinding(analysisCtx, urlString, "Permissions-Policy", schemas.SeverityInformational, "The Permissions-Policy (formerly Feature-Policy) header is missing. This header allows control over which browser features and APIs can be used.", "CWE-693")
-			}
-		}
-	}
-
-	// 7. Information leakage
-	a.checkInformationLeakage(analysisCtx, urlString, headers, "Server")
-	a.checkInformationLeakage(analysisCtx, urlString, headers, "X-Powered-By")
+// Defines required security headers (HSTS is handled separately) and their CWEs.
+var requiredHeaders = map[string]string{
+	"x-frame-options":        "CWE-1021", // Clickjacking
+	"x-content-type-options": "CWE-116",  // MIME Sniffing
+	"referrer-policy":        "CWE-200",  // Information Exposure
 }
 
-// analyzeHSTS parses the HSTS header to ensure max-age is sufficient.
-func (a *Analyzer) analyzeHSTS(analysisCtx *core.AnalysisContext, targetURL string, hstsValues []string) {
-	hstsValue := strings.Join(hstsValues, "; ")
-	matches := regexMaxAge.FindStringSubmatch(hstsValue)
-
-	if len(matches) < 2 {
-		a.createWeakHeaderFinding(analysisCtx, targetURL, "Strict-Transport-Security", schemas.SeverityLow, "The HSTS header is missing the required 'max-age' directive.", hstsValue, "CWE-319")
-		return
-	}
-
-	// Use ParseInt for robustness against large numbers
-	maxAge64, err := strconv.ParseInt(matches[1], 10, 64)
-	if err != nil {
-		// If the error is ErrRange, the number is very large, which is good for HSTS.
-		if errors.Is(err, strconv.ErrRange) {
-			return // Value is large; HSTS is strong.
+func (a *HeadersAnalyzer) checkMissingSecurityHeaders(analysisCtx *core.AnalysisContext, headers map[string]string) {
+	for headerName, cwe := range requiredHeaders {
+		if _, exists := headers[headerName]; !exists {
+			a.reportMissingHeader(analysisCtx, headerName, cwe)
 		}
-		// Handle other parsing errors
-		a.logger.Debug("Failed to parse HSTS max-age despite regex match", zap.Error(err), zap.String("value", matches[1]))
+	}
+}
+
+//performs a detailed analysis of the Strict-Transport-Security header.
+func (a *HeadersAnalyzer) checkHSTS(analysisCtx *core.AnalysisContext, headers map[string]string) {
+	headerName := "strict-transport-security"
+	hstsValue, exists := headers[headerName]
+
+	// Check 1: Is the header missing entirely?
+	if !exists {
+		a.reportMissingHeader(analysisCtx, headerName, "CWE-319")
 		return
 	}
-	// Ensure MinHstsMaxAge is also defined as int64 if necessary for comparison.
-	maxAge := maxAge64
+
+	// Check 2: Does the header have a valid max-age directive?
+	matches := regexMaxAge.FindStringSubmatch(hstsValue)
+	if len(matches) < 2 {
+		a.reportFinding(analysisCtx,
+			"Weak HSTS Configuration: Missing max-age",
+			schemas.SeverityLow,
+			"CWE-319",
+			"The Strict-Transport-Security (HSTS) header is present but is missing the required 'max-age' directive, making it ineffective.",
+			fmt.Sprintf("HSTS Header Value: %s", hstsValue),
+			"Ensure the HSTS header includes a 'max-age' directive with a non-zero value.",
+		)
+		return
+	}
+
+	// Check 3: Is the max-age value sufficiently long?
+	maxAge, err := strconv.ParseInt(matches[1], 10, 64)
+	if err != nil {
+		// If the number is too large to parse, that's good for HSTS. We can ignore the error.
+		if errors.Is(err, strconv.ErrRange) {
+			return
+		}
+		a.Logger.Error("Failed to parse HSTS max-age despite regex match", zap.Error(err), zap.String("value", matches[1]))
+		return
+	}
 
 	if maxAge == 0 {
-		a.createWeakHeaderFinding(analysisCtx, targetURL, "Strict-Transport-Security", schemas.SeverityMedium, "The HSTS 'max-age' is set to 0, effectively disabling the security mechanism.", hstsValue, "CWE-319")
+		a.reportFinding(analysisCtx,
+			"Weak HSTS Configuration: max-age is Zero",
+			schemas.SeverityMedium,
+			"CWE-319",
+			"The HSTS 'max-age' is set to 0, which explicitly tells browsers to disable this security mechanism.",
+			fmt.Sprintf("HSTS Header Value: %s", hstsValue),
+			"Set the HSTS 'max-age' to a large value, such as 31536000 (1 year).",
+		)
 	} else if maxAge < MinHstsMaxAge {
-		desc := fmt.Sprintf("The HSTS 'max-age' is too short (%d seconds). It should be at least %d seconds (6 months).", maxAge, MinHstsMaxAge)
-		a.createWeakHeaderFinding(analysisCtx, targetURL, "Strict-Transport-Security", schemas.SeverityLow, desc, hstsValue, "CWE-319")
+		desc := fmt.Sprintf("The HSTS 'max-age' is set to %d seconds, which is considered too short. It should be at least %d seconds (6 months) to be effective.", maxAge, MinHstsMaxAge)
+		a.reportFinding(analysisCtx,
+			"Weak HSTS Configuration: Short max-age",
+			schemas.SeverityLow,
+			"CWE-319",
+			desc,
+			fmt.Sprintf("HSTS Header Value: %s", hstsValue),
+			fmt.Sprintf("Increase the HSTS 'max-age' to be at least %d.", MinHstsMaxAge),
+		)
 	}
 }
 
-// analyzeCSP performs a basic analysis of the CSP directives for weaknesses.
-func (a *Analyzer) analyzeCSP(analysisCtx *core.AnalysisContext, targetURL string, cspValues []string) {
-	cspContent := strings.Join(cspValues, ",")
-	cspLower := strings.ToLower(cspContent)
+func (a *HeadersAnalyzer) checkCSP(analysisCtx *core.AnalysisContext, headers map[string]string) {
+	cspHeaderName := "content-security-policy"
+	csp, exists := headers[cspHeaderName]
+	if !exists {
+		a.reportMissingHeader(analysisCtx, cspHeaderName, "CWE-693") // Protection Mechanism Failure
+		return
+	}
 
-	// Check 1: 'unsafe-inline' without mitigation.
+	// Basic CSP analysis for common weaknesses. A full CSP parser would be more robust.
+	cspLower := strings.ToLower(csp)
 	if strings.Contains(cspLower, "'unsafe-inline'") {
-		hasScriptDirective := strings.Contains(cspLower, "script-src") || strings.Contains(cspLower, "default-src")
-		hasMitigation := strings.Contains(cspLower, "nonce-") || strings.Contains(cspLower, "sha256-") || strings.Contains(cspLower, "'strict-dynamic'")
-
-		if hasScriptDirective && !hasMitigation {
-			a.createWeakHeaderFinding(analysisCtx, targetURL, "Content-Security-Policy", schemas.SeverityHigh, "The CSP uses 'unsafe-inline' for scripts without a corresponding nonce, hash, or 'strict-dynamic', which largely negates XSS protection.", cspContent, "CWE-693")
-		}
-	}
-
-	// Check 2: 'unsafe-eval'.
-	if strings.Contains(cspLower, "'unsafe-eval'") {
-		a.createWeakHeaderFinding(analysisCtx, targetURL, "Content-Security-Policy", schemas.SeverityMedium, "The CSP allows 'unsafe-eval', which permits the use of eval() and similar methods, increasing the attack surface for XSS.", cspContent, "CWE-693")
-	}
-
-	// Check 3: Overly permissive sources.
-	if strings.Contains(cspContent, "*") || strings.Contains(cspLower, "data:") || strings.Contains(cspLower, "http:") {
-		a.createWeakHeaderFinding(analysisCtx, targetURL, "Content-Security-Policy", schemas.SeverityMedium, "The CSP includes overly permissive sources (e.g., '*', 'data:', or 'http:'), which may allow loading untrusted content.", cspContent, "CWE-693")
-	}
-}
-
-func (a *Analyzer) checkInformationLeakage(analysisCtx *core.AnalysisContext, targetURL string, headers http.Header, headerName string) {
-	values := headers.Values(headerName)
-	if len(values) > 0 && values[0] != "" {
-		value := strings.Join(values, ", ")
-		// Simple heuristic: check if the value contains version numbers (dots or slashes)
-		if len(value) > 5 && (strings.Contains(value, ".") || strings.Contains(value, "/")) {
-			desc := fmt.Sprintf("The server is disclosing software/framework information via the '%s' header (%s).", headerName, value)
-			a.createWeakHeaderFinding(analysisCtx, targetURL, headerName, schemas.SeverityInformational, desc, value, "CWE-200")
+		// Rudimentary check: if 'unsafe-inline' is present without nonce/hash mitigation.
+		if !strings.Contains(cspLower, "nonce-") && !strings.Contains(cspLower, "'sha") {
+			a.reportFinding(analysisCtx,
+				"Weak Content-Security-Policy (CSP)",
+				schemas.SeverityMedium,
+				"CWE-693",
+				"The CSP header includes 'unsafe-inline' without a corresponding nonce or hash, which may allow execution of inline scripts and increases the risk of Cross-Site Scripting (XSS).",
+				fmt.Sprintf("CSP Header Value: %s", csp),
+				"Implement a strong CSP using nonces or hashes for inline scripts, or refactor inline scripts into external files.",
+			)
 		}
 	}
 }
 
-// Helper function for missing headers.
-func (a *Analyzer) createMissingHeaderFinding(analysisCtx *core.AnalysisContext, targetURL, headerName string, severity schemas.Severity, description, cwe string) {
-	evidence, _ := json.Marshal(map[string]string{
-		"header": headerName,
-		"status": "Missing",
-		"url":    targetURL,
-	})
+func (a *HeadersAnalyzer) checkInformationDisclosure(analysisCtx *core.AnalysisContext, headers map[string]string) {
+	disclosureHeaders := []string{"server", "x-powered-by", "x-aspnet-version"}
 
-	finding := schemas.Finding{
-		ID:             uuid.New().String(),
-		Timestamp:      time.Now().UTC(),
-		Target:         targetURL,
-		Module:         a.Name(),
-		Vulnerability:  fmt.Sprintf("Missing Security Header: %s", headerName),
-		Severity:       severity,
-		Description:    description,
-		Evidence:       evidence,
-		Recommendation: fmt.Sprintf("Ensure the '%s' header is configured and returned in the HTTP response.", headerName),
-		CWE:            cwe,
-	}
-	analysisCtx.AddFinding(finding)
-
-	// Log actionable findings
-	if severity == schemas.SeverityHigh || severity == schemas.SeverityMedium {
-		a.logger.Warn("Missing Security Header", zap.String("header", headerName), zap.String("url", targetURL))
+	for _, headerName := range disclosureHeaders {
+		if value, exists := headers[headerName]; exists && value != "" {
+			a.reportFinding(analysisCtx,
+				"Information Disclosure in HTTP Headers",
+				schemas.SeverityLow,
+				"CWE-200",
+				fmt.Sprintf("The '%s' header discloses technology stack or version information: '%s'. This can help attackers identify known vulnerabilities.", headerName, value),
+				fmt.Sprintf("%s: %s", headerName, value),
+				fmt.Sprintf("Configure the web server to suppress or obfuscate the '%s' header.", headerName),
+			)
+		}
 	}
 }
 
-// Helper function for weak or misconfigured headers.
-func (a *Analyzer) createWeakHeaderFinding(analysisCtx *core.AnalysisContext, targetURL, headerName string, severity schemas.Severity, description, headerValue, cwe string) {
-	evidence, _ := json.Marshal(map[string]string{
-		"header": headerName,
-		"status": "Weak or Misconfigured",
-		"value":  headerValue,
-		"url":    targetURL,
-	})
-
+// reportMissingHeader is a helper to generate a finding specifically for a missing header.
+func (a *HeadersAnalyzer) reportMissingHeader(analysisCtx *core.AnalysisContext, headerName string, cwe string) {
 	finding := schemas.Finding{
-		ID:             uuid.New().String(),
-		Timestamp:      time.Now().UTC(),
-		Target:         targetURL,
-		Module:         a.Name(),
-		Vulnerability:  fmt.Sprintf("Weak Security Header Configuration: %s", headerName),
-		Severity:       severity,
-		Description:    description,
-		Evidence:       evidence,
-		Recommendation: "Review and strengthen the configuration of this security header.",
-		CWE:            cwe,
+		ID:        uuid.New().String(),
+		TaskID:    analysisCtx.Task.TaskID,
+		Timestamp: time.Now().UTC(),
+		Target:    analysisCtx.TargetURL.String(),
+		Module:    a.Name(),
+		Vulnerability: schemas.Vulnerability{
+			Name:        fmt.Sprintf("Missing Security Header: %s", headerName),
+			Description: "A recommended security header is missing from the HTTP response.",
+		},
+		Severity:     schemas.SeverityMedium,
+		Description:  fmt.Sprintf("The response is missing the '%s' security header. This header is important for protecting against various web vulnerabilities.", headerName),
+		Evidence:     fmt.Sprintf("Header not present in response: %s", headerName),
+		Recommendation: fmt.Sprintf("Configure the web server or application framework to include the '%s' header in all relevant HTTP responses.", headerName),
+		CWE:          []string{cwe},
 	}
 	analysisCtx.AddFinding(finding)
+}
 
-	// Log actionable findings
-	if severity == schemas.SeverityHigh || severity == schemas.SeverityMedium {
-		a.logger.Warn("Weak Security Header Configuration", zap.String("header", headerName), zap.String("url", targetURL))
+// reportFinding is a generic helper to generate a finding.
+func (a *HeadersAnalyzer) reportFinding(analysisCtx *core.AnalysisContext, vulnName string, severity schemas.Severity, cwe string, description string, evidence string, recommendation string) {
+	finding := schemas.Finding{
+		ID:        uuid.New().String(),
+		TaskID:    analysisCtx.Task.TaskID,
+		Timestamp: time.Now().UTC(),
+		Target:    analysisCtx.TargetURL.String(),
+		Module:    a.Name(),
+		Vulnerability: schemas.Vulnerability{
+			Name:        vulnName,
+			Description: description,
+		},
+		Severity:     severity,
+		Description:  description,
+		Evidence:     evidence,
+		Recommendation: recommendation,
+		CWE:          []string{cwe},
 	}
+	analysisCtx.AddFinding(finding)
 }

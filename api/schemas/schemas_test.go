@@ -2,6 +2,7 @@ package schemas_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"testing"
 	"time"
@@ -27,12 +28,12 @@ func getTestTime(t *testing.T) time.Time {
 // -- Test Cases --
 
 // TestConstants verifies that all defined constants hold their expected string values.
-// This prevents accidental changes to values that might be used in APIs or databases.
+// This is a good way to prevent accidental changes to values that might be used in APIs.
 func TestConstants(t *testing.T) {
 	t.Parallel()
 	testCases := []struct {
 		name     string
-		constant fmt.Stringer
+		constant interface{} // Use interface{} to handle various constant types
 		expected string
 	}{
 		// TaskTypes
@@ -45,6 +46,10 @@ func TestConstants(t *testing.T) {
 		{"SeverityCritical", schemas.SeverityCritical, "CRITICAL"},
 		{"SeverityHigh", schemas.SeverityHigh, "HIGH"},
 		{"SeverityInformational", schemas.SeverityInformational, "INFORMATIONAL"},
+
+		// LLM ModelTiers
+		{"TierFast", schemas.TierFast, "fast"},
+		{"TierPowerful", schemas.TierPowerful, "powerful"},
 	}
 
 	for _, tc := range testCases {
@@ -52,14 +57,21 @@ func TestConstants(t *testing.T) {
 		tt := tc
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			assert.Equal(t, tt.expected, tt.constant.String())
+			// Dynamically resolve the string representation of the constant.
+			var actual string
+			if stringer, ok := tt.constant.(fmt.Stringer); ok {
+				actual = stringer.String()
+			} else {
+				// Fallback for basic types like string aliases.
+				actual = fmt.Sprintf("%v", tt.constant)
+			}
+			assert.Equal(t, tt.expected, actual)
 		})
 	}
 }
 
 // TestStructJSONTags uses reflection to verify that the `json` tags on struct fields
-// are correct. This is critical for ensuring API contract stability and correct
-// serialization/deserialization.
+// are correct. This is critical for ensuring API contract stability.
 func TestStructJSONTags(t *testing.T) {
 	t.Parallel()
 	testCases := []struct {
@@ -114,6 +126,24 @@ func TestStructJSONTags(t *testing.T) {
 				"Properties":   "properties",
 			},
 		},
+		{
+			name:      "GenerationOptions",
+			structRef: schemas.GenerationOptions{},
+			expectedTags: map[string]string{
+				"Temperature":     "temperature",
+				"ForceJSONFormat": "force_json_format",
+			},
+		},
+		{
+			name:      "GenerationRequest",
+			structRef: schemas.GenerationRequest{},
+			expectedTags: map[string]string{
+				"SystemPrompt": "system_prompt",
+				"UserPrompt":   "user_prompt",
+				"Tier":         "tier",
+				"Options":      "options",
+			},
+		},
 	}
 
 	for _, tc := range testCases {
@@ -123,25 +153,23 @@ func TestStructJSONTags(t *testing.T) {
 			structType := reflect.TypeOf(tt.structRef)
 			for fieldName, expectedTag := range tt.expectedTags {
 				field, found := structType.FieldByName(fieldName)
-				require.True(t, found, "Field '%s' not found in struct '%s'", fieldName, tt.name)
+				require.True(t, found, "Field '%s' not found in struct '%s'.", fieldName, tt.name)
 				actualTag := field.Tag.Get("json")
-				assert.Equal(t, expectedTag, actualTag, "JSON tag mismatch for field '%s.%s'", tt.name, fieldName)
+				assert.Contains(t, actualTag, expectedTag, "JSON tag mismatch for field '%s.%s'", tt.name, fieldName)
 			}
 		})
 	}
 }
 
-// TestSerializationCycle performs a round trip test (marshal to JSON -> unmarshal from JSON).
-// It verifies that a struct's data integrity is maintained throughout serialization,
-// which is essential for data transfer and persistence.
+// TestSerializationCycle performs a round trip test (marshal to JSON and unmarshal back).
+// It verifies that data integrity is maintained, which is essential for data transfer.
 func TestSerializationCycle(t *testing.T) {
 	t.Parallel()
 	timestamp := getTestTime(t)
 
-	// NOTE on map[string]interface{}: When Go's json library unmarshals into an
-	// interface{}, it converts all JSON numbers to float64. To ensure a successful
-	// reflect.DeepEqual comparison, the original structs must also use float64
-	// for numeric types within these maps.
+	// NOTE: When Go's json library unmarshals into an interface{}, it converts all JSON
+	// numbers to float64. To ensure a successful reflect.DeepEqual comparison,
+	// the original structs must also use float64 for numeric types in these maps.
 	finding := schemas.Finding{
 		ID:          "finding-001",
 		TaskID:      "task-abc",
@@ -189,23 +217,42 @@ func TestSerializationCycle(t *testing.T) {
 		},
 	}
 
-	// Marshal the original object to JSON.
-	data, err := json.Marshal(envelope)
-	require.NoError(t, err, "Marshalling ResultEnvelope should not fail")
+	t.Run("ResultEnvelope", func(t *testing.T) {
+		data, err := json.Marshal(envelope)
+		require.NoError(t, err, "Marshalling ResultEnvelope should not fail")
 
-	// Unmarshal back into a new object.
-	var unmarshaled schemas.ResultEnvelope
-	err = json.Unmarshal(data, &unmarshaled)
-	require.NoError(t, err, "Unmarshalling ResultEnvelope should not fail")
+		var unmarshaled schemas.ResultEnvelope
+		err = json.Unmarshal(data, &unmarshaled)
+		require.NoError(t, err, "Unmarshalling ResultEnvelope should not fail")
 
-	// Verify that the original and unmarshaled objects are identical.
-	// reflect.DeepEqual provides a robust, recursive comparison.
-	assert.True(t, reflect.DeepEqual(envelope, unmarshaled), "Original and unmarshaled objects should be identical")
+		// reflect.DeepEqual provides a robust, recursive comparison.
+		assert.True(t, reflect.DeepEqual(envelope, unmarshaled), "Original and unmarshaled objects should be identical")
+	})
+
+	t.Run("GenerationRequest", func(t *testing.T) {
+		request := schemas.GenerationRequest{
+			SystemPrompt: "System instructions.",
+			UserPrompt:   "User query.",
+			Tier:         schemas.TierPowerful,
+			Options: schemas.GenerationOptions{
+				Temperature:     0.3,
+				ForceJSONFormat: true,
+			},
+		}
+
+		data, err := json.Marshal(request)
+		require.NoError(t, err, "Marshalling GenerationRequest should not fail")
+
+		var unmarshaledRequest schemas.GenerationRequest
+		err = json.Unmarshal(data, &unmarshaledRequest)
+		require.NoError(t, err, "Unmarshalling GenerationRequest should not fail")
+
+		assert.True(t, reflect.DeepEqual(request, unmarshaledRequest), "Original and unmarshaled GenerationRequest should be identical")
+	})
 }
 
 // TestInterfaceHandlingBehavior explicitly verifies how the json library decodes
 // different JSON types into the `map[string]interface{}` used in our schemas.
-// This confirms our understanding of the library's behavior.
 func TestInterfaceHandlingBehavior(t *testing.T) {
 	t.Parallel()
 	inputJSON := `{

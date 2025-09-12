@@ -2,10 +2,10 @@ package schemas
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 
 	"github.com/chromedp/cdproto/network"
-	"github.com/google/uuid"
 )
 
 // -- Task & Finding Schemas --
@@ -28,10 +28,10 @@ const (
 type Severity string
 
 const (
-	SeverityCritical      Severity = "CRITICAL"
-	SeverityHigh          Severity = "HIGH"
-	SeverityMedium        Severity = "MEDIUM"
-	SeverityLow           Severity = "LOW"
+	SeverityCritical    Severity = "CRITICAL"
+	SeverityHigh        Severity = "HIGH"
+	SeverityMedium      Severity = "MEDIUM"
+	SeverityLow         Severity = "LOW"
 	SeverityInformational Severity = "INFORMATIONAL"
 )
 
@@ -64,17 +64,17 @@ type NodeType string
 
 // These provide a controlled vocabulary for node types.
 const (
-	NodeHost        NodeType = "HOST"
-	NodeIPAddress   NodeType = "IP_ADDRESS"
-	NodeURL         NodeType = "URL"
-	NodeCookie      NodeType = "COOKIE"
-	NodeHeader      NodeType = "HEADER"
-	NodeTechnology  NodeType = "TECHNOLOGY"
+	NodeHost          NodeType = "HOST"
+	NodeIPAddress     NodeType = "IP_ADDRESS"
+	NodeURL           NodeType = "URL"
+	NodeCookie        NodeType = "COOKIE"
+	NodeHeader        NodeType = "HEADER"
+	NodeTechnology    NodeType = "TECHNOLOGY"
 	NodeVulnerability NodeType = "VULNERABILITY"
-	NodeAction      NodeType = "ACTION"
-	NodeObservation NodeType = "OBSERVATION"
-	NodeTool        NodeType = "TOOL"
-	NodeFile        NodeType = "FILE"
+	NodeAction        NodeType = "ACTION"
+	NodeObservation   NodeType = "OBSERVATION"
+	NodeTool          NodeType = "TOOL"
+	NodeFile          NodeType = "FILE"
 )
 
 // RelationshipType defines the type of an edge between nodes in the knowledge graph.
@@ -91,37 +91,71 @@ const (
 	RelationshipHasObservation RelationshipType = "HAS_OBSERVATION"
 )
 
-// Node represents a single entity, concept, or piece of data in the Knowledge Graph.
-// This struct is the single, canonical representation for ALL nodes to be stored
-// in the graph. It is intentionally generic to accommodate any type of information.
+// NodeStatus defines the state of a node, useful for tracking analysis progress.
+type NodeStatus string
+
+const (
+	StatusNew        NodeStatus = "NEW"
+	StatusProcessing NodeStatus = "PROCESSING"
+	StatusAnalyzed   NodeStatus = "ANALYZED"
+	StatusError      NodeStatus = "ERROR"
+)
+
+// Node represents a single entity in the Knowledge Graph.
+// This struct is the canonical representation for ALL nodes.
+// It is aligned with the KnowledgeGraph interface and database schema.
 type Node struct {
 	// A universally unique identifier for the node.
-	ID uuid.UUID `json:"id"`
+	// Stored as a string to be compatible with the KG interface.
+	ID string `json:"id"`
+
 	// Type categorizes the node, using the predefined NodeType constants.
 	Type NodeType `json:"type"`
+
 	// A human readable label for the node.
 	Label string `json:"label"`
-	// An open map to store any additional properties or metadata associated with the node.
-	Props map[string]interface{} `json:"props"`
+
+	// Status tracks the analysis state of the node.
+	Status NodeStatus `json:"status"`
+
+	// An open map to store any additional properties.
+	// Using json.RawMessage is a robust way to handle arbitrary JSON data
+	// without the performance hit of map[string]interface{}.
+	Properties json.RawMessage `json:"properties"`
+
+	// Timestamps for tracking when the node was first created and last seen.
+	CreatedAt time.Time `json:"created_at"`
+	LastSeen  time.Time `json:"last_seen"`
 }
 
 // Edge represents a directed, labeled relationship between two nodes in the Knowledge Graph.
-// This struct is the single, canonical representation for ALL edges.
+// This struct is the canonical representation for ALL edges.
 type Edge struct {
 	// A universally unique identifier for the edge.
-	ID uuid.UUID `json:"id"`
-	// The ID of the node where the edge originates.
-	Source uuid.UUID `json:"source"`
-	// The ID of the node where the edge terminates.
-	Target uuid.UUID `json:"target"`
-	// Describes the nature of the relationship, using predefined RelationshipType constants.
-	Label RelationshipType `json:"label"`
-	// An open map to store any additional properties, such as weights or timestamps.
-	Props map[string]interface{} `json:"props"`
+	ID string `json:"id"`
+
+	// The ID of the node where the edge originates. Renamed from Source for consistency.
+	From string `json:"from"`
+
+	// The ID of the node where the edge terminates. Renamed from Target for consistency.
+	To string `json:"to"`
+
+	// Type describes the nature of the relationship, using predefined RelationshipType constants.
+	// Renamed from Label for clarity and consistency with the database schema.
+	Type RelationshipType `json:"type"`
+
+	// A human readable label for the edge, for display or contextual purposes.
+	Label string `json:"label"`
+
+	// An open map to store additional properties, such as weights or timestamps.
+	Properties json.RawMessage `json:"properties"`
+
+	// Timestamps for tracking when the edge was first created and last seen.
+	CreatedAt time.Time `json:"created_at"`
+	LastSeen  time.Time `json:"last_seen"`
 }
 
 // KnowledgeGraphUpdate represents a batch of updates to be applied to the knowledge graph.
-// It contains slices of the canonical Node and Edge structs.
 type KnowledgeGraphUpdate struct {
 	Nodes []Node `json:"nodes"`
 	Edges []Edge `json:"edges"`
@@ -142,11 +176,11 @@ type ResultEnvelope struct {
 
 // InteractionConfig defines the parameters for the automated page interactor.
 type InteractionConfig struct {
-	MaxDepth                int               `json:"max_depth"`
+	MaxDepth              int               `json:"max_depth"`
 	MaxInteractionsPerDepth int               `json:"max_interactions_per_depth"`
-	InteractionDelayMs      int               `json:"interaction_delay_ms"`
-	PostInteractionWaitMs   int               `json:"post_interaction_wait_ms"`
-	CustomInputData         map[string]string `json:"custom_input_data,omitempty"` // User provided data for specific inputs (key: 'id' or 'name' attribute).
+	InteractionDelayMs    int               `json:"interaction_delay_ms"`
+	PostInteractionWaitMs int               `json:"post_interaction_wait_ms"`
+	CustomInputData       map[string]string `json:"custom_input_data,omitempty"` // User provided data for specific inputs (key: 'id' or 'name' attribute).
 }
 
 // ConsoleLog represents a single entry from the browser's console.
@@ -339,5 +373,3 @@ type TaskEngine interface {
 	Start(ctx context.Context, taskChan <-chan Finding)
 	Stop()
 }
-
-
