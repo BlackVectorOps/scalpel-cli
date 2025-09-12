@@ -1,11 +1,13 @@
 # Default configuration for scalpel-cli
+# NOTE: For production deployments, override settings using environment variables
+# (e.g., SCALPEL_POSTGRES_URL) or a config.local.yaml file.
 
 logger:
   service_name: "scalpel-cli"
   log_file: "logs/scalpel.log"
-  level: "debug"
-  format: "console" # 'console' for dev, 'json' for production
-  add_source: true
+  level: "info" # Production default. Use 'debug' for troubleshooting.
+  format: "json" # Production default (structured logging). Use 'console' for development.
+  add_source: false # Disabled for production performance.
   max_size: 10
   max_backups: 3
   max_age: 7
@@ -20,7 +22,10 @@ logger:
     fatal: "magenta"
 
 postgres:
-  url: "postgres://user:password@localhost:5432/scalpeldb?sslmode=disable"
+  # The database URL must be configured before running.
+  # Recommended to set via SCALPEL_POSTGRES_URL environment variable.
+  # Example: postgres://user:password@hostname:5432/scalpeldb?sslmode=require
+  url: ""
 
 engine:
   queue_size: 1000
@@ -28,8 +33,8 @@ engine:
   default_task_timeout: "15m"
 
 browser:
-  headless: true
-  ignore_tls_errors: false
+  headless: false
+  ignore_tls_errors: false # Keep false for production security.
   args:
     - "--no-sandbox"
     - "--disable-setuid-sandbox"
@@ -45,7 +50,7 @@ network:
   headers:
     User-Agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36 ScalpelV2/1.0"
 
-# IAST script paths required by the browser manager
+# IAST script paths required by the browser manager (relative to working directory)
 iast:
   shimPath: "internal/browser/shim/pinnacle.js"
   configPath: "internal/browser/shim/pinnacle.json"
@@ -59,11 +64,12 @@ scanners:
   static:
     jwt:
       enabled: true
-      known_secrets:
-        - "secret"
-        - "password"
+      # Removed weak default secrets. Users should provide their own list if needed.
+      known_secrets: []
       brute_force_enabled: true
-      dictionary_file: "~/SecLists/Fuzzing/JSON-Web-Tokens/jwt.secrets.list"
+      # Changed path from "~/SecLists/..." to a relative path.
+      # Ensure this file is available in the deployment environment.
+      dictionary_file: "config/jwt.secrets.list"
 
   active:
     taint:
@@ -109,15 +115,15 @@ scanners:
           - "account locked"
           - "too many attempts"
 
-      idor:
-        enabled: true
-        ignore_list:
-          - "csrf_token"
-          - "X-CSRF-Token"
-          - "nonce"
-          - "viewstate"
-        test_strategies:
-          NumericID: ["increment", "decrement"]
-          UUID: ["horizontal_swap"]
-          Base64Encoded: ["bit_flip"]
-          ObjectID: ["increment_char"]
+    idor:
+      enabled: true
+      ignore_list:
+        - "csrf_token"
+        - "X-CSRF-Token"
+        - "nonce"
+        - "viewstate"
+      test_strategies:
+        NumericID: ["increment", "decrement"]
+        UUID: ["horizontal_swap"]
+        Base64Encoded: ["bit_flip"]
+        ObjectID: ["increment_char"]
