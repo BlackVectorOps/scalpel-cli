@@ -38,7 +38,8 @@ type Analyzer struct {
 	oastProvider OASTProvider
 	logger       *zap.Logger
 	activeProbes map[string]ActiveProbe
-	probesMutex  sync.RWMex
+	// FIX: This was a typo, changed RWMex to RWMutex.
+	probesMutex  sync.RWMutex
 	eventsChan   chan Event
 	wg           sync.WaitGroup
 	producersWG  sync.WaitGroup
@@ -268,7 +269,8 @@ func (a *Analyzer) generateCanary(prefix string, probeType schemas.ProbeType) st
 }
 
 // preparePayload replaces placeholders (Canary, OASTServer) in the probe definition.
-func (a *Analyzer) preparePayload(probeDef schemas.ProbeDefinition, canary string) string {
+// FIX: Changed schemas.ProbeDefinition to the local ProbeDefinition type.
+func (a *Analyzer) preparePayload(probeDef ProbeDefinition, canary string) string {
 	requiresOAST := strings.Contains(probeDef.Payload, "{{.OASTServer}}")
 	if requiresOAST && a.oastProvider == nil {
 		a.logger.Warn("OAST probe defined but no OAST provider configured. Skipping probe.", zap.String("canary", canary))
@@ -604,7 +606,7 @@ func (a *Analyzer) processOASTInteraction(interaction OASTInteraction) {
 		Probe:             probe,
 		Detail:            detail,
 		IsConfirmed:       true,
-		SanitizationLevel: schemas.SanitizationNone,
+		SanitizationLevel: SanitizationNone,
 		StackTrace:        "N/A (Out of Band)",
 		OASTDetails:       &interaction,
 	}
@@ -645,7 +647,7 @@ func (a *Analyzer) processExecutionProof(proof ExecutionProofEvent) {
 		Probe:             probe,
 		Detail:            "Payload execution confirmed via JS callback.",
 		IsConfirmed:       true,
-		SanitizationLevel: schemas.SanitizationNone,
+		SanitizationLevel: SanitizationNone,
 		StackTrace:        proof.StackTrace,
 	}
 	a.reporter.Report(finding)
@@ -737,7 +739,7 @@ func (a *Analyzer) processPrototypePollutionConfirmation(event SinkEvent) {
 		Probe:             probe,
 		Detail:            fmt.Sprintf("Successfully polluted Object.prototype property: %s", event.Detail),
 		IsConfirmed:       true,
-		SanitizationLevel: schemas.SanitizationNone,
+		SanitizationLevel: SanitizationNone,
 		StackTrace:        event.StackTrace,
 	}
 	a.reporter.Report(finding)
@@ -779,39 +781,44 @@ var ValidTaintFlows = map[TaintFlowPath]bool{
 
 	{schemas.ProbeTypeGeneric, schemas.SinkWebSocketSend}:      true,
 	{schemas.ProbeTypeGeneric, schemas.SinkXMLHTTPRequest}:     true,
-	{schemas.ProbeTypeGeneric, schemas.SinkXMLHTTPRequest_URL}: true,
+	// FIX: The constant name was incorrect (had a trailing underscore).
+	{schemas.ProbeTypeGeneric, schemas.SinkXMLHTTPRequestURL}: true,
 	{schemas.ProbeTypeGeneric, schemas.SinkFetch}:              true,
-	{schemas.ProbeTypeGeneric, schemas.SinkFetch_URL}:          true,
+	// FIX: The constant name was incorrect (had a trailing underscore).
+	{schemas.ProbeTypeGeneric, schemas.SinkFetchURL}:          true,
 	{schemas.ProbeTypeGeneric, schemas.SinkNavigation}:         true,
 	{schemas.ProbeTypeGeneric, schemas.SinkSendBeacon}:         true,
 	{schemas.ProbeTypeGeneric, schemas.SinkWorkerSrc}:          true,
 
 	{schemas.ProbeTypeOAST, schemas.SinkWebSocketSend}:      true,
 	{schemas.ProbeTypeOAST, schemas.SinkXMLHTTPRequest}:     true,
-	{schemas.ProbeTypeOAST, schemas.SinkXMLHTTPRequest_URL}: true,
+	// FIX: The constant name was incorrect (had a trailing underscore).
+	{schemas.ProbeTypeOAST, schemas.SinkXMLHTTPRequestURL}: true,
 	{schemas.ProbeTypeOAST, schemas.SinkFetch}:              true,
-	{schemas.ProbeTypeOAST, schemas.SinkFetch_URL}:          true,
+	// FIX: The constant name was incorrect (had a trailing underscore).
+	{schemas.ProbeTypeOAST, schemas.SinkFetchURL}:          true,
 	{schemas.ProbeTypeOAST, schemas.SinkNavigation}:         true,
 	{schemas.ProbeTypeOAST, schemas.SinkSendBeacon}:         true,
 	{schemas.ProbeTypeOAST, schemas.SinkWorkerSrc}:          true,
 }
 
 // checkSanitization compares the sink value with the original probe payload.
-func (a *Analyzer) checkSanitization(sinkValue string, probe ActiveProbe) (schemas.SanitizationLevel, string) {
+// FIX: Changed schemas.SanitizationLevel to the local SanitizationLevel type.
+func (a *Analyzer) checkSanitization(sinkValue string, probe ActiveProbe) (SanitizationLevel, string) {
 	if strings.Contains(sinkValue, probe.Value) {
-		return schemas.SanitizationNone, ""
+		return SanitizationNone, ""
 	}
 
 	if probe.Type == schemas.ProbeTypeXSS || probe.Type == schemas.ProbeTypeSSTI {
 		if !strings.Contains(sinkValue, "<") && !strings.Contains(sinkValue, ">") && (strings.Contains(probe.Value, "<") || strings.Contains(probe.Value, ">")) {
-			return schemas.SanitizationPartial, " (Potential Sanitization: HTML tags modified or stripped)"
+			return SanitizationPartial, " (Potential Sanitization: HTML tags modified or stripped)"
 		}
 		if (strings.Contains(sinkValue, "\\\"") || strings.Contains(sinkValue, "&#34;")) && !strings.Contains(probe.Value, "\\\"") && !strings.Contains(probe.Value, "&#34;") {
-			return schemas.SanitizationPartial, " (Potential Sanitization: Quotes escaped)"
+			return SanitizationPartial, " (Potential Sanitization: Quotes escaped)"
 		}
 	}
 
-	return schemas.SanitizationPartial, " (Potential Sanitization: Payload modified)"
+	return SanitizationPartial, " (Potential Sanitization: Payload modified)"
 }
 
 // isContextValid implements the rules engine for reducing false positives.
