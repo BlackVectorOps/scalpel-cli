@@ -1,8 +1,7 @@
 package browser
 
-// SessionLifecycleObserver defines the contract for an entity that manages
-// the lifecycle of browser sessions. It allows a session to signal back when
-// it has been closed, so that the owner can free up associated resources.
+// SessionLifecycleObserver allows the AnalysisContext to notify its owner (Manager) upon closure.
+// This interface helps break the tight coupling between the concrete types while allowing necessary communication for Principle 4.
 type SessionLifecycleObserver interface {
-	unregisterSession(*AnalysisContext)
+	unregisterSession(ac *AnalysisContext)
 }

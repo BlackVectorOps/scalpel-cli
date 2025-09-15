@@ -1,4 +1,3 @@
-// internal/browser/interactor_test.go
 package browser_test
 
 import (
@@ -15,8 +14,8 @@ import (
 )
 
 func TestInteractor_FormInteraction(t *testing.T) {
-	t.Parallel()
 	fixture, cleanup := newTestFixture(t)
+	t.Parallel()
 	defer cleanup()
 
 	submissionChan := make(chan url.Values, 1)
@@ -59,10 +58,10 @@ func TestInteractor_FormInteraction(t *testing.T) {
 	require.NoError(t, err)
 
 	config := schemas.InteractionConfig{
-		MaxDepth:                2,
+		MaxDepth:              2,
 		MaxInteractionsPerDepth: 5,
-		InteractionDelayMs:      50,
-		PostInteractionWaitMs:   200,
+		InteractionDelayMs:    50,
+		PostInteractionWaitMs: 200,
 	}
 
 	err = session.Interact(config)
@@ -82,8 +81,8 @@ func TestInteractor_FormInteraction(t *testing.T) {
 }
 
 func TestInteractor_DynamicContentHandling(t *testing.T) {
-	t.Parallel()
 	fixture, cleanup := newTestFixture(t)
+	t.Parallel()
 	defer cleanup()
 
 	server := createTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -117,10 +116,10 @@ func TestInteractor_DynamicContentHandling(t *testing.T) {
 	require.NoError(t, err)
 
 	config := schemas.InteractionConfig{
-		MaxDepth:                3,
+		MaxDepth:              3,
 		MaxInteractionsPerDepth: 2,
-		InteractionDelayMs:      50,
-		PostInteractionWaitMs:   100,
+		InteractionDelayMs:    50,
+		PostInteractionWaitMs: 100,
 	}
 
 	err = chromedp.Run(session.GetContext(), chromedp.WaitReady("body"))

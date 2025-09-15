@@ -1,4 +1,3 @@
-// internal/humanoid/keyboard.go --
 package humanoid
 
 import (

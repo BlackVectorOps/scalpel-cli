@@ -1,4 +1,3 @@
-// internal/humanoid/behavior.go --
 package humanoid
 
 import (

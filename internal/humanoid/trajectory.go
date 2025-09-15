@@ -1,4 +1,3 @@
-//pkg/humanoid/trajectory.go
 package humanoid
 
 import (
@@ -62,7 +61,7 @@ func (h *Humanoid) generateIdealPath(start, end Vector2D, field *PotentialField,
 
 	// Create control points based on the forces.
 	p1 := samplePoint1.Add(force1.Mul(dist * 0.1))
-	p2 := samplePoint2.Add(force2.Mul(dist * 0.1))
+	p2 := samplePoint2.Add(force2.Mul(dist * 2.0 / 3.0))
 
 	path := make([]Vector2D, numSteps)
 	for i := 0; i < numSteps; i++ {

@@ -15,88 +15,127 @@ import (
 )
 
 // Manager controls the lifecycle of the browser process and manages browser sessions.
+// It adheres to Principle 1: One Process, Many Tabs.
 type Manager struct {
-	logger              *zap.Logger
-	semaphore           chan struct{}
-	allocatorCtx        context.Context
-	cancelAlloc         context.CancelFunc
-	browserCtx          context.Context
-	cancelBrowser       context.CancelFunc
+	logger *zap.Logger
+	// semaphore controls the maximum number of concurrent active sessions.
+	semaphore chan struct{}
+	// allocatorCtx is the context used for the ExecAllocator, governing the browser process lifetime.
+	allocatorCtx context.Context
+	// browserCtx is the main context for the browser instance itself (CDP session).
+	browserCtx context.Context
+	// cancelBrowser cancels the browserCtx and the allocatorCtx.
+	cancelBrowser context.CancelFunc
+	// contextCreationLock ensures that creating new targets/contexts via CDP commands is thread-safe.
 	contextCreationLock sync.Mutex
-	wg                  sync.WaitGroup
+	// wg tracks active AnalysisContext sessions for graceful shutdown (Principle 4).
+	wg sync.WaitGroup
 }
 
 // NewManager initializes the browser manager and starts the browser process.
-func NewManager(initCtx context.Context, logger *zap.Logger, concurrencyLimit int) (*Manager, error) {
+// initCtx should be the application's master context (e.g., from signal.NotifyContext) for Principle 4 adherence.
+func NewManager(
+	initCtx context.Context,
+	logger *zap.Logger,
+	cfg config.BrowserConfig,
+) (*Manager, error) {
 	l := logger.With(zap.String("component", "browser_manager"))
+
+	concurrencyLimit := cfg.Concurrency
 	if concurrencyLimit <= 0 {
-		concurrencyLimit = 4
+		concurrencyLimit = 4 // Default concurrency
+		l.Warn("Invalid concurrency limit configured, defaulting.", zap.Int("default", concurrencyLimit))
 	}
 
-	opts := chromedp.DefaultExecAllocatorOptions[:]
-	allocatorCtx, cancelAlloc := chromedp.NewExecAllocator(context.Background(), opts...)
+	// --- 1. Configure ExecAllocator Options ---
+	opts := append(chromedp.DefaultExecAllocatorOptions[:],
+		// Standard flags for automated environments
+		chromedp.NoSandbox,
+		chromedp.DisableGPU,
+		chromedp.Flag("disable-dev-shm-usage", true),
+		chromedp.Flag("ignore-certificate-errors", true),
+	)
 
-	// This is the standard, correct way to create the browser context.
-	// It directly inherits from the allocator context.
-	browserCtx, cancelBrowser := chromedp.NewContext(allocatorCtx,
+	if cfg.Headless {
+		opts = append(opts, chromedp.Headless)
+	} else {
+		opts = append(opts, chromedp.Flag("headless", false))
+	}
+
+	// --- 2. Create the ExecAllocator (Principle 1) ---
+	// We use initCtx as the parent, so if the application receives a shutdown signal, the allocator is cancelled.
+	allocatorCtx, cancelAlloc := chromedp.NewExecAllocator(initCtx, opts...)
+
+	// --- 3. Create the Browser Context ---
+	var browserOpts []chromedp.ContextOption
+
+	// Principle 5: Integrate logging.
+	browserOpts = append(browserOpts,
 		chromedp.WithLogf(func(format string, args ...interface{}) {
-			l.Debug(fmt.Sprintf(format, args...), zap.String("source", "chromedp"))
+			l.Debug(fmt.Sprintf(format, args...), zap.String("source", "chromedp_log"))
+		}),
+		chromedp.WithErrorf(func(format string, args ...interface{}) {
+			l.Error(fmt.Sprintf(format, args...), zap.String("source", "chromedp_error"))
 		}),
 	)
+
+	// Enable verbose CDP debugging if requested (Principle 5).
+	if cfg.Debug {
+		browserOpts = append(browserOpts,
+			chromedp.WithDebugf(func(format string, args ...interface{}) {
+				l.Debug(fmt.Sprintf(format, args...), zap.String("source", "chromedp_debug_cdp"))
+			}),
+		)
+	}
+
+	browserCtx, cancelBrowserCtx := chromedp.NewContext(allocatorCtx, browserOpts...)
+
+	// Combine cancellations for unified shutdown.
+	cancelAll := func() {
+		cancelBrowserCtx()
+		cancelAlloc()
+	}
 
 	m := &Manager{
 		logger:        l,
 		allocatorCtx:  allocatorCtx,
-		cancelAlloc:   cancelAlloc,
 		browserCtx:    browserCtx,
-		cancelBrowser: cancelBrowser,
+		cancelBrowser: cancelAll,
 		semaphore:     make(chan struct{}, concurrencyLimit),
 	}
-	
-	// We must execute a command on the new browserCtx to ensure it's fully initialized.
-	if err := chromedp.Run(m.browserCtx); err != nil {
-		cancelBrowser()
-		cancelAlloc()
-		return nil, fmt.Errorf("failed to connect to browser instance: %w", err)
+
+	// --- 4. Start and Verify the Browser (Robust Startup) ---
+	if err := m.startAndVerifyBrowser(); err != nil {
+		// If startup fails, clean up.
+		m.cancelBrowser()
+		return nil, fmt.Errorf("failed to start and verify browser instance: %w", err)
 	}
 
-	if err := m.verifyConnection(initCtx); err != nil {
-		cancelBrowser()
-		cancelAlloc()
-		return nil, fmt.Errorf("failed to verify browser connection: %w", err)
-	}
-
-	m.loadInstrumentation()
-	l.Info("Browser manager initialized and ready.", zap.Int("concurrency_limit", concurrencyLimit))
+	l.Info("Browser manager initialized and ready.", zap.Int("concurrency_limit", concurrencyLimit), zap.Bool("headless", cfg.Headless))
 	return m, nil
 }
 
-func (m *Manager) loadInstrumentation() {
-	m.logger.Debug("IAST instrumentation files loaded successfully.")
-}
-
-func (m *Manager) verifyConnection(ctx context.Context) error {
-	var userAgent string
-	runCtx, cancel := context.WithTimeout(m.browserCtx, 15*time.Second)
+// startAndVerifyBrowser ensures the browser process is running and responsive.
+func (m *Manager) startAndVerifyBrowser() error {
+	// Principle 3: Enforce a startup timeout.
+	startupCtx, cancel := context.WithTimeout(m.browserCtx, 45*time.Second)
 	defer cancel()
 
-	err := chromedp.Run(runCtx,
-		chromedp.ActionFunc(func(c context.Context) error {
-			var err error
-			_, _, _, userAgent, _, err = browser.GetVersion().Do(c)
+	// Using GetVersion is a lightweight way to ensure the connection is established and the browser is responsive.
+	if err := chromedp.Run(startupCtx,
+		chromedp.ActionFunc(func(ctx context.Context) error {
+			_, _, _, err := browser.GetVersion().Do(ctx)
 			return err
 		}),
-	)
-	if err != nil {
-		return fmt.Errorf("failed to run verification task: %w", err)
+	); err != nil {
+		return err
 	}
-
-	m.logger.Debug("Browser process connection verified.", zap.String("userAgent", userAgent))
 	return nil
 }
 
-// NewAnalysisContext creates a new isolated browser session.
+// NewAnalysisContext creates a new isolated browser session (incognito tab/context).
 func (m *Manager) NewAnalysisContext(
+	// sessionCtx controls the deadline for acquiring a slot and initializing the session (Principle 3).
 	sessionCtx context.Context,
 	cfg *config.Config,
 	persona stealth.Persona,
@@ -104,84 +143,111 @@ func (m *Manager) NewAnalysisContext(
 	taintConfig string,
 ) (*AnalysisContext, error) {
 	if m.browserCtx.Err() != nil {
-		return nil, fmt.Errorf("failed to create browser context: invalid context")
-	}
-	select {
-	case m.semaphore <- struct{}{}:
-	case <-sessionCtx.Done():
-		return nil, fmt.Errorf("failed to acquire session slot: %w", sessionCtx.Err())
-	case <-m.browserCtx.Done():
-		return nil, fmt.Errorf("failed to acquire session slot: manager shutting down")
+		return nil, fmt.Errorf("cannot create new session: browser manager is shut down")
 	}
 
-	sessionRegistered := false
+	// 1. Acquire Semaphore Slot
+	if err := m.acquireSlot(sessionCtx); err != nil {
+		return nil, err
+	}
+
+	// Ensure the semaphore is released if initialization fails.
+	sessionInitialized := false
 	defer func() {
-		if !sessionRegistered {
-			<-m.semaphore
+		if !sessionInitialized {
+			m.releaseSlot()
 		}
 	}()
 
+	// 2. Create the AnalysisContext structure.
 	ac := NewAnalysisContext(
-		m.browserCtx,
-		m.browserCtx,
+		m.allocatorCtx,        // Parent context for new tabs (CDP targets)
+		m.browserCtx,          // Context for browser control commands (Create/Dispose Context)
 		cfg,
 		m.logger,
 		persona,
 		taintTemplate,
 		taintConfig,
 		&m.contextCreationLock,
-		m,
+		m, // Register the manager as the observer
 	)
 
+	// 3. Initialize the browser context and target.
 	if err := ac.Initialize(sessionCtx); err != nil {
-		if ac.sessionCancel != nil {
-			ac.sessionCancel()
-		}
-		if ac.browserContextID != "" {
-			ac.bestEffortCleanupBrowserContext(ac.browserContextID)
-		}
+		// Initialize handles its internal cleanup (internalClose) on failure.
 		return nil, fmt.Errorf("failed to initialize analysis context: %w", err)
 	}
 
+	// 4. Register the active session.
 	m.wg.Add(1)
-	sessionRegistered = true
+	sessionInitialized = true // Initialization succeeded, responsibility for releasing the slot is transferred to ac.Close().
 	return ac, nil
 }
 
-func (m *Manager) unregisterSession(ac *AnalysisContext) {
+// acquireSlot waits for an available slot in the concurrency semaphore.
+func (m *Manager) acquireSlot(ctx context.Context) error {
 	select {
-	case <-m.semaphore:
-	default:
-		m.logger.Error("Attempted to release semaphore when it appeared unacquired.")
+	case m.semaphore <- struct{}{}:
+		// Slot acquired
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("failed to acquire session slot: %w", ctx.Err())
+	case <-m.browserCtx.Done():
+		// Check if the manager itself is shutting down.
+		return fmt.Errorf("failed to acquire session slot: manager is shutting down")
 	}
-	m.wg.Done()
 }
 
+// releaseSlot releases a slot back to the semaphore.
+func (m *Manager) releaseSlot() {
+	select {
+	case <-m.semaphore:
+		// Slot released
+	default:
+		// This should ideally not happen if acquire/release logic is balanced.
+		m.logger.Error("Attempted to release semaphore slot when none appeared acquired.")
+	}
+}
+
+// unregisterSession is called by an AnalysisContext when it's closed (implements SessionLifecycleObserver).
+func (m *Manager) unregisterSession(ac *AnalysisContext) {
+	m.releaseSlot()
+	m.wg.Done()
+	m.logger.Debug("Session unregistered.", zap.String("session_id", ac.ID()))
+}
+
+// Shutdown gracefully closes all active sessions and terminates the browser process.
+// Adheres to Principle 4: Shut Down Gracefully.
 func (m *Manager) Shutdown(ctx context.Context) error {
-	m.logger.Info("Shutting down browser manager...")
+	m.logger.Info("Shutting down browser manager. Waiting for active sessions to complete.")
+
+	// Wait for all active sessions (AnalysisContexts) to call Close() and unregister.
 	done := make(chan struct{})
 	go func() {
 		m.wg.Wait()
 		close(done)
 	}()
+
 	select {
 	case <-done:
 		m.logger.Info("All browser sessions closed gracefully.")
 	case <-ctx.Done():
-		m.logger.Warn("Timeout waiting for browser sessions to close. Forcing shutdown.")
-	}
-	if m.cancelBrowser != nil {
-		m.cancelBrowser()
-	}
-	if m.cancelAlloc != nil {
-		m.cancelAlloc()
+		// The provided context expired. We proceed with forceful shutdown.
+		m.logger.Warn("Timeout waiting for browser sessions to close. Forcing shutdown.", zap.Error(ctx.Err()))
 	}
 
+	// Shut down the browser process by cancelling the contexts.
+	m.logger.Info("Terminating browser process.")
+	m.cancelBrowser()
+
+	// Wait briefly to confirm the allocator context is done (process exited).
 	select {
 	case <-m.allocatorCtx.Done():
 		m.logger.Info("Browser manager shutdown complete.")
-	case <-time.After(5 * time.Second):
-		m.logger.Error("Timeout waiting for browser process to terminate.")
+	case <-time.After(10 * time.Second):
+		// Hard timeout if the process hangs.
+		m.logger.Error("Timeout waiting for browser process to terminate after cancellation.")
 	}
-	return ctx.Err()
+
+	return nil
 }

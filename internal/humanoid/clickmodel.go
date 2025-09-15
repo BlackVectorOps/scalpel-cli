@@ -1,4 +1,3 @@
-// internal/humanoid/clickmodel.go --
 package humanoid
 
 import (
