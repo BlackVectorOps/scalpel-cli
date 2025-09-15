@@ -21,8 +21,8 @@ import (
 
 // requestState tracks the lifecycle of a single network request.
 type requestState struct {
-	Request  *network.Request
-	Response *network.Response
+	Request       *network.Request
+	Response      *network.Response
 	// Use pointers as the CDP events provide pointers for these fields.
 	StartTS       *cdp.TimeSinceEpoch // Wall time for HAR StartedDateTime
 	EndTS         *cdp.MonotonicTime
@@ -176,7 +176,7 @@ func (h *Harvester) WaitNetworkIdle(ctx context.Context, quietPeriod time.Durati
 	}
 }
 
-// --- Event Handlers ---
+// -- Event Handlers --
 
 func (h *Harvester) handleRequestWillBeSent(e *network.EventRequestWillBeSent) {
 	h.lock.Lock()
@@ -271,7 +271,7 @@ func (h *Harvester) handleLoadingFailed(e *network.EventLoadingFailed) {
 
 // (Console/Log handlers omitted for brevity - implementation is straightforward logging)
 
-// --- Body Fetching Logic ---
+// -- Body Fetching Logic --
 
 // shouldCaptureBody heuristic based on MIME type.
 func (h *Harvester) shouldCaptureBody(response *network.Response) bool {
@@ -304,15 +304,17 @@ func (h *Harvester) fetchBody(requestID network.RequestID) {
 
 	select {
 	case <-state.ResponseReady:
-		// Proceed
+	// Proceed
 	case <-ctx.Done():
 		// Timeout waiting for headers.
 		return
 	}
 
-	// Execute the CDP command.
-	// network.GetResponseBody(requestID).Do(ctx) returns (body []byte, base64encoded bool, err error).
-	body, base64Encoded, err := network.GetResponseBody(requestID).Do(ctx)
+	// -- THE FIX --
+	// The signature for GetResponseBody(...).Do(...) has changed in the cdproto library.
+	// It no longer returns a boolean indicating if the body is base64 encoded.
+	// Instead, it now returns just the raw body bytes and an error.
+	body, err := network.GetResponseBody(requestID).Do(ctx)
 
 	if err != nil {
 		if ctx.Err() == nil {
@@ -327,7 +329,9 @@ func (h *Harvester) fetchBody(requestID network.RequestID) {
 	// Re-check state existence as it might have been cleared if Stop() timed out.
 	if state, ok := h.requests[requestID]; ok {
 		state.Body = body
-		state.BodyBase64 = base64Encoded
+		// The new `Do` method returns raw bytes, already decoded from base64 if necessary.
+		// The logic in `convertResponse` will re-encode any binary assets into base64 for the HAR file.
+		state.BodyBase64 = false
 	}
 }
 
@@ -345,7 +349,7 @@ func (h *Harvester) waitForPendingFetches(ctx context.Context) {
 	}
 }
 
-// --- Artifact Accessors and HAR Generation ---
+// -- Artifact Accessors and HAR Generation --
 
 func (h *Harvester) getConsoleLogs() []schemas.ConsoleLog {
 	h.lock.RLock()
@@ -417,7 +421,7 @@ func (h *Harvester) generateHAR() *schemas.HAR {
 	}
 }
 
-// (Conversion Helpers: convertRequest, convertResponse, convertHeaders, etc.)
+// -- Conversion Helpers --
 
 func (h *Harvester) convertRequest(req *network.Request) schemas.Request {
 	headers := convertHeaders(req.Headers)
@@ -425,11 +429,23 @@ func (h *Harvester) convertRequest(req *network.Request) schemas.Request {
 
 	bodySize := int64(-1)
 	var postData *schemas.PostData
-	if req.HasPostData != nil && *req.HasPostData && req.PostData != "" {
-		bodySize = int64(len(req.PostData))
+	// -- THE FIX --
+	// This block handles PostData. The HasPostData field in the cdproto library
+	// was changed from a *bool to a bool, so we need to adjust our check.
+	// Instead of checking for nil and then dereferencing, we just check the boolean value directly.
+	if req.HasPostData && req.PostDataEntries != nil && len(req.PostDataEntries) > 0 {
+		var postDataBuilder strings.Builder
+		for _, entry := range req.PostDataEntries {
+			postDataBuilder.WriteString(entry.Bytes)
+		}
+		postDataText := postDataBuilder.String()
+		bodySize = int64(len(postDataText))
 		postData = &schemas.PostData{
-			MimeType: req.Headers.Get("Content-Type"),
-			Text:     req.PostData,
+			// -- THE FIX --
+			// The network.Headers type is a map and does not have a .Get method.
+			// We now use a helper function to perform a case-insensitive key lookup.
+			MimeType: getHeader(req.Headers, "Content-Type"),
+			Text:     postDataText,
 		}
 	}
 
@@ -478,10 +494,32 @@ func (h *Harvester) convertResponse(resp *network.Response, body []byte, isBase6
 		HTTPVersion: resp.Protocol,
 		Headers:     headers,
 		Content:     content,
-		RedirectURL: resp.Headers.Get("Location"),
+		// -- THE FIX --
+		// The network.Headers type is a map and does not have a .Get method.
+		// We now use a helper function to perform a case-insensitive key lookup.
+		RedirectURL: getHeader(resp.Headers, "Location"),
 		BodySize:    int64(len(body)), // Simplified body size calculation.
 		HeadersSize: calculateHeaderSize(headers),
 	}
+}
+
+// getHeader performs a case insensitive search for a header key.
+// The network.Headers type is a map, so we can't rely on a built in Get method.
+func getHeader(headers network.Headers, key string) string {
+	for h, v := range headers {
+		if strings.EqualFold(h, key) {
+			if valStr, ok := v.(string); ok {
+				// CDP sometimes joins multi value headers with newlines.
+				// We'll just return the first one for simplicity here,
+				// which is fine for headers like Content-Type and Location.
+				if parts := strings.Split(valStr, "\n"); len(parts) > 0 {
+					return parts[0]
+				}
+				return valStr
+			}
+		}
+	}
+	return ""
 }
 
 // Use the correct type name schemas.NVPair

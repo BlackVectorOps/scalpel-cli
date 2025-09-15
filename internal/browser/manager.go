@@ -47,7 +47,7 @@ func NewManager(
 		l.Warn("Invalid concurrency limit configured, defaulting.", zap.Int("default", concurrencyLimit))
 	}
 
-	// --- 1. Configure ExecAllocator Options ---
+	// -- 1. Configure ExecAllocator Options --
 	opts := append(chromedp.DefaultExecAllocatorOptions[:],
 		// Standard flags for automated environments
 		chromedp.NoSandbox,
@@ -62,11 +62,11 @@ func NewManager(
 		opts = append(opts, chromedp.Flag("headless", false))
 	}
 
-	// --- 2. Create the ExecAllocator (Principle 1) ---
+	// -- 2. Create the ExecAllocator (Principle 1) --
 	// We use initCtx as the parent, so if the application receives a shutdown signal, the allocator is cancelled.
 	allocatorCtx, cancelAlloc := chromedp.NewExecAllocator(initCtx, opts...)
 
-	// --- 3. Create the Browser Context ---
+	// -- 3. Create the Browser Context --
 	var browserOpts []chromedp.ContextOption
 
 	// Principle 5: Integrate logging.
@@ -104,7 +104,7 @@ func NewManager(
 		semaphore:     make(chan struct{}, concurrencyLimit),
 	}
 
-	// --- 4. Start and Verify the Browser (Robust Startup) ---
+	// -- 4. Start and Verify the Browser (Robust Startup) --
 	if err := m.startAndVerifyBrowser(); err != nil {
 		// If startup fails, clean up.
 		m.cancelBrowser()
@@ -124,7 +124,10 @@ func (m *Manager) startAndVerifyBrowser() error {
 	// Using GetVersion is a lightweight way to ensure the connection is established and the browser is responsive.
 	if err := chromedp.Run(startupCtx,
 		chromedp.ActionFunc(func(ctx context.Context) error {
-			_, _, _, err := browser.GetVersion().Do(ctx)
+			// FIX: The browser.GetVersion().Do(ctx) function now returns 6 values.
+			// We only care about the error for this verification step, so we
+			// discard the other 5 return values (protocolVersion, product, revision, userAgent, jsVersion).
+			_, _, _, _, _, err := browser.GetVersion().Do(ctx)
 			return err
 		}),
 	); err != nil {
@@ -202,7 +205,7 @@ func (m *Manager) acquireSlot(ctx context.Context) error {
 func (m *Manager) releaseSlot() {
 	select {
 	case <-m.semaphore:
-		// Slot released
+	// Slot released
 	default:
 		// This should ideally not happen if acquire/release logic is balanced.
 		m.logger.Error("Attempted to release semaphore slot when none appeared acquired.")
