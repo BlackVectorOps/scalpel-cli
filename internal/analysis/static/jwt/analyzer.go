@@ -78,7 +78,8 @@ func (a *JWTAnalyzer) extractAndAnalyze(analysisCtx *core.AnalysisContext, req *
 
 	// A. Request Headers & Cookies
 	extractFromNVPairs(req.Headers, tokens, "Request Header")
-	extractFromNVPairs(req.Cookies, tokens, "Request Cookie")
+	// FIX: Convert []schemas.Cookie to []schemas.NVPair before passing.
+	extractFromNVPairs(convertCookiesToNVPairs(req.Cookies), tokens, "Request Cookie")
 
 	// B. Request URL
 	if match := jwtRegex.FindString(req.URL); match != "" {
@@ -101,7 +102,8 @@ func (a *JWTAnalyzer) extractAndAnalyze(analysisCtx *core.AnalysisContext, req *
 	// D. Response Headers & Body (if available)
 	if resp != nil {
 		extractFromNVPairs(resp.Headers, tokens, "Response Header")
-		extractFromNVPairs(resp.Cookies, tokens, "Response Cookie")
+		// FIX: Convert []schemas.Cookie to []schemas.NVPair before passing.
+		extractFromNVPairs(convertCookiesToNVPairs(resp.Cookies), tokens, "Response Cookie")
 		if strings.Contains(resp.Content.MimeType, "application/json") {
 			extractFromJSONBody([]byte(resp.Content.Text), tokens, "Response Body")
 		} else {
@@ -130,6 +132,18 @@ func (a *JWTAnalyzer) extractAndAnalyze(analysisCtx *core.AnalysisContext, req *
 			a.reportFinding(analysisCtx, targetURL, location, tokenString, finding)
 		}
 	}
+}
+
+// convertCookiesToNVPairs is a new helper function to fix the type mismatch.
+func convertCookiesToNVPairs(cookies []schemas.Cookie) []schemas.NVPair {
+	if cookies == nil {
+		return nil
+	}
+	nvPairs := make([]schemas.NVPair, len(cookies))
+	for i, cookie := range cookies {
+		nvPairs[i] = schemas.NVPair{Name: cookie.Name, Value: cookie.Value}
+	}
+	return nvPairs
 }
 
 // extractFromNVPairs is a helper that works with the Name-Value Pair

@@ -8,9 +8,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/analysis/active/taint"
 	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
-	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"go.uber.org/zap"
 )
 
@@ -56,17 +56,19 @@ func (r *ContextReporter) Report(finding taint.CorrelatedFinding) {
 	}
 
 	genericFinding := schemas.Finding{
-		ID:             uuid.New().String(),
-		TaskID:         finding.TaskID,
-		Timestamp:      time.Now().UTC(), // CORRECTED: Use time.Time object directly.
-		Target:         finding.TargetURL,
-		Module:         "TaintAnalyzer (IAST)",
-		Vulnerability:  vulnType,
-		Severity:       severity, // CORRECTED: classifyTaintFinding now returns the correct type.
+		ID:        uuid.New().String(),
+		TaskID:    finding.TaskID,
+		Timestamp: time.Now().UTC(),
+		Target:    finding.TargetURL,
+		Module:    "TaintAnalyzer (IAST)",
+		Vulnerability: schemas.Vulnerability{
+			Name: vulnType,
+		},
+		Severity:       severity,
 		Description:    description,
-		Evidence:       evidence,
+		Evidence:       string(evidence),
 		Recommendation: r.getRecommendation(vulnType),
-		CWE:            cwe,
+		CWE:            []string{cwe},
 	}
 
 	r.Ctx.AddFinding(genericFinding)
@@ -74,37 +76,41 @@ func (r *ContextReporter) Report(finding taint.CorrelatedFinding) {
 }
 
 func (r *ContextReporter) classifyTaintFinding(finding taint.CorrelatedFinding) (string, schemas.Severity, string) {
-	if finding.Sink == taint.SinkExecution {
+	// FIX: Changed taint.SinkExecution to schemas.SinkExecution as the constant moved.
+	if finding.Sink == schemas.SinkExecution {
 		return r.classifyConfirmedExecution(finding)
 	}
 	switch finding.Sink {
-	case taint.SinkInnerHTML, taint.SinkOuterHTML, taint.SinkDocumentWrite, taint.SinkIframeSrcDoc:
+	// FIX: Changed all taint.Sink... constants to schemas.Sink...
+	case schemas.SinkInnerHTML, schemas.SinkOuterHTML, schemas.SinkDocumentWrite, schemas.SinkIframeSrcDoc:
 		return "DOM-Based Cross-Site Scripting (Potential)", schemas.SeverityHigh, "CWE-79"
-	case taint.SinkEval, taint.SinkFunctionConstructor:
+	case schemas.SinkEval, schemas.SinkFunctionConstructor:
 		return "Client-Side Code Injection (Potential)", schemas.SeverityHigh, "CWE-94"
-	case taint.SinkScriptSrc, taint.SinkIframeSrc:
+	case schemas.SinkScriptSrc, schemas.SinkIframeSrc:
 		return "Tainted Resource Loading (Potential XSS/Injection)", schemas.SeverityHigh, "CWE-829"
-	case taint.SinkNavigation:
-		if finding.Probe.Type == taint.ProbeTypeXSS || finding.Probe.Type == taint.ProbeTypeSSTI {
+	case schemas.SinkNavigation:
+		// FIX: Changed taint.ProbeType... to schemas.ProbeType...
+		if finding.Probe.Type == schemas.ProbeTypeXSS || finding.Probe.Type == schemas.ProbeTypeSSTI {
 			return "DOM-Based Cross-Site Scripting (Navigation) (Potential)", schemas.SeverityHigh, "CWE-79"
 		}
 		return "Open Redirect / Data Leakage (Potential)", schemas.SeverityMedium, "CWE-601"
-	case taint.SinkFetch, taint.SinkFetch_URL, taint.SinkWebSocketSend, taint.SinkXMLHTTPRequest, taint.SinkXMLHTTPRequest_URL, taint.SinkSendBeacon:
+	case schemas.SinkFetch, schemas.SinkFetchURL, schemas.SinkWebSocketSend, schemas.SinkXMLHTTPRequest, schemas.SinkXMLHTTPRequestURL, schemas.SinkSendBeacon:
 		return "Data Exfiltration / Information Disclosure (Potential)", schemas.SeverityMedium, "CWE-200"
 	default:
-		return "Unclassified Taint Flow", schemas.SeverityInfo, "CWE-20"
+		return "Unclassified Taint Flow", schemas.SeverityInformational, "CWE-20"
 	}
 }
 
 func (r *ContextReporter) classifyConfirmedExecution(finding taint.CorrelatedFinding) (string, schemas.Severity, string) {
 	switch finding.Probe.Type {
-	case taint.ProbeTypeXSS, taint.ProbeTypeDOMClobbering:
+	// FIX: Changed all taint.ProbeType... constants to schemas.ProbeType...
+	case schemas.ProbeTypeXSS, schemas.ProbeTypeDOMClobbering:
 		return "Confirmed Cross-Site Scripting", schemas.SeverityCritical, "CWE-79"
-	case taint.ProbeTypeSSTI:
+	case schemas.ProbeTypeSSTI:
 		return "Confirmed SSTI leading to XSS", schemas.SeverityCritical, "CWE-1336"
-	case taint.ProbeTypeSQLi:
+	case schemas.ProbeTypeSQLi:
 		return "Confirmed Reflected SQLi leading to XSS", schemas.SeverityCritical, "CWE-89"
-	case taint.ProbeTypeCmdInjection:
+	case schemas.ProbeTypeCmdInjection:
 		return "Confirmed Reflected Command Injection leading to XSS", schemas.SeverityCritical, "CWE-78"
 	default:
 		return "Confirmed Code Execution", schemas.SeverityCritical, "CWE-94"
@@ -118,3 +124,4 @@ func (r *ContextReporter) getRecommendation(vulnType string) string {
 	// ... other recommendations
 	return "Validate and sanitize all user input at the source and before use in sensitive sinks."
 }
+

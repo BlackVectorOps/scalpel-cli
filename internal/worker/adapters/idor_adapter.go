@@ -11,9 +11,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/analysis/auth/idor"
 	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
-	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"go.uber.org/zap"
 )
 
@@ -24,7 +24,7 @@ type IDORAdapter struct {
 
 func NewIDORAdapter() *IDORAdapter {
 	return &IDORAdapter{
-		BaseAnalyzer: core.NewBaseAnalyzer("IDOR Adapter", core.TypeActive),
+		BaseAnalyzer: *core.NewBaseAnalyzer("IDOR Adapter", "Finds Insecure Direct Object Reference vulnerabilities", core.TypeActive, zap.NewNop()),
 		httpClient: &http.Client{
 			Timeout:       10 * time.Second,
 			CheckRedirect: func(req *http.Request, via []*http.Request) error { return http.ErrUseLastResponse },
@@ -36,7 +36,6 @@ func (a *IDORAdapter) Analyze(ctx context.Context, analysisCtx *core.AnalysisCon
 	analysisCtx.Logger.Info("Starting active IDOR analysis.")
 
 	// Use the specific parameter struct.
-	// FIX: Use robust type assertion.
 	var params schemas.IDORTaskParams
 	switch p := analysisCtx.Task.Parameters.(type) {
 	case schemas.IDORTaskParams:
@@ -75,6 +74,7 @@ func (a *IDORAdapter) Analyze(ctx context.Context, analysisCtx *core.AnalysisCon
 	for k, v := range params.HTTPHeaders {
 		reqForExtraction.Header.Set(k, v)
 	}
+	// This function returns []core.ObservedIdentifier, so no changes needed here.
 	identifiers := idor.ExtractIdentifiers(reqForExtraction, []byte(params.HTTPBody))
 	if len(identifiers) == 0 {
 		analysisCtx.Logger.Info("No potential identifiers found to test for IDOR.")
@@ -118,23 +118,27 @@ func (a *IDORAdapter) Analyze(ctx context.Context, analysisCtx *core.AnalysisCon
 	return nil
 }
 
-func (a *IDORAdapter) createIdorFinding(analysisCtx *core.AnalysisContext, ident idor.ObservedIdentifier, testValue string, originalStatus, testStatus int) {
+// FIX: Changed idor.ObservedIdentifier to core.ObservedIdentifier to match its new location.
+func (a *IDORAdapter) createIdorFinding(analysisCtx *core.AnalysisContext, ident core.ObservedIdentifier, testValue string, originalStatus, testStatus int) {
 	desc := fmt.Sprintf("A potential IDOR vulnerability was found. An identifier ('%s') in the %s was changed to a predictable value ('%s'). The server responded with the same status code (%d) as the original authorized request, suggesting access controls may be missing.",
 		ident.Value, ident.Location, testValue, testStatus)
 	evidence, _ := json.Marshal(map[string]interface{}{"originalIdentifier": ident, "testedValue": testValue, "originalStatusCode": originalStatus, "testStatusCode": testStatus, "targetUrl": analysisCtx.TargetURL.String()})
 
 	finding := schemas.Finding{
-		ID:             uuid.New().String(),
-		TaskID:         analysisCtx.Task.TaskID,
-		Timestamp:      time.Now().UTC(),
-		Target:         analysisCtx.TargetURL.String(),
-		Module:         a.Name(),
-		Vulnerability:  "Insecure Direct Object Reference (IDOR)",
+		ID:        uuid.New().String(),
+		TaskID:    analysisCtx.Task.TaskID,
+		Timestamp: time.Now().UTC(),
+		Target:    analysisCtx.TargetURL.String(),
+		Module:    a.Name(),
+		Vulnerability: schemas.Vulnerability{
+			Name: "Insecure Direct Object Reference (IDOR)",
+		},
 		Severity:       schemas.SeverityHigh,
 		Description:    desc,
-		Evidence:       evidence,
+		Evidence:       string(evidence),
 		Recommendation: "Verify that the current authenticated user is authorized to access or modify the requested resource ID on the server-side before performing any action.",
-		CWE:            "CWE-639",
+		CWE:            []string{"CWE-639"},
 	}
 	analysisCtx.AddFinding(finding)
 }
+

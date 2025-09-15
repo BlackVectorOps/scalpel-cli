@@ -467,7 +467,7 @@ func (ac *AnalysisContext) internalClose(ctx context.Context) {
 	}
 }
 
-// --- Helper Functions, Storage, Instrumentation, etc. ---
+// -- Helper Functions, Storage, Instrumentation, etc. --
 
 // GetContext provides safe access to the session context.
 func (ac *AnalysisContext) GetContext() context.Context {
@@ -491,6 +491,14 @@ func (ac *AnalysisContext) GetScreenshot() []byte {
 	ac.mu.Lock()
 	defer ac.mu.Unlock()
 	return ac.capturedScreenshot
+}
+
+// AddFinding is a helper method to append a finding to the context.
+// This resolves the build error in the ATO analyzer.
+func (ac *AnalysisContext) AddFinding(finding schemas.Finding) {
+	ac.mu.Lock()
+	defer ac.mu.Unlock()
+	ac.findings = append(ac.findings, finding)
 }
 
 // captureScreenshot attempts to take a full-page screenshot (Principle 5).
