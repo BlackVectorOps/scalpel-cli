@@ -1,4 +1,3 @@
-// browser_helper_test.go
 package browser_test
 
 import (
@@ -10,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 
 	"github.com/xkilldash9x/scalpel-cli/internal/browser"
@@ -20,37 +18,63 @@ import (
 )
 
 var (
-	sharedManager *browser.Manager
-	testLogger    *zap.Logger
+	testLogger  *zap.Logger
+	testManager *browser.Manager
+	testConfig  *config.Config
 )
 
-// testFixture holds all the necessary components for a single, isolated browser test.
+// testFixture holds components for a single, isolated browser test.
 type testFixture struct {
 	Session *browser.AnalysisContext
 	Config  *config.Config
 }
 
-// TestMain sets up the shared browser manager for all tests in the package
-// and guarantees its shutdown after all tests have completed.
+// TestMain sets up a SINGLE, shared browser manager for all tests (Principle 1).
 func TestMain(m *testing.M) {
 	var err error
 	testLogger = getTestLogger()
-	// Use a background context as the manager's lifecycle is for the whole package.
-	sharedManager, err = browser.NewManager(context.Background(), testLogger, 4)
-	if err != nil {
-		testLogger.Fatal("Failed to create shared browser manager for tests", zap.Error(err))
+
+	const testConcurrency = 4
+
+	// Configuration for the tests, matching the updated config.BrowserConfig.
+	browserCfg := config.BrowserConfig{
+		Headless:     true,
+		DisableCache: true,
+		Concurrency:  testConcurrency,
+		Humanoid:     humanoid.DefaultConfig(),
+		Debug:        false, // Set to true for verbose CDP logs (Principle 5).
 	}
 
-	// m.Run() executes all tests in the package.
+	testConfig = &config.Config{
+		Browser: browserCfg,
+		Network: config.NetworkConfig{
+			CaptureResponseBodies: true,
+			NavigationTimeout:     30 * time.Second, // Matching the updated config.NetworkConfig.
+			// PostLoadWait is deprecated in the refactored code (Principle 2).
+		},
+	}
+
+	// Create the manager once. Use context.Background() as the initCtx for the test suite lifetime.
+	// Principle 3: Timeout for initialization.
+	initCtx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+
+	// Call the updated NewManager function signature.
+	testManager, err = browser.NewManager(initCtx, testLogger, browserCfg)
+	if err != nil {
+		testLogger.Fatal("Failed to initialize browser manager for test suite", zap.Error(err))
+	}
+
+	// Run all the tests.
 	code := m.Run()
 
-	// This block runs AFTER all tests are finished, including parallel ones.
-	testLogger.Info("Shutting down shared browser manager after tests.")
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	if err := sharedManager.Shutdown(shutdownCtx); err != nil {
-		testLogger.Error("Error during shared manager shutdown", zap.Error(err))
+	// Shut down the manager (Principle 4).
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancelShutdown()
+	if err := testManager.Shutdown(shutdownCtx); err != nil {
+		testLogger.Error("Error during test manager shutdown", zap.Error(err))
 	}
+
 	os.Exit(code)
 }
 
@@ -63,41 +87,43 @@ func getTestLogger() *zap.Logger {
 	return logger
 }
 
-// newTestFixture creates a fully initialized AnalysisContext for a test.
+// newTestFixture acquires a new session from the shared manager.
 func newTestFixture(t *testing.T) (*testFixture, func()) {
 	t.Helper()
 
-	cfg := &config.Config{
-		Browser: config.BrowserConfig{
-			Headless:     true,
-			DisableCache: true,
-			Humanoid:     humanoid.DefaultConfig(),
-		},
-		Network: config.NetworkConfig{
-			CaptureResponseBodies: true,
-			PostLoadWait:          250 * time.Millisecond,
-		},
-	}
-	persona := stealth.DefaultPersona
-	testCtx, cancelTest := context.WithTimeout(context.Background(), 30*time.Second)
+	// Principle 3: Timeout for acquiring and initializing the session.
+	sessionCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 
-	session, err := sharedManager.NewAnalysisContext(testCtx, cfg, persona, "", "")
-	require.NoError(t, err, "Failed to initialize session from manager for test fixture")
+	session, err := testManager.NewAnalysisContext(
+		sessionCtx,
+		testConfig,
+		stealth.DefaultPersona,
+		"", // No taint template
+		"", // No taint config
+	)
+
+	if err != nil {
+		cancel()
+		t.Fatalf("Failed to create new analysis session: %v", err)
+	}
 
 	fixture := &testFixture{
 		Session: session,
-		Config:  cfg,
+		Config:  testConfig,
 	}
 
 	cleanup := func() {
-		session.Close(context.Background())
-		cancelTest()
+		// Use a new context for cleanup in case the sessionCtx was cancelled (Principle 4).
+		closeCtx, closeCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer closeCancel()
+		session.Close(closeCtx)
+		cancel()
 	}
 
 	return fixture, cleanup
 }
 
-// createTestServer creates an httptest.Server for dynamic content tests.
+// createTestServer creates an httptest.Server.
 func createTestServer(t *testing.T, handler http.Handler) *httptest.Server {
 	t.Helper()
 	server := httptest.NewServer(handler)
@@ -105,7 +131,7 @@ func createTestServer(t *testing.T, handler http.Handler) *httptest.Server {
 	return server
 }
 
-// createStaticTestServer creates an httptest.Server for serving simple, static HTML.
+// createStaticTestServer creates an httptest.Server for static HTML.
 func createStaticTestServer(t *testing.T, htmlContent string) *httptest.Server {
 	t.Helper()
 	return createTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

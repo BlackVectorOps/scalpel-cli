@@ -5,7 +5,6 @@ import (
 	"os"
 	"strings"
 	"sync"
-	"sync/atomic"
 
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
 	"go.uber.org/zap"

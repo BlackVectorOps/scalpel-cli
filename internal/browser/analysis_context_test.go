@@ -1,4 +1,3 @@
-// analysis_context_test.go
 package browser_test
 
 import (
@@ -16,13 +15,12 @@ import (
 )
 
 func TestAnalysisContext_InitializeAndClose(t *testing.T) {
-	t.Parallel()
 	fixture, cleanup := newTestFixture(t)
+	t.Parallel()
 	defer cleanup()
 
 	server := createStaticTestServer(t, `<!DOCTYPE html><html><body><h1>Init Test</h1></body></html>`)
 
-	// The session is now directly in the fixture.
 	session := fixture.Session
 	assert.NotEmpty(t, session.ID(), "AnalysisContext should have a valid ID")
 
@@ -36,8 +34,8 @@ func TestAnalysisContext_InitializeAndClose(t *testing.T) {
 }
 
 func TestAnalysisContext_NavigateAndCollectArtifacts(t *testing.T) {
-	t.Parallel()
 	fixture, cleanup := newTestFixture(t)
+	t.Parallel()
 	defer cleanup()
 
 	server := createTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -52,9 +50,9 @@ func TestAnalysisContext_NavigateAndCollectArtifacts(t *testing.T) {
 							sessionStorage.setItem('tempData', 'active');
 							console.info('Initializing application...');
 							fetch('/api/data')
-                                    .then(res => res.text())
-                                    .then(data => console.log('API data fetched:', data.length));
-                                setTimeout(() => { console.error("An expected error occurred."); }, 50);
+									.then(res => res.text())
+									.then(data => console.log('API data fetched:', data.length));
+								setTimeout(() => { console.error("An expected error occurred."); }, 50);
 						</script>
 					</body>
 				</html>
@@ -83,7 +81,6 @@ func TestAnalysisContext_NavigateAndCollectArtifacts(t *testing.T) {
 	assert.Equal(t, "darkmode", storage.LocalStorage["userPref"], "LocalStorage mismatch")
 	assert.Equal(t, "active", storage.SessionStorage["tempData"], "SessionStorage mismatch")
 
-	// Refactored cookie verification for more precise assertions.
 	var sessionCookie *network.Cookie
 	for _, cookie := range storage.Cookies {
 		if cookie.Name == "SessionID" {
@@ -115,13 +112,13 @@ func TestAnalysisContext_NavigateAndCollectArtifacts(t *testing.T) {
 }
 
 func TestSessionIsolation(t *testing.T) {
-	t.Parallel()
-	// For this specific test, we need two separate fixtures to get two separate sessions.
 	fixture1, cleanup1 := newTestFixture(t)
+	t.Parallel()
 	defer cleanup1()
 	session1 := fixture1.Session
 
 	fixture2, cleanup2 := newTestFixture(t)
+	t.Parallel()
 	defer cleanup2()
 	session2 := fixture2.Session
 
@@ -149,8 +146,8 @@ func TestSessionIsolation(t *testing.T) {
 }
 
 func TestAnalysisContext_Interaction(t *testing.T) {
-	t.Parallel()
 	fixture, cleanup := newTestFixture(t)
+	t.Parallel()
 	defer cleanup()
 	server := createStaticTestServer(t, `
 		<!DOCTYPE html>
@@ -168,10 +165,10 @@ func TestAnalysisContext_Interaction(t *testing.T) {
 	require.NoError(t, err)
 
 	interactionConfig := schemas.InteractionConfig{
-		MaxDepth:               2,
+		MaxDepth:              2,
 		MaxInteractionsPerDepth: 5,
-		InteractionDelayMs:      10,
-		PostInteractionWaitMs:  100,
+		InteractionDelayMs:    10,
+		PostInteractionWaitMs: 100,
 	}
 
 	err = session.Interact(interactionConfig)
@@ -197,7 +194,6 @@ func assertLogPresent(t *testing.T, logs []schemas.ConsoleLog, level, substring 
 func findHAREntry(har *schemas.HAR, urlSubstring string) *schemas.Entry {
 	for i, entry := range har.Log.Entries {
 		if strings.Contains(entry.Request.URL, urlSubstring) {
-			// Return a pointer to the actual entry in the slice.
 			return &har.Log.Entries[i]
 		}
 	}

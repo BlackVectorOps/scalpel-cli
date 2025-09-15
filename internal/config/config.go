@@ -1,4 +1,3 @@
-// internal/config/config.go
 package config
 
 import (
@@ -15,6 +14,7 @@ var (
 	loadErr  error // Cache the loading error globally
 	once     sync.Once
 )
+
 // Config holds the entire application configuration.
 // This is the root configuration structure.
 type Config struct {
@@ -65,27 +65,34 @@ type PostgresConfig struct {
 
 // EngineConfig holds settings for the task execution engine.
 type EngineConfig struct {
-	QueueSize          int           `mapstructure:"queue_size"`
-	WorkerConcurrency  int           `mapstructure:"worker_concurrency"`
-	DefaultTaskTimeout time.Duration `mapstructure:"default_task_timeout"`
+	QueueSize           int           `mapstructure:"queue_size"`
+	WorkerConcurrency   int           `mapstructure:"worker_concurrency"`
+	DefaultTaskTimeout  time.Duration `mapstructure:"default_task_timeout"`
 }
 
 // BrowserConfig holds settings for the headless browser.
 type BrowserConfig struct {
-	Headless        bool            `mapstructure:"headless" yaml:"headless"`
-	DisableCache    bool            `mapstructure:"disableCache"`
-	IgnoreTLSErrors bool            `mapstructure:"ignore_tls_errors"`
-	Args            []string        `mapstructure:"args"`
-	Viewport        map[string]int  `mapstructure:"viewport"`
-	Humanoid        humanoid.Config `mapstructure:"humanoid"`
+	Headless        bool   `mapstructure:"headless" yaml:"headless"`
+	DisableCache    bool   `mapstructure:"disableCache"`
+	IgnoreTLSErrors bool   `mapstructure:"ignore_tls_errors"`
+	// Concurrency defines the maximum number of parallel browser sessions (Principle 1).
+	Concurrency int `mapstructure:"concurrency" yaml:"concurrency"`
+	// Debug enables verbose CDP logging (Principle 5).
+	Debug    bool              `mapstructure:"debug" yaml:"debug"`
+	Args     []string          `mapstructure:"args"`
+	Viewport map[string]int    `mapstructure:"viewport"`
+	Humanoid humanoid.Config   `mapstructure:"humanoid"`
 }
 
 // NetworkConfig holds settings for HTTP requests.
 type NetworkConfig struct {
-	Timeout               time.Duration     `mapstructure:"timeout"`
+	Timeout time.Duration `mapstructure:"timeout"`
+	// NavigationTimeout defines the maximum time allowed for a page navigation action (Principle 3).
+	NavigationTimeout     time.Duration     `mapstructure:"navigationTimeout" yaml:"navigationTimeout"`
 	CaptureResponseBodies bool              `mapstructure:"captureResponseBodies"`
 	Headers               map[string]string `mapstructure:"headers"`
-	PostLoadWait          time.Duration     `mapstructure:"postLoadWait"`
+	// PostLoadWait is largely superseded by dynamic waits (Principle 2), but kept if specified in config.
+	PostLoadWait time.Duration `mapstructure:"postLoadWait"`
 }
 
 // IASTConfig holds paths for the Interactive Application Security Testing scripts.
@@ -196,6 +203,7 @@ type DiscoveryConfig struct {
 type KnowledgeGraphConfig struct {
 	Type string `yaml:"type"`
 }
+
 // AgentConfig holds all settings related to the autonomous agent.
 type AgentConfig struct {
 	LLM            LLMRouterConfig      `yaml:"llm"`

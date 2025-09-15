@@ -1,15 +1,14 @@
-// manager_test.go
 package browser_test
 
 import (
 	"testing"
-
+	
 	"github.com/stretchr/testify/require"
 )
 
 func TestManager_InitializeAndCloseSession(t *testing.T) {
-	t.Parallel()
 	fixture, cleanup := newTestFixture(t)
+	t.Parallel()
 	defer cleanup()
 
 	require.NotNil(t, fixture.Session)
@@ -17,13 +16,13 @@ func TestManager_InitializeAndCloseSession(t *testing.T) {
 }
 
 func TestManager_InitializeMultipleSessions(t *testing.T) {
-	t.Parallel()
-
 	fixture1, cleanup1 := newTestFixture(t)
+	t.Parallel()
 	defer cleanup1()
 	require.NotNil(t, fixture1.Session)
 
 	fixture2, cleanup2 := newTestFixture(t)
+	t.Parallel()
 	defer cleanup2()
 	require.NotNil(t, fixture2.Session)
 
