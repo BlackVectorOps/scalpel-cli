@@ -12,6 +12,11 @@ const (
 	TypeActive AnalyzerType = "ACTIVE"
 	// TypePassive analyzers only inspect artifacts (HAR, DOM, etc.).
 	TypePassive AnalyzerType = "PASSIVE"
+	// TypeStatic is a more descriptive alias for passive analysis.
+	// Static analysis, by its nature, operates on collected data without direct interaction.
+	TypeStatic AnalyzerType = "STATIC"
+	// TypeAgent analyzers are for autonomous agent missions.
+	TypeAgent AnalyzerType = "AGENT"
 )
 
 // BaseAnalyzer provides foundational fields and methods for all analysis modules.
@@ -49,3 +54,4 @@ func (b *BaseAnalyzer) Description() string {
 func (b *BaseAnalyzer) Type() AnalyzerType {
 	return b.analyzerType
 }
+

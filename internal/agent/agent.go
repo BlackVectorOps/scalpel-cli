@@ -13,6 +13,7 @@ import (
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
+	"github.com/xkilldash9x/scalpel-cli/internal/browser/stealth"
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
 	"github.com/xkilldash9x/scalpel-cli/internal/knowledgegraph"
 	"github.com/xkilldash9x/scalpel-cli/internal/llmclient"
@@ -110,7 +111,8 @@ func (a *Agent) RunMission(ctx context.Context) (*MissionResult, error) {
 	defer cancelMission()
 
 	// 1. Create a dedicated browser session.
-	session, err := a.globalCtx.BrowserManager.InitializeSession(missionCtx)
+	// FIX: Changed from InitializeSession to NewAnalysisContext and provided the required arguments.
+	session, err := a.globalCtx.BrowserManager.NewAnalysisContext(missionCtx, a.globalCtx.Config, stealth.DefaultPersona, "", "")
 	if err != nil {
 		return nil, fmt.Errorf("failed to get browser session for agent: %w", err)
 	}

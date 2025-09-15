@@ -2,7 +2,6 @@
 package taint
 
 import (
-	// These imports were added to resolve compilation errors.
 	"bytes"
 	"context"
 	"embed"
@@ -18,8 +17,10 @@ import (
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 
-	// All shared data structures are now referenced from the canonical schemas package.
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
+	// This package now directly uses the concrete browser session type.
+	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
+	"github.com/xkilldash9x/scalpel-cli/internal/browser"
 )
 
 //go:embed taint_shim.js
@@ -32,24 +33,23 @@ var canaryRegex = regexp.MustCompile(`SCALPEL_[A-Z]+_[A-Z_]+_[a-f0-9]{8}`)
 
 // Analyzer is the brains of the whole IAST operation.
 type Analyzer struct {
-	config       Config
-	browser      BrowserInteractor
-	reporter     ResultsReporter
-	oastProvider OASTProvider
-	logger       *zap.Logger
-	activeProbes map[string]ActiveProbe
-	// FIX: This was a typo, changed RWMex to RWMutex.
-	probesMutex  sync.RWMutex
-	eventsChan   chan Event
-	wg           sync.WaitGroup
-	producersWG  sync.WaitGroup
-	backgroundCtx    context.Context
+	config         Config
+	reporter       ResultsReporter
+	oastProvider   OASTProvider
+	logger         *zap.Logger
+	activeProbes   map[string]ActiveProbe
+	probesMutex    sync.RWMutex
+	eventsChan     chan Event
+	wg             sync.WaitGroup
+	producersWG    sync.WaitGroup
+	backgroundCtx  context.Context
 	backgroundCancel context.CancelFunc
-	shimTemplate     *template.Template
+	shimTemplate   *template.Template
 }
 
 // NewAnalyzer initializes a new analyzer.
-func NewAnalyzer(config Config, browser BrowserInteractor, reporter ResultsReporter, oastProvider OASTProvider, logger *zap.Logger) (*Analyzer, error) {
+// The signature no longer requires a BrowserInteractor. The session is passed to Analyze directly.
+func NewAnalyzer(config Config, reporter ResultsReporter, oastProvider OASTProvider, logger *zap.Logger) (*Analyzer, error) {
 	taskLogger := logger.Named("taint_analyzer").With(zap.String("task_id", config.TaskID))
 
 	tmpl, err := template.ParseFS(taintShimFS, taintShimFilename)
@@ -76,7 +76,6 @@ func NewAnalyzer(config Config, browser BrowserInteractor, reporter ResultsRepor
 
 	return &Analyzer{
 		config:       config,
-		browser:      browser,
 		reporter:     reporter,
 		oastProvider: oastProvider,
 		logger:       taskLogger,
@@ -86,8 +85,9 @@ func NewAnalyzer(config Config, browser BrowserInteractor, reporter ResultsRepor
 	}, nil
 }
 
-// Analyze kicks off the analysis for a given target.
-func (a *Analyzer) Analyze(ctx context.Context) error {
+// Analyze kicks off the analysis for a given target, using a provided browser session.
+// The signature now accepts a SessionContext, decoupling the analyzer from session creation.
+func (a *Analyzer) Analyze(ctx context.Context, session SessionContext) error {
 	a.logger.Info("Starting IAST analysis", zap.String("target", a.config.Target.String()))
 
 	analysisCtx, cancel := context.WithTimeout(ctx, a.config.AnalysisTimeout)
@@ -95,15 +95,8 @@ func (a *Analyzer) Analyze(ctx context.Context) error {
 
 	a.backgroundCtx, a.backgroundCancel = context.WithCancel(context.Background())
 
-	session, err := a.browser.InitializeSession(analysisCtx)
-	if err != nil {
-		return fmt.Errorf("failed to initialize browser session: %w", err)
-	}
-	defer func() {
-		if closeErr := session.Close(); closeErr != nil {
-			a.logger.Error("Failed to close browser session cleanly", zap.Error(closeErr))
-		}
-	}()
+	// The session is now provided by the caller (the adapter).
+	// We no longer call a.browser.InitializeSession here.
 
 	if err := a.instrument(analysisCtx, session); err != nil {
 		return fmt.Errorf("failed to instrument browser: %w", err)
@@ -269,7 +262,6 @@ func (a *Analyzer) generateCanary(prefix string, probeType schemas.ProbeType) st
 }
 
 // preparePayload replaces placeholders (Canary, OASTServer) in the probe definition.
-// FIX: Changed schemas.ProbeDefinition to the local ProbeDefinition type.
 func (a *Analyzer) preparePayload(probeDef ProbeDefinition, canary string) string {
 	requiresOAST := strings.Contains(probeDef.Payload, "{{.OASTServer}}")
 	if requiresOAST && a.oastProvider == nil {
@@ -776,34 +768,29 @@ var ValidTaintFlows = map[TaintFlowPath]bool{
 	{schemas.ProbeTypeSSTI, schemas.SinkIframeSrcDoc}:        true,
 	{schemas.ProbeTypeSSTI, schemas.SinkFunctionConstructor}: true,
 
-	{schemas.ProbeTypeSQLi, schemas.SinkInnerHTML}:         true,
+	{schemas.ProbeTypeSQLi, schemas.SinkInnerHTML}:       true,
 	{schemas.ProbeTypeCmdInjection, schemas.SinkInnerHTML}: true,
 
-	{schemas.ProbeTypeGeneric, schemas.SinkWebSocketSend}:      true,
-	{schemas.ProbeTypeGeneric, schemas.SinkXMLHTTPRequest}:     true,
-	// FIX: The constant name was incorrect (had a trailing underscore).
-	{schemas.ProbeTypeGeneric, schemas.SinkXMLHTTPRequestURL}: true,
-	{schemas.ProbeTypeGeneric, schemas.SinkFetch}:              true,
-	// FIX: The constant name was incorrect (had a trailing underscore).
-	{schemas.ProbeTypeGeneric, schemas.SinkFetchURL}:          true,
-	{schemas.ProbeTypeGeneric, schemas.SinkNavigation}:         true,
-	{schemas.ProbeTypeGeneric, schemas.SinkSendBeacon}:         true,
-	{schemas.ProbeTypeGeneric, schemas.SinkWorkerSrc}:          true,
+	{schemas.ProbeTypeGeneric, schemas.SinkWebSocketSend}:     true,
+	{schemas.ProbeTypeGeneric, schemas.SinkXMLHTTPRequest}:    true,
+	{schemas.ProbeTypeGeneric, schemas.SinkXMLHTTPRequestURL}: true, // FIX: The constant name was incorrect (had a trailing underscore).
+	{schemas.ProbeTypeGeneric, schemas.SinkFetch}:             true,
+	{schemas.ProbeTypeGeneric, schemas.SinkFetchURL}:          true, // FIX: The constant name was incorrect (had a trailing underscore).
+	{schemas.ProbeTypeGeneric, schemas.SinkNavigation}:        true,
+	{schemas.ProbeTypeGeneric, schemas.SinkSendBeacon}:        true,
+	{schemas.ProbeTypeGeneric, schemas.SinkWorkerSrc}:         true,
 
-	{schemas.ProbeTypeOAST, schemas.SinkWebSocketSend}:      true,
-	{schemas.ProbeTypeOAST, schemas.SinkXMLHTTPRequest}:     true,
-	// FIX: The constant name was incorrect (had a trailing underscore).
-	{schemas.ProbeTypeOAST, schemas.SinkXMLHTTPRequestURL}: true,
-	{schemas.ProbeTypeOAST, schemas.SinkFetch}:              true,
-	// FIX: The constant name was incorrect (had a trailing underscore).
-	{schemas.ProbeTypeOAST, schemas.SinkFetchURL}:          true,
-	{schemas.ProbeTypeOAST, schemas.SinkNavigation}:         true,
-	{schemas.ProbeTypeOAST, schemas.SinkSendBeacon}:         true,
-	{schemas.ProbeTypeOAST, schemas.SinkWorkerSrc}:          true,
+	{schemas.ProbeTypeOAST, schemas.SinkWebSocketSend}:     true,
+	{schemas.ProbeTypeOAST, schemas.SinkXMLHTTPRequest}:    true,
+	{schemas.ProbeTypeOAST, schemas.SinkXMLHTTPRequestURL}: true, // FIX: The constant name was incorrect (had a trailing underscore).
+	{schemas.ProbeTypeOAST, schemas.SinkFetch}:             true,
+	{schemas.ProbeTypeOAST, schemas.SinkFetchURL}:          true, // FIX: The constant name was incorrect (had a trailing underscore).
+	{schemas.ProbeTypeOAST, schemas.SinkNavigation}:        true,
+	{schemas.ProbeTypeOAST, schemas.SinkSendBeacon}:        true,
+	{schemas.ProbeTypeOAST, schemas.SinkWorkerSrc}:         true,
 }
 
 // checkSanitization compares the sink value with the original probe payload.
-// FIX: Changed schemas.SanitizationLevel to the local SanitizationLevel type.
 func (a *Analyzer) checkSanitization(sinkValue string, probe ActiveProbe) (SanitizationLevel, string) {
 	if strings.Contains(sinkValue, probe.Value) {
 		return SanitizationNone, ""

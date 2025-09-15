@@ -11,9 +11,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/analysis/auth/ato"
 	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
-	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"go.uber.org/zap"
 )
 
@@ -30,7 +30,7 @@ func NewATOAdapter() *ATOAdapter {
 	}
 
 	return &ATOAdapter{
-		BaseAnalyzer: core.NewBaseAnalyzer("ATO Adapter (Password Spraying)", core.TypeActive),
+		BaseAnalyzer: *core.NewBaseAnalyzer("ATO Adapter (Password Spraying)", "Tests for weak credentials via password spraying", core.TypeActive, zap.NewNop()),
 		httpClient:   defaultClient,
 	}
 }
@@ -73,20 +73,18 @@ func (a *ATOAdapter) Analyze(ctx context.Context, analysisCtx *core.AnalysisCont
 	analysisCtx.Logger.Info("Generated login payloads for spraying attack", zap.Int("payload_count", len(payloads)))
 
 	// Throttle requests to avoid overwhelming the target.
-	throttle := time.Tick(200 * time.Millisecond)
+	throttle := time.NewTicker(200 * time.Millisecond)
+	defer throttle.Stop()
 
 	for _, attempt := range payloads {
-		// Wait for throttle tick.
-		<-throttle
-
 		// Check for cancellation signal before each attempt.
 		select {
 		case <-ctx.Done():
 			analysisCtx.Logger.Warn("ATO analysis cancelled by context.", zap.Error(ctx.Err()))
 			return ctx.Err()
-		default:
+		case <-throttle.C: // FIX: Receive from the ticker's channel 'C'.
+			a.performLoginAttempt(ctx, analysisCtx, attempt)
 		}
-		a.performLoginAttempt(ctx, analysisCtx, attempt)
 	}
 	return nil
 }
@@ -141,7 +139,7 @@ func (a *ATOAdapter) performLoginAttempt(ctx context.Context, analysisCtx *core.
 	}
 }
 
-func (a *ATOAdapter) createAtoFinding(analysisCtx *core.AnalysisContext, vuln string, severity schemas.Severity, cwe, desc string, result ato.LoginResponse) {
+func (a *ATOAdapter) createAtoFinding(analysisCtx *core.AnalysisContext, vulnName string, severity schemas.Severity, cwe, desc string, result ato.LoginResponse) {
 	// Truncate evidence if necessary.
 	responseBodyEvidence := result.ResponseBody
 	if len(responseBodyEvidence) > 2048 {
@@ -163,17 +161,19 @@ func (a *ATOAdapter) createAtoFinding(analysisCtx *core.AnalysisContext, vuln st
 	}
 
 	finding := schemas.Finding{
-		ID:             uuid.New().String(),
-		TaskID:         analysisCtx.Task.TaskID,
-		Timestamp:      time.Now().UTC(),
-		Target:         analysisCtx.TargetURL.String(),
-		Module:         a.Name(),
-		Vulnerability:  vuln,
+		ID:        uuid.New().String(),
+		TaskID:    analysisCtx.Task.TaskID,
+		Timestamp: time.Now().UTC(),
+		Target:    analysisCtx.TargetURL.String(),
+		Module:    a.Name(),
+		Vulnerability: schemas.Vulnerability{
+			Name: vulnName,
+		},
 		Severity:       severity,
 		Description:    desc,
-		Evidence:       evidence,
+		Evidence:       string(evidence),
 		Recommendation: "Implement rate limiting, account lockouts, and CAPTCHA. Ensure login responses are generic and do not disclose whether a username or password was correct. Implement MFA.",
-		CWE:            cwe,
+		CWE:            []string{cwe},
 	}
 	analysisCtx.AddFinding(finding)
 }
