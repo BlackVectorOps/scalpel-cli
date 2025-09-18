@@ -6,11 +6,13 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"go.uber.org/zap"
 )
 
 // SessionProvider is a function type that retrieves the currently active session.
-type SessionProvider func() SessionContext
+// FIX: It now returns the canonical schemas.SessionContext interface.
+type SessionProvider func() schemas.SessionContext
 
 // --- Executor Registry (Implementation) ---
 
@@ -58,7 +60,7 @@ func (r *ExecutorRegistry) UpdateSessionProvider(provider SessionProvider) {
 
 // GetSessionProvider returns a function that safely retrieves the current session.
 func (r *ExecutorRegistry) GetSessionProvider() SessionProvider {
-	return func() SessionContext {
+	return func() schemas.SessionContext {
 		r.providerMu.RLock()
 		defer r.providerMu.RUnlock()
 		if r.sessionProvider != nil {
@@ -91,7 +93,8 @@ func (r *ExecutorRegistry) Execute(ctx context.Context, action Action) (*Executi
 // -- Browser Executor --
 
 // ActionHandler defines the function signature (using internal Action model).
-type ActionHandler func(session SessionContext, action Action) error
+// FIX: The session now uses the canonical schemas.SessionContext interface.
+type ActionHandler func(session schemas.SessionContext, action Action) error
 
 // BrowserExecutor implements the agent.ActionExecutor interface.
 type BrowserExecutor struct {
@@ -153,35 +156,36 @@ func (e *BrowserExecutor) Execute(ctx context.Context, action Action) (*Executio
 
 // -- Action Handlers --
 
-func (e *BrowserExecutor) handleNavigate(session SessionContext, action Action) error {
+func (e *BrowserExecutor) handleNavigate(session schemas.SessionContext, action Action) error {
 	if action.Value == "" {
 		return fmt.Errorf("ActionNavigate requires a 'value' (URL)")
 	}
-	return session.Navigate(action.Value)
+	// The session context passed to Navigate is the context of the entire agent mission.
+	return session.Navigate(context.Background(), action.Value)
 }
 
-func (e *BrowserExecutor) handleClick(session SessionContext, action Action) error {
+func (e *BrowserExecutor) handleClick(session schemas.SessionContext, action Action) error {
 	if action.Selector == "" {
 		return fmt.Errorf("ActionClick requires a 'selector'")
 	}
 	return session.Click(action.Selector)
 }
 
-func (e *BrowserExecutor) handleInputText(session SessionContext, action Action) error {
+func (e *BrowserExecutor) handleInputText(session schemas.SessionContext, action Action) error {
 	if action.Selector == "" {
 		return fmt.Errorf("ActionInputText requires a 'selector'")
 	}
 	return session.Type(action.Selector, action.Value)
 }
 
-func (e *BrowserExecutor) handleSubmitForm(session SessionContext, action Action) error {
+func (e *BrowserExecutor) handleSubmitForm(session schemas.SessionContext, action Action) error {
 	if action.Selector == "" {
 		return fmt.Errorf("ActionSubmitForm requires a 'selector'")
 	}
 	return session.Submit(action.Selector)
 }
 
-func (e *BrowserExecutor) handleScroll(session SessionContext, action Action) error {
+func (e *BrowserExecutor) handleScroll(session schemas.SessionContext, action Action) error {
 	direction := "down"
 	if strings.EqualFold(action.Value, "up") {
 		direction = "up"
@@ -189,7 +193,7 @@ func (e *BrowserExecutor) handleScroll(session SessionContext, action Action) er
 	return session.ScrollPage(direction)
 }
 
-func (e *BrowserExecutor) handleWaitForAsync(session SessionContext, action Action) error {
+func (e *BrowserExecutor) handleWaitForAsync(session schemas.SessionContext, action Action) error {
 	durationMs := 1000 // Default wait time
 	val, exists := action.Metadata["duration_ms"]
 	if exists {

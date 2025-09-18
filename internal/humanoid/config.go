@@ -8,6 +8,7 @@ import (
 
 // Config holds the parameters defining the behavior of the simulation.
 type Config struct {
+	Enabled bool `json:"enabled" yaml:"enabled"`
 	Rng *rand.Rand
 
 	// Fitts's Law Parameters

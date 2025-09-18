@@ -77,16 +77,21 @@ func (m *MockGraphStore) GetEdges(ctx context.Context, id string) ([]schemas.Edg
 	return args.Get(0).([]schemas.Edge), args.Error(1)
 }
 
-// Mocks the agent.SessionContext interface.
+// MockSessionContext implements schemas.SessionContext for testing.
+// Consolidated here to prevent redeclaration errors across test files.
 type MockSessionContext struct {
 	mock.Mock
 }
 
-func (m *MockSessionContext) Navigate(url string) error {
-	args := m.Called(url)
+// Implement all methods required by schemas.SessionContext interface.
+
+func (m *MockSessionContext) Navigate(ctx context.Context, url string) error {
+	// Ensure Called arguments match the signature (ctx, url).
+	args := m.Called(ctx, url)
 	return args.Error(0)
 }
 
+// Note: Based on the contracts used in executors.go, these methods do not take context when called by the handlers.
 func (m *MockSessionContext) Click(selector string) error {
 	args := m.Called(selector)
 	return args.Error(0)
@@ -109,5 +114,38 @@ func (m *MockSessionContext) ScrollPage(direction string) error {
 
 func (m *MockSessionContext) WaitForAsync(milliseconds int) error {
 	args := m.Called(milliseconds)
+	return args.Error(0)
+}
+
+func (m *MockSessionContext) GetContext() context.Context {
+	args := m.Called()
+	if args.Get(0) == nil {
+		return context.Background() // Default fallback
+	}
+	return args.Get(0).(context.Context)
+}
+
+func (m *MockSessionContext) ExposeFunction(ctx context.Context, name string, function interface{}) error {
+	args := m.Called(ctx, name, function)
+	return args.Error(0)
+}
+
+func (m *MockSessionContext) InjectScriptPersistently(ctx context.Context, script string) error {
+	args := m.Called(ctx, script)
+	return args.Error(0)
+}
+
+func (m *MockSessionContext) ExecuteScript(ctx context.Context, script string) error {
+	args := m.Called(ctx, script)
+	return args.Error(0)
+}
+
+func (m *MockSessionContext) Interact(ctx context.Context, config schemas.InteractionConfig) error {
+	args := m.Called(ctx, config)
+	return args.Error(0)
+}
+
+func (m *MockSessionContext) Close(ctx context.Context) error {
+	args := m.Called(ctx)
 	return args.Error(0)
 }

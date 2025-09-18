@@ -8,7 +8,6 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
@@ -170,7 +169,7 @@ func TestGetNeighborsAndEdges(t *testing.T) {
 		edges, err := kg.GetEdges(ctx, "node-1")
 		require.NoError(t, err)
 		require.Len(t, edges, 2, "Node-1 should have two outgoing edges")
-		
+
 		edgeMap := make(map[string]schemas.Edge)
 		for _, e := range edges {
 			edgeMap[e.ID] = e

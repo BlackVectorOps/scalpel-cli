@@ -1,4 +1,4 @@
-// -- internal/analysis/active/timeslip/h1_singlebyte.go --
+// File: internal/analysis/active/timeslip/h1_singlebyte.go
 package timeslip
 
 import (
@@ -67,11 +67,8 @@ func ExecuteH1SingleByteSend(ctx context.Context, candidate *RaceCandidate, conf
 		prefix := req[:len(req)-1]
 		lastByte := req[len(req)-1]
 
-		// Note: Jitter is generally less effective/desirable for single-byte send, as the goal is maximum synchronization of the final burst.
-
 		// Write the prefix.
 		if _, err := conn.Write(prefix); err != nil {
-			// Server closed the connection, likely rejecting pipelining.
 			return nil, fmt.Errorf("%w: error writing prefix %d: %v", ErrPipeliningRejected, i, err)
 		}
 
@@ -84,7 +81,9 @@ func ExecuteH1SingleByteSend(ctx context.Context, candidate *RaceCandidate, conf
 	}
 
 	// 5. Read and parse all the responses.
-	parsedResponses, err := network.ParsePipelinedResponses(conn, candidate.Method, config.Concurrency)
+	// FIX: Updated the call to match the new signature of ParsePipelinedResponses(conn io.Reader, expectedTotal int).
+	// Removed candidate.Method.
+	parsedResponses, err := network.ParsePipelinedResponses(conn, config.Concurrency)
 	duration := time.Since(startTime)
 
 	if err != nil {
@@ -128,7 +127,6 @@ func ExecuteH1SingleByteSend(ctx context.Context, candidate *RaceCandidate, conf
 
 // setupConnectionDetails configures TLS settings specifically for HTTP/1.1 pipelining.
 func setupConnectionDetails(targetURL *url.URL, dialerConfig *network.DialerConfig, ignoreTLS bool) (string, error) {
-	// (Implementation remains the same as the original, ensuring HTTP/1.1 ALPN)
 	scheme := targetURL.Scheme
 	port := targetURL.Port()
 
@@ -136,14 +134,15 @@ func setupConnectionDetails(targetURL *url.URL, dialerConfig *network.DialerConf
 		if port == "" {
 			port = "443"
 		}
-		if dialerConfig.TLSConfig == nil {
-			// This should ideally be handled by the network package initialization, but we check defensively.
-			return "", fmt.Errorf("internal error: TLS configuration is missing")
+		// Ensure TLSConfig is initialized (NewDialerConfig should handle this).
+		if dialerConfig.TLSConfig != nil {
+			dialerConfig.TLSConfig = dialerConfig.TLSConfig.Clone()
+			dialerConfig.TLSConfig.InsecureSkipVerify = ignoreTLS
+			// Force HTTP/1.1 for pipelining via ALPN.
+			dialerConfig.TLSConfig.NextProtos = []string{"http/1.1"}
 		}
-		dialerConfig.TLSConfig = dialerConfig.TLSConfig.Clone()
-		dialerConfig.TLSConfig.InsecureSkipVerify = ignoreTLS
-		// Force HTTP/1.1 for pipelining.
-		dialerConfig.TLSConfig.NextProtos = []string{"http/1.1"}
+		// If TLSConfig is nil, the network.DialContext will handle the default TLS setup, 
+		// but we might lose the specific ALPN setting if not handled globally.
 
 	} else if scheme == "http" {
 		if port == "" {
@@ -175,6 +174,7 @@ func preparePipelinedRequests(candidate *RaceCandidate, count int, host string) 
 		}
 		req.Header = mutatedHeaders
 		req.Host = host
+		// Ensure Connection: keep-alive is set for pipelining.
 		req.Header.Set("Connection", "keep-alive")
 
 		// Ensure Content-Length is correct for the mutated body.

@@ -5,24 +5,29 @@ import (
 	"encoding/json"
 	"fmt"
 	"time"
-
-	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
-	"go.uber.org/zap"
-
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
+	"go.uber.org/zap"
 )
+
+// DBPool is an interface that abstracts the pgxpool.Pool to allow for mocking in tests.
+type DBPool interface {
+	Ping(ctx context.Context) error
+	Begin(ctx context.Context) (pgx.Tx, error)
+	Query(ctx context.Context, sql string, args ...interface{}) (pgx.Rows, error)
+	// Add Exec to the interface so we can mock it
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+}
 
 // Store provides a PostgreSQL implementation of the Repository interface.
 type Store struct {
-	pool *pgxpool.Pool
+	pool DBPool
 	log  *zap.Logger
 }
 
 // New creates a new store instance and verifies the connection.
-func New(ctx context.Context, pool *pgxpool.Pool, logger *zap.Logger) (*Store, error) {
-	// Verify the connection
+func New(ctx context.Context, pool DBPool, logger *zap.Logger) (*Store, error) {
 	if err := pool.Ping(ctx); err != nil {
 		return nil, fmt.Errorf("failed to ping database: %w", err)
 	}
@@ -39,7 +44,6 @@ func (s *Store) PersistData(ctx context.Context, envelope *schemas.ResultEnvelop
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	// This deferred function safely rolls back the transaction if it hasn't been committed.
 	defer func() {
 		if rollbackErr := tx.Rollback(ctx); rollbackErr != nil && rollbackErr != pgx.ErrTxClosed {
 			s.log.Error("Failed to rollback transaction", zap.Error(rollbackErr))
@@ -53,36 +57,13 @@ func (s *Store) PersistData(ctx context.Context, envelope *schemas.ResultEnvelop
 	}
 
 	if envelope.KGUpdates != nil {
-		if len(envelope.KGUpdates.NodesToAdd) > 0 { // CORRECTED
-			// Convert schemas.Node to schemas.NodeInput
-			nodeInputs := make([]schemas.NodeInput, len(envelope.KGUpdates.NodesToAdd)) // CORRECTED
-			for i, n := range envelope.KGUpdates.NodesToAdd {                           // CORRECTED
-				nodeInputs[i] = schemas.NodeInput{
-					ID:         n.ID,
-					Type:       n.Type,
-					Label:      n.Label,
-					Status:     n.Status,
-					Properties: n.Properties,
-				}
-			}
-			if err := s.persistNodes(ctx, tx, nodeInputs); err != nil {
+		if len(envelope.KGUpdates.NodesToAdd) > 0 {
+			if err := s.persistNodes(ctx, tx, envelope.KGUpdates.NodesToAdd); err != nil {
 				return err
 			}
 		}
-		if len(envelope.KGUpdates.EdgesToAdd) > 0 { // CORRECTED
-			// Convert schemas.Edge to schemas.EdgeInput
-			edgeInputs := make([]schemas.EdgeInput, len(envelope.KGUpdates.EdgesToAdd)) // CORRECTED
-			for i, e := range envelope.KGUpdates.EdgesToAdd {                           // CORRECTED
-				edgeInputs[i] = schemas.EdgeInput{
-					ID:         e.ID,
-					From:       e.From,
-					To:         e.To,
-					Type:       e.Type,
-					Label:      e.Label,
-					Properties: e.Properties,
-				}
-			}
-			if err := s.persistEdges(ctx, tx, edgeInputs); err != nil {
+		if len(envelope.KGUpdates.EdgesToAdd) > 0 {
+			if err := s.persistEdges(ctx, tx, envelope.KGUpdates.EdgesToAdd); err != nil {
 				return err
 			}
 		}
@@ -93,30 +74,28 @@ func (s *Store) PersistData(ctx context.Context, envelope *schemas.ResultEnvelop
 	}
 	return nil
 }
-// persistFindings inserts findings using the high performance pgx CopyFrom protocol.
+
 func (s *Store) persistFindings(ctx context.Context, tx pgx.Tx, scanID string, findings []schemas.Finding) error {
 	rows := make([][]interface{}, len(findings))
 	for i, f := range findings {
-		// Marshal the Vulnerability struct to JSON for storage in a JSONB column.
-		vulnJSON, err := json.Marshal(f.Vulnerability)
+		evidenceJSON, err := json.Marshal(f.Evidence)
 		if err != nil {
-			return fmt.Errorf("failed to marshal vulnerability details for finding %s: %w", f.ID, err)
+			return fmt.Errorf("failed to marshal evidence for finding %s: %w", f.ID, err)
 		}
 
 		rows[i] = []interface{}{
-			f.ID, scanID, f.TaskID, f.Timestamp, f.Target, f.Module,
-			vulnJSON,
+			f.ID, scanID, f.TaskID,
+			f.Target, f.Module, f.Vulnerability.Name,
 			string(f.Severity), f.Description,
-			f.Evidence,
-			f.Recommendation, f.CWE,
+			evidenceJSON, f.Recommendation, f.CWE,
+			f.Timestamp,
 		}
 	}
 
-	// Ensure column names here match your database schema exactly.
 	copyCount, err := tx.CopyFrom(
 		ctx,
 		pgx.Identifier{"findings"},
-		[]string{"id", "scan_id", "task_id", "timestamp", "target", "module", "vulnerability", "severity", "description", "evidence", "recommendation", "cwe"},
+		[]string{"id", "scan_id", "task_id", "target", "module", "vulnerability", "severity", "description", "evidence", "recommendation", "cwe", "observed_at"},
 		pgx.CopyFromRows(rows),
 	)
 
@@ -130,20 +109,15 @@ func (s *Store) persistFindings(ctx context.Context, tx pgx.Tx, scanID string, f
 	return nil
 }
 
-// persistNodes performs a batch upsert of knowledge graph nodes using INSERT ON CONFLICT.
+// REFACTORED to use a simple loop of tx.Exec instead of SendBatch
 func (s *Store) persistNodes(ctx context.Context, tx pgx.Tx, nodes []schemas.NodeInput) error {
-	batch := &pgx.Batch{}
-	// This SQL statement inserts a new node or updates it if the ID already exists.
-	// It also merges the new properties with existing ones.
 	sql := `
-		INSERT INTO kg_nodes (id, type, label, status, properties, created_at, last_seen)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		INSERT INTO kg_nodes (id, type, properties, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5)
 		ON CONFLICT (id) DO UPDATE SET
 			type = EXCLUDED.type,
-			label = EXCLUDED.label,
-			status = EXCLUDED.status,
 			properties = kg_nodes.properties || EXCLUDED.properties,
-			last_seen = EXCLUDED.last_seen;
+			updated_at = EXCLUDED.updated_at;
 	`
 	now := time.Now()
 
@@ -151,65 +125,40 @@ func (s *Store) persistNodes(ctx context.Context, tx pgx.Tx, nodes []schemas.Nod
 		if n.Properties == nil || len(n.Properties) == 0 {
 			n.Properties = json.RawMessage("{}")
 		}
-		batch.Queue(sql, n.ID, string(n.Type), n.Label, string(n.Status), n.Properties, now, now)
-	}
-
-	br := tx.SendBatch(ctx, batch)
-	defer br.Close()
-	for i := 0; i < len(nodes); i++ {
-		_, err := br.Exec()
-		if err != nil {
-			return fmt.Errorf("failed to execute batch insert for nodes (item %d): %w", i, err)
+		if _, err := tx.Exec(ctx, sql, n.ID, string(n.Type), n.Properties, now, now); err != nil {
+			return fmt.Errorf("failed to execute insert for node %s: %w", n.ID, err)
 		}
 	}
 	return nil
 }
 
-// persistEdges performs a batch upsert of knowledge graph edges.
+// REFACTORED to use a simple loop of tx.Exec instead of SendBatch
 func (s *Store) persistEdges(ctx context.Context, tx pgx.Tx, edges []schemas.EdgeInput) error {
-	batch := &pgx.Batch{}
 	sql := `
-		INSERT INTO kg_edges (id, source_id, target_id, relationship, label, properties, created_at, last_seen)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-		ON CONFLICT (id) DO UPDATE SET
-			label = EXCLUDED.label,
-			properties = kg_edges.properties || EXCLUDED.properties,
-			last_seen = EXCLUDED.last_seen;
+		INSERT INTO kg_edges (source_id, target_id, relationship, properties, "timestamp")
+		VALUES ($1, $2, $3, $4, $5)
+		ON CONFLICT (source_id, target_id, relationship) DO UPDATE SET
+			properties = kg_edges.properties || EXCLUDED.properties;
 	`
 	now := time.Now()
 
 	for _, e := range edges {
-		edgeID := e.ID
-		if edgeID == "" {
-			edgeID = uuid.New().String()
-		}
-
 		if e.Properties == nil || len(e.Properties) == 0 {
 			e.Properties = json.RawMessage("{}")
 		}
-
-		// Map EdgeInput fields (From, To, Type) to SQL columns (source_id, target_id, relationship).
-		batch.Queue(sql, edgeID, e.From, e.To, string(e.Type), e.Label, e.Properties, now, now)
-	}
-
-	br := tx.SendBatch(ctx, batch)
-	defer br.Close()
-	for i := 0; i < len(edges); i++ {
-		_, err := br.Exec()
-		if err != nil {
-			return fmt.Errorf("failed to execute batch insert for edges (item %d): %w", i, err)
+		if _, err := tx.Exec(ctx, sql, e.From, e.To, string(e.Type), e.Properties, now); err != nil {
+			return fmt.Errorf("failed to execute insert for edge from %s to %s: %w", e.From, e.To, err)
 		}
 	}
 	return nil
 }
 
-// GetFindingsByScanID retrieves all findings associated with a specific scan ID.
 func (s *Store) GetFindingsByScanID(ctx context.Context, scanID string) ([]schemas.Finding, error) {
 	query := `
-		SELECT id, task_id, timestamp, target, module, vulnerability, severity, description, evidence, recommendation, cwe
+		SELECT id, task_id, observed_at, target, module, vulnerability, severity, description, evidence, recommendation, cwe
 		FROM findings
 		WHERE scan_id = $1
-		ORDER BY timestamp ASC;
+		ORDER BY observed_at ASC;
 	`
 	rows, err := s.pool.Query(ctx, query, scanID)
 	if err != nil {
@@ -220,23 +169,23 @@ func (s *Store) GetFindingsByScanID(ctx context.Context, scanID string) ([]schem
 	var findings []schemas.Finding
 	for rows.Next() {
 		var f schemas.Finding
-		var vulnJSON []byte
+		var vulnName string
+		var severityStr string
 
+		// The logic is now simpler: we scan directly into f.Evidence
 		err := rows.Scan(
 			&f.ID, &f.TaskID, &f.Timestamp, &f.Target, &f.Module,
-			&vulnJSON,
-			&f.Severity, &f.Description, &f.Evidence, &f.Recommendation,
+			&vulnName,
+			&severityStr,
+			&f.Description, &f.Evidence, &f.Recommendation,
 			&f.CWE,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan finding row: %w", err)
 		}
 
-		// Unmarshal the vulnerability details from JSONB.
-		if err := json.Unmarshal(vulnJSON, &f.Vulnerability); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal vulnerability details for finding %s: %w", f.ID, err)
-		}
-
+		f.Severity = schemas.Severity(severityStr)
+		f.Vulnerability.Name = vulnName
 		f.ScanID = scanID
 		findings = append(findings, f)
 	}

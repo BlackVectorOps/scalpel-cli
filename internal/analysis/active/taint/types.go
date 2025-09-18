@@ -2,7 +2,6 @@
 package taint
 
 import (
-	"context"
 	"net/url"
 	"time"
 
@@ -52,7 +51,7 @@ type ActiveProbe struct {
 	Value     string // what was the full payload?
 	Canary    string // the unique ID for this probe.
 	Source    schemas.TaintSource // where did it come from?
-	CreatedAt time.Time // Timestamp for expiration tracking.
+	CreatedAt time.Time           // Timestamp for expiration tracking.
 }
 
 // SinkEvent is reported by the browser shim when tainted data reaches a sink.
@@ -81,7 +80,8 @@ type ShimErrorEvent struct {
 	StackTrace string `json:"stack"`
 }
 
-// OASTInteraction represents a detected interaction on the OAST server.
+// OASTInteraction is a local type representing a detected interaction on the OAST server.
+// It implements the Event interface for use in the correlation engine.
 type OASTInteraction struct {
 	Canary          string
 	Protocol        string
@@ -90,56 +90,36 @@ type OASTInteraction struct {
 	RawRequest      string
 }
 
+// isEvent satisfies the taint.Event interface.
 func (OASTInteraction) isEvent() {}
 
 // CorrelatedFinding links a source to a sink, representing a potential vulnerability.
 // This is an internal type used by the correlation engine before being transformed
 // into a final schemas.Finding for reporting.
 type CorrelatedFinding struct {
-	TaskID            string
-	TargetURL         string
-	Sink              schemas.TaintSink
-	Origin            schemas.TaintSource
-	Value             string // The value that reached the sink.
-	Canary            string
-	Probe             ActiveProbe
-	Detail            string
-	IsConfirmed       bool // True if confirmed via ExecutionProof, OAST, or definitive sinks.
-	SanitizationLevel SanitizationLevel // Indicates if the payload was modified.
-	StackTrace        string            // The relevant stack trace.
-	OASTDetails       *OASTInteraction  // Details if confirmed via OAST.
+	TaskID      string
+	TargetURL   string
+	Sink        schemas.TaintSink
+	Origin      schemas.TaintSource
+	Value       string // The value that reached the sink.
+	Canary      string
+	Probe       ActiveProbe
+	Detail      string
+	IsConfirmed bool // True if confirmed via ExecutionProof, OAST, or definitive sinks.
+	// SanitizationLevel indicates if the payload was modified.
+	SanitizationLevel SanitizationLevel
+	StackTrace        string // The relevant stack trace.
+	// OASTDetails holds details if confirmed via OAST. It uses the local type.
+	OASTDetails *OASTInteraction
 }
 
 // -- Interfaces --
 
-// OASTProvider is the contract for interacting with an OAST service.
-type OASTProvider interface {
-	// Fetches interactions since the last check for the given canaries.
-	GetInteractions(ctx context.Context, canaries []string) ([]OASTInteraction, error)
-	// Returns the base URL/domain for the OAST server to be used in payloads.
-	GetServerURL() string
-}
-
-// BrowserInteractor is the contract for controlling a browser instance.
-type BrowserInteractor interface {
-	InitializeSession(ctx context.Context) (SessionContext, error)
-}
-
-// SessionContext is the contract for a single, isolated browser tab/context.
-type SessionContext interface {
-	// Instrumentation
-	InjectScriptPersistently(ctx context.Context, script string) error
-	ExposeFunction(ctx context.Context, name string, function interface{}) error
-	ExecuteScript(ctx context.Context, script string) error
-
-	// Browser automation
-	Navigate(ctx context.Context, url string) error
-	WaitForAsync(ctx context.Context, milliseconds int) error
-	Interact(ctx context.Context, config InteractionConfig) error
-
-	// Cleanup
-	Close() error
-}
+// The OASTProvider and SessionContext interfaces have been moved to api/schemas
+// to serve as the canonical definitions for the entire application.
+// We now rely on importing them from the schemas package.
+type OASTProvider schemas.OASTProvider
+type SessionContext schemas.SessionContext
 
 // ResultsReporter is the contract for reporting findings from the analysis.
 type ResultsReporter interface {
@@ -158,23 +138,17 @@ type SinkDefinition struct {
 	ConditionID string `json:"ConditionID,omitempty" yaml:"condition_id,omitempty"`
 }
 
-// InteractionConfig holds the settings for the browser interaction/crawling phase.
-type InteractionConfig struct {
-	MaxDepth                int `json:"max_depth" yaml:"max_depth"`
-	MaxInteractionsPerDepth int `json:"max_interactions_per_depth" yaml:"max_interactions_per_depth"`
-	InteractionDelayMs      int `json:"interaction_delay_ms" yaml:"interaction_delay_ms"`
-	PostInteractionWaitMs   int `json:"post_interaction_wait_ms" yaml:"post_interaction_wait_ms"`
-}
-
 // Config holds all the settings for the Taint Analyzer.
 type Config struct {
 	TaskID string `json:"task_id" yaml:"task_id"`
 	Target *url.URL
 	// Probes and Sinks are now part of the configuration, allowing dynamic loading.
-	Probes      []ProbeDefinition `json:"probes" yaml:"probes"`
-	Sinks       []SinkDefinition  `json:"sinks" yaml:"sinks"`
-	Interaction InteractionConfig `json:"interaction" yaml:"interaction"`
-	AnalysisTimeout time.Duration `json:"analysis_timeout" yaml:"analysis_timeout"`
+	Probes []ProbeDefinition `json:"probes" yaml:"probes"`
+	Sinks  []SinkDefinition  `json:"sinks" yaml:"sinks"`
+	// The local InteractionConfig struct has been removed.
+	// We now use the canonical schemas.InteractionConfig.
+	Interaction schemas.InteractionConfig `json:"interaction" yaml:"interaction"`
+	AnalysisTimeout         time.Duration         `json:"analysis_timeout" yaml:"analysis_timeout"`
 
 	// Performance/Robustness configurations.
 	EventChannelBuffer      int           `json:"event_channel_buffer" yaml:"event_channel_buffer"`
@@ -184,3 +158,4 @@ type Config struct {
 	CleanupInterval         time.Duration `json:"cleanup_interval" yaml:"cleanup_interval"`
 	OASTPollingInterval     time.Duration `json:"oast_polling_interval" yaml:"oast_polling_interval"`
 }
+

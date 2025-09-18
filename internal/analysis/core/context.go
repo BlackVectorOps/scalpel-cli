@@ -6,31 +6,24 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
-	"github.com/xkilldash9x/scalpel-cli/internal/browser"
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
 	"go.uber.org/zap"
 )
 
-// KnowledgeGraphClient defines the interface for interacting with the Knowledge Graph.
-// This allows analyzers to read context or update the graph during analysis.
-type KnowledgeGraphClient interface {
-	// Define necessary methods (e.g., GetNode, AddNode, AddEdge)
-	// For now, we keep it empty as the exact methods used by analyzers are not fully defined in the context.
-}
-
-// OASTProvider defines the interface for Out-of-Band testing services.
-type OASTProvider interface {
-	// Define necessary methods (e.g., GetServerURL, FetchInteractions)
-}
+// The local KnowledgeGraphClient and OASTProvider interfaces have been removed.
+// They are now defined centrally in api/schemas.
 
 // GlobalContext holds application-wide services and configurations shared across all tasks.
 type GlobalContext struct {
-	Config         *config.Config
-	Logger         *zap.Logger
-	BrowserManager *browser.Manager
-	DBPool         *pgxpool.Pool // Added this field
-	KGClient       KnowledgeGraphClient
-	OASTProvider   OASTProvider // Optional
+	Config *config.Config
+	Logger *zap.Logger
+	// FIX: The BrowserManager field is now of type schemas.BrowserManager, the canonical interface.
+	BrowserManager schemas.BrowserManager
+	DBPool         *pgxpool.Pool
+	// The KGClient now uses the canonical interface from schemas.
+	KGClient schemas.KnowledgeGraphClient
+	// The OASTProvider now uses the canonical interface from schemas.
+	OASTProvider schemas.OASTProvider
 	// Add other global services like HTTPClient, LLMClient, etc.
 }
 

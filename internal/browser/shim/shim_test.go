@@ -94,15 +94,12 @@ func TestBuildTaintShim(t *testing.T) {
 // TestGetTaintShimTemplate verifies the behavior of the embedded template loader.
 func TestGetTaintShimTemplate(t *testing.T) {
 	t.Parallel()
-	// NOTE: This test validates the error handling of the function.
-	// Since the actual `taint_shim.js` file is not present in the test's context
-	// (it's embedded during the main build), we expect the embedded variable to be empty
-	// during this test run. A successful 'go test' run for this function proves that
-	// the emptiness check is working correctly.
+	// This test now expects success, because `go:embed` should work correctly
+	// during `go test` runs. It verifies that the embedded variable is not empty.
 
 	template, err := GetTaintShimTemplate()
 
-	require.Error(t, err, "Should return an error because the embedded file is not loaded during this test run")
-	assert.Empty(t, template, "Template string should be empty on error")
-	assert.EqualError(t, err, "embedded taint_shim.js template is empty or failed to load")
+	require.NoError(t, err, "Should not return an error as the file should be embedded")
+	assert.NotEmpty(t, template, "Template string should not be empty")
+	assert.Contains(t, template, "/*{{SCALPEL_SINKS_CONFIG}}*/", "Template should contain the placeholder")
 }

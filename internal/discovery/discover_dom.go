@@ -9,7 +9,7 @@ import (
 
 	"github.com/chromedp/cdproto/cdp"
 	"github.com/chromedp/chromedp"
-	interfaces "github.com/xkilldash9x/scalpel-cli/internal/agent" // using an interface for the session
+	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/observability"
 	"go.uber.org/zap"
 )
@@ -51,8 +51,9 @@ func NewDOMTechnologyDiscoverer() *DOMTechnologyDiscoverer {
 }
 
 // Discover concurrently checks for web technologies on the page for high performance.
-func (d *DOMTechnologyDiscoverer) Discover(ctx context.Context, session interfaces.SessionContext) ([]Technology, error) {
+func (d *DOMTechnologyDiscoverer) Discover(ctx context.Context, session schemas.SessionContext) ([]Technology, error) {
 	logger := observability.GetLogger().Named("dom-discoverer")
+	// FIX: The session context is retrieved from the interface method.
 	cdpCtx := session.GetContext()
 	if cdpCtx == nil {
 		return nil, fmt.Errorf("session does not provide a valid CDP context")

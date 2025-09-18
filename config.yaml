@@ -1,13 +1,13 @@
 # Default configuration for scalpel-cli
 # NOTE: For production deployments, override settings using environment variables
-# (e.g., SCALPEL_POSTGRES_URL) or a config.local.yaml file.
+# (e.g., SCALPEL_DATABASE_URL) or a config.local.yaml file.
 
 logger:
   service_name: "scalpel-cli"
   log_file: "logs/scalpel.log"
-  level: "info" # Production default. Use 'debug' for troubleshooting.
-  format: "json" # Production default (structured logging). Use 'console' for development.
-  add_source: false # Disabled for production performance.
+  level: "info"
+  format: "json"
+  add_source: false
   max_size: 10
   max_backups: 3
   max_age: 7
@@ -21,10 +21,9 @@ logger:
     panic: "magenta"
     fatal: "magenta"
 
-postgres:
-  # The database URL must be configured before running.
-  # Recommended to set via SCALPEL_POSTGRES_URL environment variable.
-  # Example: postgres://user:password@hostname:5432/scalpeldb?sslmode=require
+# FIX: Renamed from 'postgres' to 'database' to match the Go struct.
+database:
+  # This value will be overridden by the SCALPEL_DATABASE_URL environment variable.
   url: ""
 
 engine:
@@ -33,15 +32,15 @@ engine:
   default_task_timeout: "15m"
 
 browser:
-  headless: true # Changed to true for CI/automation consistency
-  ignore_tls_errors: false # Keep false for production security.
+  headless: true
+  ignore_tls_errors: false
+  # FIX: Added the missing 'concurrency' field required by the validation logic.
+  concurrency: 2
   args:
-    # -- Standard flags for stability in automated environments --
     - "--no-sandbox"
     - "--disable-setuid-sandbox"
     - "--disable-dev-shm-usage"
     - "--disable-gpu"
-    # -- Flags to prevent first-run UI, popups, and checks --
     - "--no-first-run"
     - "--no-default-browser-check"
     - "--disable-popup-blocking"
@@ -60,21 +59,25 @@ browser:
 
 network:
   timeout: "30s"
-  postLoadWait: "2s" # Wait 2 seconds for JS to settle after page load
+  post_load_wait: "2s"
+  capture_response_bodies: true # Added to ensure HAR files are complete.
   headers:
     User-Agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36 ScalpelV2/1.0"
+  proxy:
+    enabled: false
+    address: "127.0.0.1:8080"
+    ca_cert: ""
+    ca_key: ""
 
-# -- Agent Configuration --
 agent:
   knowledge_graph:
-    type: "in-memory" # Options: "postgres" or "in-memory"
+    type: "postgres" # Options: "postgres" or "in-memory"
 
-# IAST script paths required by the browser manager (relative to working directory)
 iast:
-  shimPath: "internal/browser/shim/pinnacle.js"
-  configPath: "internal/browser/shim/pinnacle.json"
+  # FIX: Changed keys to snake_case to match the Go struct.
+  shim_path: "internal/browser/shim/pinnacle.js"
+  config_path: "internal/browser/shim/pinnacle.json"
 
-# -- scanner module configuration --
 scanners:
   passive:
     headers:
@@ -83,11 +86,8 @@ scanners:
   static:
     jwt:
       enabled: true
-      # Removed weak default secrets. Users should provide their own list if needed.
       known_secrets: []
       brute_force_enabled: true
-      # Changed path from "~/SecLists/..." to a relative path.
-      # Ensure this file is available in the deployment environment.
       dictionary_file: "config/jwt.secrets.list"
 
   active:
@@ -97,52 +97,49 @@ scanners:
       concurrency: 2
     protopollution:
       enabled: true
-    timeslip: # Race Condition Analyzer
+    timeslip:
       enabled: true
       request_count: 25
       max_concurrency: 10
       threshold_ms: 500
     auth:
-      # -- This is the updated ATO configuration section --
       ato:
         enabled: true
-        credentialFile: "" # Leaving empty uses the internal default list
+        credential_file: ""
         concurrency: 4
-        minRequestDelayMs: 500    # 0.5s base delay between requests per worker
-        requestDelayJitterMs: 500 # Add up to 0.5s of random delay
-
-        # Keywords for response analysis
-        successKeywords:
+        min_request_delay_ms: 500
+        request_delay_jitter_ms: 500
+        success_keywords:
           - "welcome"
           - "redirect"
           - "dashboard"
           - "logout"
           - '"success":true'
-        userFailureKeywords:
+        user_failure_keywords:
           - "user not found"
           - "invalid user"
           - "no such account"
           - "user does not exist"
-        passFailureKeywords:
+        pass_failure_keywords:
           - "invalid password"
           - "incorrect password"
           - "authentication failed"
-        genericFailureKeywords:
+        generic_failure_keywords:
           - "login failed"
           - "invalid credentials"
-        lockoutKeywords:
+        lockout_keywords:
           - "account locked"
           - "too many attempts"
 
-    idor:
-      enabled: true
-      ignore_list:
-        - "csrf_token"
-        - "X-CSRF-Token"
-        - "nonce"
-        - "viewstate"
-      test_strategies:
-        NumericID: ["increment", "decrement"]
-        UUID: ["horizontal_swap"]
-        Base64Encoded: ["bit_flip"]
-        ObjectID: ["increment_char"]
+      idor:
+        enabled: true
+        ignore_list:
+          - "csrf_token"
+          - "X-CSRF-Token"
+          - "nonce"
+          - "viewstate"
+        test_strategies:
+          NumericID: ["increment", "decrement"]
+          UUID: ["horizontal_swap"]
+          Base64Encoded: ["bit_flip"]
+          ObjectID: ["increment_char"]

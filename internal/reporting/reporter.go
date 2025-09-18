@@ -32,8 +32,8 @@ func (nwc *nopWriteCloser) Close() error {
 }
 
 // New creates a new reporter based on the specified format and output path.
-// It now requires a logger for operational logging.
-func New(format, outputPath string, logger *zap.Logger) (Reporter, error) {
+// The signature is updated to accept the toolVersion for dependency injection.
+func New(format, outputPath string, logger *zap.Logger, toolVersion string) (Reporter, error) {
 	if logger == nil {
 		// Robustness: Ensure a logger is always present.
 		return nil, fmt.Errorf("logger cannot be nil")
@@ -66,8 +66,8 @@ func New(format, outputPath string, logger *zap.Logger) (Reporter, error) {
 
 	switch format {
 	case "sarif":
-		// NewSARIFReporter takes ownership of the writer and logger.
-		return NewSARIFReporter(writer, logger.Named("sarif_reporter")), nil
+		// Pass the toolVersion down to the SARIF reporter's constructor.
+		return NewSARIFReporter(writer, logger.Named("sarif_reporter"), toolVersion), nil
 	case "json":
 		cleanup() // Close the file handle
 		return nil, fmt.Errorf("json reporter not yet implemented")

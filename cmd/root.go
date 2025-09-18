@@ -1,4 +1,3 @@
-// cmd/root.go
 package cmd
 
 import (
@@ -19,29 +18,27 @@ var (
 
 // rootCmd represents the base command when called without any subcommands
 var rootCmd = &cobra.Command{
-	Use:   "scalpel-cli",
-	Short: "Scalpel is an AI-native security scanner.",
-	// Version is dynamically set at build time. See cmd/version.go.
+	Use:     "scalpel-cli",
+	Short:   "Scalpel is an AI-native security scanner.",
 	Version: Version,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-		// This function runs before any command, setting up config and logging.
 		if err := initializeConfig(); err != nil {
 			return err
 		}
 
 		var cfg config.Config
 		if err := viper.Unmarshal(&cfg); err != nil {
-			// Initialize a fallback logger if config unmarshal fails
 			observability.InitializeLogger(config.LoggerConfig{Level: "info", Format: "console", ServiceName: "scalpel-cli"})
 			return fmt.Errorf("failed to unmarshal config: %w", err)
 		}
 
-		// Set the global configuration instance
 		config.Set(&cfg)
 
-		observability.InitializeLogger(cfg.Logger)
+		if err := cfg.Validate(); err != nil {
+			return fmt.Errorf("invalid configuration: %w", err)
+		}
 
-		// Log the version at startup
+		observability.InitializeLogger(cfg.Logger)
 		observability.GetLogger().Info("Starting Scalpel-CLI", zap.String("version", Version))
 		return nil
 	},
@@ -49,12 +46,10 @@ var rootCmd = &cobra.Command{
 
 // Execute adds all child commands to the root command and sets flags appropriately.
 func Execute() {
-	// Add subcommands here
 	rootCmd.AddCommand(newScanCmd())
 	rootCmd.AddCommand(newReportCmd())
 
 	if err := rootCmd.Execute(); err != nil {
-		// Use the logger if available, otherwise fallback to stderr
 		if logger := observability.GetLogger(); logger != nil && logger != zap.NewNop() {
 			logger.Error("Command execution failed", zap.Error(err))
 		} else {
@@ -66,7 +61,6 @@ func Execute() {
 
 func init() {
 	rootCmd.PersistentFlags().StringVarP(&cfgFile, "config", "c", "", "config file (default is ./config.yaml)")
-	// Optional: Customize the version output template
 	rootCmd.SetVersionTemplate(`{{printf "%s\n" .Version}}`)
 }
 
@@ -84,11 +78,14 @@ func initializeConfig() error {
 	viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 	viper.AutomaticEnv()
 
+	// FIX: Explicitly bind the nested key to its corresponding environment variable.
+	// This is more reliable than relying on AutomaticEnv alone for nested keys.
+	viper.BindEnv("database.url", "SCALPEL_DATABASE_URL")
+
 	if err := viper.ReadInConfig(); err != nil {
 		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
 			return fmt.Errorf("error reading config file: %w", err)
 		}
-		// Config file not found; proceed with defaults/env vars
 	}
 	return nil
 }

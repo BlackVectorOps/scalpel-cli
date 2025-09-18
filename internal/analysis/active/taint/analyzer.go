@@ -18,9 +18,6 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
-	// This package now directly uses the concrete browser session type.
-	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
-	"github.com/xkilldash9x/scalpel-cli/internal/browser"
 )
 
 //go:embed taint_shim.js
@@ -33,18 +30,18 @@ var canaryRegex = regexp.MustCompile(`SCALPEL_[A-Z]+_[A-Z_]+_[a-f0-9]{8}`)
 
 // Analyzer is the brains of the whole IAST operation.
 type Analyzer struct {
-	config         Config
-	reporter       ResultsReporter
-	oastProvider   OASTProvider
-	logger         *zap.Logger
-	activeProbes   map[string]ActiveProbe
-	probesMutex    sync.RWMutex
-	eventsChan     chan Event
-	wg             sync.WaitGroup
-	producersWG    sync.WaitGroup
-	backgroundCtx  context.Context
+	config           Config
+	reporter         ResultsReporter
+	oastProvider     OASTProvider
+	logger           *zap.Logger
+	activeProbes     map[string]ActiveProbe
+	probesMutex      sync.RWMutex
+	eventsChan       chan Event
+	wg               sync.WaitGroup
+	producersWG      sync.WaitGroup
+	backgroundCtx    context.Context
 	backgroundCancel context.CancelFunc
-	shimTemplate   *template.Template
+	shimTemplate     *template.Template
 }
 
 // NewAnalyzer initializes a new analyzer.
@@ -536,14 +533,24 @@ func (a *Analyzer) fetchAndEnqueueOAST() {
 	}
 
 	for _, interaction := range interactions {
+		// FIX: Convert from the canonical schemas.OASTInteraction to the local taint.OASTInteraction
+		// before sending it on the event channel. This resolves the type mismatch.
+		localInteraction := OASTInteraction{
+			Canary:          interaction.Canary,
+			Protocol:        interaction.Protocol,
+			SourceIP:        interaction.SourceIP,
+			InteractionTime: interaction.InteractionTime,
+			RawRequest:      interaction.RawRequest,
+		}
+
 		select {
 		case <-a.backgroundCtx.Done():
-			a.logger.Debug("Dropping OAST interaction during shutdown.", zap.String("canary", interaction.Canary))
+			a.logger.Debug("Dropping OAST interaction during shutdown.", zap.String("canary", localInteraction.Canary))
 			return
 		default:
 		}
 		select {
-		case a.eventsChan <- interaction:
+		case a.eventsChan <- localInteraction:
 		default:
 			a.logger.Warn("Event channel full, dropping OAST interaction.")
 		}
@@ -565,6 +572,7 @@ func (a *Analyzer) processEvent(event Event) {
 }
 
 // processOASTInteraction handles confirmed out of band callbacks.
+// FIX: This now accepts the local taint.OASTInteraction type.
 func (a *Analyzer) processOASTInteraction(interaction OASTInteraction) {
 	a.probesMutex.RLock()
 	probe, ok := a.activeProbes[interaction.Canary]
@@ -773,18 +781,18 @@ var ValidTaintFlows = map[TaintFlowPath]bool{
 
 	{schemas.ProbeTypeGeneric, schemas.SinkWebSocketSend}:     true,
 	{schemas.ProbeTypeGeneric, schemas.SinkXMLHTTPRequest}:    true,
-	{schemas.ProbeTypeGeneric, schemas.SinkXMLHTTPRequestURL}: true, // FIX: The constant name was incorrect (had a trailing underscore).
+	{schemas.ProbeTypeGeneric, schemas.SinkXMLHTTPRequestURL}: true,
 	{schemas.ProbeTypeGeneric, schemas.SinkFetch}:             true,
-	{schemas.ProbeTypeGeneric, schemas.SinkFetchURL}:          true, // FIX: The constant name was incorrect (had a trailing underscore).
+	{schemas.ProbeTypeGeneric, schemas.SinkFetchURL}:          true,
 	{schemas.ProbeTypeGeneric, schemas.SinkNavigation}:        true,
 	{schemas.ProbeTypeGeneric, schemas.SinkSendBeacon}:        true,
 	{schemas.ProbeTypeGeneric, schemas.SinkWorkerSrc}:         true,
 
 	{schemas.ProbeTypeOAST, schemas.SinkWebSocketSend}:     true,
 	{schemas.ProbeTypeOAST, schemas.SinkXMLHTTPRequest}:    true,
-	{schemas.ProbeTypeOAST, schemas.SinkXMLHTTPRequestURL}: true, // FIX: The constant name was incorrect (had a trailing underscore).
+	{schemas.ProbeTypeOAST, schemas.SinkXMLHTTPRequestURL}: true,
 	{schemas.ProbeTypeOAST, schemas.SinkFetch}:             true,
-	{schemas.ProbeTypeOAST, schemas.SinkFetchURL}:          true, // FIX: The constant name was incorrect (had a trailing underscore).
+	{schemas.ProbeTypeOAST, schemas.SinkFetchURL}:          true,
 	{schemas.ProbeTypeOAST, schemas.SinkNavigation}:        true,
 	{schemas.ProbeTypeOAST, schemas.SinkSendBeacon}:        true,
 	{schemas.ProbeTypeOAST, schemas.SinkWorkerSrc}:         true,

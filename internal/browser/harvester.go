@@ -3,6 +3,8 @@ package browser
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
+	"fmt"
 	"net/url"
 	"sort"
 	"strings"
@@ -21,15 +23,15 @@ import (
 
 // requestState tracks the lifecycle of a single network request.
 type requestState struct {
-	Request       *network.Request
-	Response      *network.Response
+	Request   *network.Request
+	Response  *network.Response
 	// Use pointers as the CDP events provide pointers for these fields.
-	StartTS       *cdp.TimeSinceEpoch // Wall time for HAR StartedDateTime
-	EndTS         *cdp.MonotonicTime
-	ResponseReady chan struct{} // Channel to signal when response headers are received
-	Body          []byte
-	BodyBase64    bool
-	IsComplete    bool
+	StartTS         *cdp.TimeSinceEpoch // Wall time for HAR StartedDateTime
+	EndTS           *cdp.MonotonicTime
+	ResponseReady   chan struct{} // Channel to signal when response headers are received
+	Body            []byte
+	BodyBase64      bool
+	IsComplete      bool
 }
 
 // Harvester listens to network, console, and runtime events to collect artifacts and monitor network activity.
@@ -269,7 +271,107 @@ func (h *Harvester) handleLoadingFailed(e *network.EventLoadingFailed) {
 	}
 }
 
-// (Console/Log handlers omitted for brevity - implementation is straightforward logging)
+// -- Console/Log Handlers (Implementations added) --
+
+// handleConsoleAPICalled captures calls to the console API (e.g., console.log, console.error).
+func (h *Harvester) handleConsoleAPICalled(e *runtime.EventConsoleAPICalled) {
+	var textBuilder strings.Builder
+	for i, arg := range e.Args {
+		if i > 0 {
+			textBuilder.WriteString(" ")
+		}
+
+		// Attempt robust string representation of arguments
+		if arg.Value != nil && (arg.Type == runtime.TypeString || arg.Type == runtime.TypeNumber || arg.Type == runtime.TypeBoolean) {
+			// For primitives, try to unmarshal the RawMessage to get the clean value.
+			var val interface{}
+			if err := json.Unmarshal(arg.Value, &val); err == nil {
+				textBuilder.WriteString(fmt.Sprintf("%v", val))
+				continue
+			}
+		}
+
+		// Fallback for objects or if unmarshal failed
+		if arg.Description != "" {
+			textBuilder.WriteString(arg.Description)
+		} else if arg.Value != nil {
+			textBuilder.WriteString(string(arg.Value))
+		} else {
+			textBuilder.WriteString(fmt.Sprintf("[%s]", arg.Type))
+		}
+	}
+
+	// Convert CDP timestamp (which is *cdp.TimeSinceEpoch) to time.Time
+	timestamp := time.Time{}
+	if e.Timestamp != nil {
+		timestamp = e.Timestamp.Time()
+	}
+
+	logEntry := schemas.ConsoleLog{
+		Timestamp: timestamp,
+		Type:      string(e.Type), // e.g., "log", "info", "error"
+		Text:      textBuilder.String(),
+		Source:    "console-api",
+	}
+
+	h.lock.Lock()
+	defer h.lock.Unlock()
+	h.consoleLogs = append(h.consoleLogs, logEntry)
+}
+
+// handleLogEntryAdded captures entries added via the Log domain (e.g., network errors, security issues).
+func (h *Harvester) handleLogEntryAdded(e *log.EventEntryAdded) {
+	if e.Entry == nil {
+		return
+	}
+
+	// Convert CDP timestamp (which is *cdp.TimeSinceEpoch) to time.Time
+	timestamp := time.Time{}
+	if e.Entry.Timestamp != nil {
+		timestamp = e.Entry.Timestamp.Time()
+	}
+
+	logEntry := schemas.ConsoleLog{
+		Type:      string(e.Entry.Level),
+		Text:      e.Entry.Text,
+		Timestamp: timestamp,
+		Source:    string(e.Entry.Source),
+	}
+
+	h.lock.Lock()
+	defer h.lock.Unlock()
+	h.consoleLogs = append(h.consoleLogs, logEntry)
+}
+
+// handleExceptionThrown captures unhandled JavaScript exceptions.
+func (h *Harvester) handleExceptionThrown(e *runtime.EventExceptionThrown) {
+	if e.ExceptionDetails == nil {
+		return
+	}
+
+	// Convert CDP timestamp (which is *cdp.TimeSinceEpoch) to time.Time
+	timestamp := time.Time{}
+	if e.Timestamp != nil {
+		timestamp = e.Timestamp.Time()
+	}
+
+	text := e.ExceptionDetails.Text
+	// The Exception.Description often contains the full stack trace.
+	if e.ExceptionDetails.Exception != nil && e.ExceptionDetails.Exception.Description != "" {
+		text = e.ExceptionDetails.Exception.Description
+	}
+
+	logEntry := schemas.ConsoleLog{
+		Type:      "exception",
+		Text:      text,
+		Timestamp: timestamp,
+		Source:    "runtime",
+	}
+
+	h.lock.Lock()
+	defer h.lock.Unlock()
+	h.consoleLogs = append(h.consoleLogs, logEntry)
+}
 
 // -- Body Fetching Logic --
 
@@ -310,10 +412,7 @@ func (h *Harvester) fetchBody(requestID network.RequestID) {
 		return
 	}
 
-	// -- THE FIX --
-	// The signature for GetResponseBody(...).Do(...) has changed in the cdproto library.
-	// It no longer returns a boolean indicating if the body is base64 encoded.
-	// Instead, it now returns just the raw body bytes and an error.
+	// FIX: The signature for GetResponseBody(...).Do(...) returns raw bytes (decoded) and an error.
 	body, err := network.GetResponseBody(requestID).Do(ctx)
 
 	if err != nil {
@@ -329,7 +428,7 @@ func (h *Harvester) fetchBody(requestID network.RequestID) {
 	// Re-check state existence as it might have been cleared if Stop() timed out.
 	if state, ok := h.requests[requestID]; ok {
 		state.Body = body
-		// The new `Do` method returns raw bytes, already decoded from base64 if necessary.
+		// The body is raw bytes. Set BodyBase64 to false.
 		// The logic in `convertResponse` will re-encode any binary assets into base64 for the HAR file.
 		state.BodyBase64 = false
 	}
@@ -429,10 +528,8 @@ func (h *Harvester) convertRequest(req *network.Request) schemas.Request {
 
 	bodySize := int64(-1)
 	var postData *schemas.PostData
-	// -- THE FIX --
-	// This block handles PostData. The HasPostData field in the cdproto library
-	// was changed from a *bool to a bool, so we need to adjust our check.
-	// Instead of checking for nil and then dereferencing, we just check the boolean value directly.
+
+	// FIX: The HasPostData field in cdproto was changed from a *bool to a bool.
 	if req.HasPostData && req.PostDataEntries != nil && len(req.PostDataEntries) > 0 {
 		var postDataBuilder strings.Builder
 		for _, entry := range req.PostDataEntries {
@@ -441,9 +538,7 @@ func (h *Harvester) convertRequest(req *network.Request) schemas.Request {
 		postDataText := postDataBuilder.String()
 		bodySize = int64(len(postDataText))
 		postData = &schemas.PostData{
-			// -- THE FIX --
-			// The network.Headers type is a map and does not have a .Get method.
-			// We now use a helper function to perform a case-insensitive key lookup.
+			// FIX: network.Headers is a map, use helper function for case-insensitive lookup.
 			MimeType: getHeader(req.Headers, "Content-Type"),
 			Text:     postDataText,
 		}
@@ -474,7 +569,7 @@ func (h *Harvester) convertResponse(resp *network.Response, body []byte, isBase6
 
 	if len(body) > 0 {
 		if isBase64 {
-			// Data is already base64 encoded by CDP.
+			// Data is already base64 encoded (less common now).
 			content.Text = string(body)
 			content.Encoding = "base64"
 		} else {
@@ -494,9 +589,7 @@ func (h *Harvester) convertResponse(resp *network.Response, body []byte, isBase6
 		HTTPVersion: resp.Protocol,
 		Headers:     headers,
 		Content:     content,
-		// -- THE FIX --
-		// The network.Headers type is a map and does not have a .Get method.
-		// We now use a helper function to perform a case-insensitive key lookup.
+		// FIX: network.Headers is a map, use helper function for case-insensitive lookup.
 		RedirectURL: getHeader(resp.Headers, "Location"),
 		BodySize:    int64(len(body)), // Simplified body size calculation.
 		HeadersSize: calculateHeaderSize(headers),
@@ -522,7 +615,6 @@ func getHeader(headers network.Headers, key string) string {
 	return ""
 }
 
-// Use the correct type name schemas.NVPair
 func convertHeaders(headers network.Headers) []schemas.NVPair {
 	nvps := make([]schemas.NVPair, 0, len(headers))
 	for name, value := range headers {
@@ -536,7 +628,6 @@ func convertHeaders(headers network.Headers) []schemas.NVPair {
 	return nvps
 }
 
-// Use the correct type name schemas.NVPair
 func convertQueryString(urlStr string) []schemas.NVPair {
 	u, err := url.Parse(urlStr)
 	if err != nil {
@@ -552,7 +643,6 @@ func convertQueryString(urlStr string) []schemas.NVPair {
 }
 
 // calculateHeaderSize estimates the size of the headers in bytes.
-// Use the correct type name schemas.NVPair
 func calculateHeaderSize(headers []schemas.NVPair) int64 {
 	size := 0
 	for _, h := range headers {
@@ -566,15 +656,4 @@ func calculateHeaderSize(headers []schemas.NVPair) int64 {
 func isTextMime(mimeType string) bool {
 	mime := strings.ToLower(mimeType)
 	return strings.HasPrefix(mime, "text/") || strings.Contains(mime, "json") || strings.Contains(mime, "javascript") || strings.Contains(mime, "xml")
-}
-
-// (Console Handlers handleConsoleAPICalled, handleLogEntryAdded, handleExceptionThrown omitted for brevity)
-func (h *Harvester) handleConsoleAPICalled(e *runtime.EventConsoleAPICalled) {
-	// Implementation omitted for brevity
-}
-func (h *Harvester) handleLogEntryAdded(e *log.EventEntryAdded) {
-	// Implementation omitted for brevity
-}
-func (h *Harvester) handleExceptionThrown(e *runtime.EventExceptionThrown) {
-	// Implementation omitted for brevity
 }

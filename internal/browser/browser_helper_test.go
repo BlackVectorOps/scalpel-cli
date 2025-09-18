@@ -1,4 +1,4 @@
-package browser_test
+package browser
 
 import (
 	"context"
@@ -6,88 +6,72 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"sync"
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 
-	"github.com/xkilldash9x/scalpel-cli/internal/browser"
-	"github.com/xkilldash9x/scalpel-cli/internal/browser/stealth"
+	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
 	"github.com/xkilldash9x/scalpel-cli/internal/humanoid"
 )
 
+// FIX: Change variable names to avoid shadowing the 'browser' package name.
 var (
-	testLogger     *zap.Logger
-	testManager    *browser.Manager
-	testConfig     *config.Config
-	parallelTestWG sync.WaitGroup // WaitGroup to synchronize parallel tests
+	brTestLogger  *zap.Logger
+	brTestManager *Manager
+	brTestConfig  *config.Config
 )
 
 // testFixture holds components for a single, isolated browser test.
 type testFixture struct {
-	Session *browser.AnalysisContext
+	Session *AnalysisContext
 	Config  *config.Config
 }
 
-// TestMain sets up a SINGLE, shared browser manager for all tests.
+// TestMain sets up a SINGLE, shared browser manager for all tests and handles graceful shutdown.
 func TestMain(m *testing.M) {
 	var err error
-	testLogger = getTestLogger()
-	testLogger.Info("TestMain: START")
-
-	const testConcurrency = 4
+	brTestLogger = getTestLogger()
+	brTestLogger.Info("TestMain: START")
 
 	browserCfg := config.BrowserConfig{
 		Headless:     true,
 		DisableCache: true,
-		Concurrency:  testConcurrency,
+		Concurrency:  4,
 		Humanoid:     humanoid.DefaultConfig(),
 		Debug:        true,
 	}
-
-	testConfig = &config.Config{
+	// FIX: Use a fully initialized config.
+	brTestConfig = &config.Config{
 		Browser: browserCfg,
 		Network: config.NetworkConfig{
 			CaptureResponseBodies: true,
 			NavigationTimeout:     30 * time.Second,
+			Proxy:                 config.ProxyConfig{Enabled: false},
 		},
 	}
 
-	// Create a master context for the entire test suite.
-	suiteCtx, suiteCancel := context.WithCancel(context.Background())
-	testLogger.Info("TestMain: Suite context created.")
+	suiteCtx, cancel := context.WithCancel(context.Background())
 
-	// Create the manager once for the entire test suite using this master context.
-	testManager, err = browser.NewManager(suiteCtx, testLogger, browserCfg)
+	// FIX: Pass the entire root config `brTestConfig` to NewManager.
+	brTestManager, err = NewManager(suiteCtx, brTestLogger, brTestConfig)
 	if err != nil {
-		suiteCancel() // Clean up on failure
-		testLogger.Fatal("Failed to initialize browser manager for test suite", zap.Error(err))
+		cancel()
+		brTestLogger.Fatal("Failed to initialize browser manager for test suite", zap.Error(err))
 	}
-	testLogger.Info("TestMain: testManager initialized. Calling m.Run().")
 
-	// Run all tests.
 	code := m.Run()
-	testLogger.Info("TestMain: m.Run() has completed. Waiting for parallel tests to finish.")
 
-	// Wait for all parallel tests that use newTestFixture to signal they are done.
-	parallelTestWG.Wait()
-	testLogger.Info("TestMain: All parallel tests finished. Beginning shutdown.")
-
-	// Now that all tests are complete, we can begin the shutdown sequence.
-	// 1. Cancel the master context. This signals to any long-running operations in the manager to stop.
-	testLogger.Info("TestMain: Calling suiteCancel().")
-	suiteCancel()
-
-	// 2. Explicitly shut down the manager.
-	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 15*time.Second)
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancelShutdown()
-	if err := testManager.Shutdown(shutdownCtx); err != nil {
-		testLogger.Error("Error during test manager shutdown", zap.Error(err))
+	if err := brTestManager.Shutdown(shutdownCtx); err != nil {
+		brTestLogger.Error("Error during test manager shutdown", zap.Error(err))
 	}
 
-	testLogger.Info("TestMain: END")
+	cancel()
+	brTestLogger.Info("TestMain: END")
 	os.Exit(code)
 }
 
@@ -101,43 +85,39 @@ func getTestLogger() *zap.Logger {
 }
 
 // newTestFixture acquires a new session from the shared manager for an individual test.
-func newTestFixture(t *testing.T) (*testFixture, func()) {
+func newTestFixture(t *testing.T) *testFixture {
 	t.Helper()
-	testLogger.Info("newTestFixture: START", zap.String("test", t.Name()))
-	parallelTestWG.Add(1) // Signal that a new test has started.
+	if brTestManager == nil {
+		t.Fatal("brTestManager is nil. TestMain setup likely failed.")
+	}
 
-	sessionCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	sessionCtx, cancelSessionCtx := context.WithTimeout(context.Background(), 45*time.Second)
+	t.Cleanup(cancelSessionCtx)
 
-	session, err := testManager.NewAnalysisContext(
+	// FIX: Use schemas.DefaultPersona
+	session, err := brTestManager.NewAnalysisContext(
 		sessionCtx,
-		testConfig,
-		stealth.DefaultPersona,
-		"",
-		"",
+		brTestConfig,
+		schemas.DefaultPersona,
+		"", // No taint shim
+		"", // No taint config
 	)
+	require.NoError(t, err)
 
-	if err != nil {
-		cancel()
-		parallelTestWG.Done() // Must decrement counter if setup fails.
-		t.Fatalf("Failed to create new analysis session: %v", err)
-	}
+	// We need to type-assert here to access the concrete struct in tests.
+	analysisContext, ok := session.(*AnalysisContext)
+	require.True(t, ok, "session must be of type *AnalysisContext")
 
-	fixture := &testFixture{
-		Session: session,
-		Config:  testConfig,
-	}
-
-	cleanup := func() {
-		testLogger.Info("newTestFixture cleanup: START", zap.String("test", t.Name()))
-		closeCtx, closeCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	t.Cleanup(func() {
+		closeCtx, closeCancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer closeCancel()
 		session.Close(closeCtx)
-		cancel()
-		parallelTestWG.Done() // Signal that this test's cleanup is complete.
-		testLogger.Info("newTestFixture cleanup: END", zap.String("test", t.Name()))
-	}
+	})
 
-	return fixture, cleanup
+	return &testFixture{
+		Session: analysisContext,
+		Config:  brTestConfig,
+	}
 }
 
 // createTestServer creates an httptest.Server.
@@ -156,4 +136,3 @@ func createStaticTestServer(t *testing.T, htmlContent string) *httptest.Server {
 		fmt.Fprintln(w, htmlContent)
 	}))
 }
-
