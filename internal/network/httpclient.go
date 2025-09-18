@@ -1,9 +1,10 @@
-// internal/network/httpclient.go
+// File: internal/network/httpclient.go
 package network
 
 import (
 	"context"
 	"crypto/tls"
+	// "io" // FIX: Removed unused import "io"
 	"net"
 	"net/http"
 	"net/url"
@@ -62,6 +63,12 @@ type ClientConfig struct {
 	Logger *zap.Logger
 }
 
+// Client is a wrapper around the standard http.Client.
+// By embedding the standard client, we get all its methods for free (like Do, Get, Post, etc.).
+type Client struct {
+	*http.Client
+}
+
 // NewDefaultClientConfig creates a configuration optimized for general-purpose scanning.
 func NewDefaultClientConfig() *ClientConfig {
 	// Configure the standardized dialer with HTTP-specific defaults
@@ -94,62 +101,48 @@ func NewHTTPTransport(config *ClientConfig) *http.Transport {
 		config = NewDefaultClientConfig()
 	}
 
-	// Ensure logger is never nil
 	if config.Logger == nil {
-		config.Logger = zap.NewNop		()
+		config.Logger = zap.NewNop()
 	}
 
-	// Ensure DialerConfig is initialized
 	if config.DialerConfig == nil {
 		config.DialerConfig = NewDefaultClientConfig().DialerConfig
 	}
 
-	// 1. Configure TLS (Security Layer)
 	tlsConfig := configureTLS(config)
 
-	// 2. Prepare the Dialer Configuration for the Transport
-	// We make a shallow copy of the DialerConfig to safely modify it for the transport's needs.
+	// Create a copy of the DialerConfig for the transport, ensuring we don't modify the original.
 	transportDialerConfig := *config.DialerConfig
-	// Crucial: Ensure TLSConfig is nil for DialTCPContext.
-	// The HTTP transport handles the TLS layer itself using the tlsConfig variable above.
+	// TLSConfig is handled separately by the http.Transport, not the TCP dialer here.
 	transportDialerConfig.TLSConfig = nil
 
-	// 3. Configure HTTP Transport (Application Layer)
 	transport := &http.Transport{
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			// Use the standardized, optimized TCP dialer function.
 			return DialTCPContext(ctx, network, addr, &transportDialerConfig)
 		},
-		TLSClientConfig:     tlsConfig,
-		TLSHandshakeTimeout: config.TLSHandshakeTimeout,
-
-		// Connection Pooling and Management
-		MaxIdleConns:        config.MaxIdleConns,
-		MaxIdleConnsPerHost: config.MaxIdleConnsPerHost,
-		MaxConnsPerHost:     config.MaxConnsPerHost,
-		IdleConnTimeout:     config.IdleConnTimeout,
-		DisableKeepAlives:   config.DisableKeepAlives,
-
+		TLSClientConfig:       tlsConfig,
+		TLSHandshakeTimeout:   config.TLSHandshakeTimeout,
+		MaxIdleConns:          config.MaxIdleConns,
+		MaxIdleConnsPerHost:   config.MaxIdleConnsPerHost,
+		MaxConnsPerHost:       config.MaxConnsPerHost,
+		IdleConnTimeout:       config.IdleConnTimeout,
+		DisableKeepAlives:     config.DisableKeepAlives,
 		ResponseHeaderTimeout: config.ResponseHeaderTimeout,
 		DisableCompression:    config.DisableCompression,
-
-		// Protocol selection
-		ForceAttemptHTTP2: config.ForceHTTP2,
+		ForceAttemptHTTP2:     config.ForceHTTP2,
 	}
 
-	// Configure Proxy if set
 	if config.ProxyURL != nil {
 		transport.Proxy = http.ProxyURL(config.ProxyURL)
 	}
 
-	// 4. Explicitly configure HTTP/2 if enabled
 	if config.ForceHTTP2 {
 		if err := http2.ConfigureTransport(transport); err != nil {
 			config.Logger.Warn("Failed to configure HTTP/2 transport, falling back to HTTP/1.1", zap.Error(err))
 		}
 	} else {
-		// If H2 is disabled, ensure ALPN only advertises HTTP/1.1 if NextProtos hasn't been customized.
-		if len(tlsConfig.NextProtos) == 0 {
+		// Ensure HTTP/1.1 is explicitly set if HTTP/2 is disabled, especially for ALPN negotiation.
+		if tlsConfig != nil && len(tlsConfig.NextProtos) == 0 {
 			tlsConfig.NextProtos = []string{"http/1.1"}
 		}
 	}
@@ -157,23 +150,25 @@ func NewHTTPTransport(config *ClientConfig) *http.Transport {
 	return transport
 }
 
-// NewClient creates an http.Client using the configured transport.
-func NewClient(config *ClientConfig) *http.Client {
+// NewClient creates our custom client wrapper using the configured transport.
+func NewClient(config *ClientConfig) *Client {
 	if config == nil {
 		config = NewDefaultClientConfig()
 	}
 
 	transport := NewHTTPTransport(config)
 
-	client := &http.Client{
+	standardClient := &http.Client{
 		Transport: transport,
 		Timeout:   config.RequestTimeout,
-		// Security: Do not follow redirects automatically. The scanner must analyze the redirect first.
+		// Default behavior for scanning: do not follow redirects automatically.
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
 	}
-	return client
+	return &Client{
+		Client: standardClient,
+	}
 }
 
 // configureTLS sets up the TLS configuration with strong defaults and optimizations.
@@ -183,28 +178,24 @@ func configureTLS(config *ClientConfig) *tls.Config {
 	if config.TLSConfig != nil {
 		tlsConfig = config.TLSConfig.Clone()
 	} else {
-		// Default strong TLS configuration
+		// Default secure configuration
 		tlsConfig = &tls.Config{
-			// Support only modern, strong protocols
 			MinVersion: tls.VersionTLS12,
-			// Prioritize forward-secret and authenticated encryption (AEAD) ciphers
+			// Prioritize strong, modern cipher suites.
 			CipherSuites: []uint16{
-				// TLS 1.3 (automatically preferred if supported by server)
 				tls.TLS_AES_256_GCM_SHA384,
 				tls.TLS_CHACHA20_POLY1305_SHA256,
-				// TLS 1.2
 				tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
 				tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
 				tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305,
 				tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305,
 			},
-			// Optimization: Cache TLS session tickets for resumption.
-			// Increased size for high-volume scanning workloads.
+			// Enable session resumption cache for performance.
 			ClientSessionCache: tls.NewLRUClientSessionCache(512),
 		}
 	}
 
-	// Apply the override for TLS verification.
+	// Apply the security override if requested.
 	tlsConfig.InsecureSkipVerify = config.IgnoreTLSErrors
 
 	return tlsConfig

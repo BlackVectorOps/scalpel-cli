@@ -1,4 +1,4 @@
-// internal/agent/executors_test.go
+// File: internal/agent/executors_test.go
 package agent
 
 import (
@@ -11,8 +11,12 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap/zaptest"
-	// schemas import removed.
+
+	// FIX: Import schemas to use the canonical interfaces.
+	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 )
+
+// NOTE: MockSessionContext definition removed. It is now centralized in internal/agent/mocks_test.go.
 
 // Test Setup Helper
 
@@ -22,17 +26,18 @@ func setupBrowserExecutor(t *testing.T, provideSession bool) (*BrowserExecutor, 
 	logger := zaptest.NewLogger(t)
 
 	var mockSession *MockSessionContext
+	// SessionProvider is defined as: type SessionProvider func() schemas.SessionContext
 	var provider SessionProvider
 
 	if provideSession {
+		// MockSessionContext is defined in mocks_test.go and implements schemas.SessionContext.
 		mockSession = new(MockSessionContext)
-		// Provider returns the initialized mock session (implements SessionContext).
-		provider = func() SessionContext {
+		// FIX: Provider function must return schemas.SessionContext.
+		provider = func() schemas.SessionContext {
 			return mockSession
 		}
 	} else {
-		// Provider returns nil.
-		provider = func() SessionContext {
+		provider = func() schemas.SessionContext {
 			return nil
 		}
 	}
@@ -87,7 +92,9 @@ func TestExecute_Success(t *testing.T) {
 
 	action := Action{Type: ActionNavigate, Value: "http://test.com"}
 
-	mockSession.On("Navigate", "http://test.com").Return(nil).Once()
+	// FIX: Update mock expectation. The implementation (executors.go) explicitly passes context.Background() to session.Navigate.
+	// We use mock.Anything to match this behavior reliably, as the test's 'ctx' won't match the implementation's context.Background().
+	mockSession.On("Navigate", mock.Anything, "http://test.com").Return(nil).Once()
 
 	result, err := executor.Execute(ctx, action)
 
@@ -107,6 +114,7 @@ func TestExecute_ActionFailure(t *testing.T) {
 	action := Action{Type: ActionClick, Selector: "#missing"}
 	expectedError := errors.New("element not found")
 
+	// Click does not take context in this interface definition.
 	mockSession.On("Click", "#missing").Return(expectedError).Once()
 
 	result, err := executor.Execute(ctx, action)
@@ -128,6 +136,7 @@ func TestHandler_InputText_Validation(t *testing.T) {
 	action := Action{Type: ActionInputText, Value: "test"}
 
 	// Execute the unexported handler directly (white box).
+	// We pass the mockSession which implements schemas.SessionContext.
 	err := executor.handleInputText(mockSession, action)
 
 	assert.Error(t, err)
@@ -157,6 +166,7 @@ func TestHandler_WaitForAsync_MetadataParsing(t *testing.T) {
 
 			mockSession.On("WaitForAsync", tt.expectedDuration).Return(nil).Once()
 
+			// We pass the mockSession which implements schemas.SessionContext.
 			err := executor.handleWaitForAsync(mockSession, action)
 
 			require.NoError(t, err)

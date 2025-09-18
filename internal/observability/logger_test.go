@@ -8,37 +8,27 @@ import (
 	"os"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore" // FIX: Import zapcore
 )
 
 // -- Test Helper Functions --
 
-// captureOutput is a helper function to capture stdout for the duration of a test.
-// It returns a function to be called with defer to restore the original stdout.
-func captureOutput(t *testing.T) (*bytes.Buffer, func()) {
-	t.Helper()
-	originalStdout := os.Stdout
-	r, w, err := os.Pipe()
-	require.NoError(t, err)
+// FIX: Removed the racy captureOutput helper function.
 
-	os.Stdout = w
-	var buf bytes.Buffer
-	go func() {
-		_, _ = buf.ReadFrom(r)
-	}()
-
-	// The cleanup function restores stdout and closes the pipe writer.
-	cleanup := func() {
-		w.Close()
-		os.Stdout = originalStdout
-	}
-	return &buf, cleanup
+// setupTestLogger initializes the global logger to write to a buffer for testing.
+func setupTestLogger(cfg config.LoggerConfig) *bytes.Buffer {
+	buf := new(bytes.Buffer)
+	// Wrap the buffer in a WriteSyncer.
+	writer := zapcore.AddSync(buf)
+	// Call the internal initializer, directing console output to the buffer.
+	initializeLogger(cfg, writer)
+	return buf
 }
 
 // resetGlobalLogger is critical for ensuring test isolation, as the logger
@@ -56,8 +46,7 @@ func TestInitializeLogger(t *testing.T) {
 
 	t.Run("should initialize console logger with colors", func(t *testing.T) {
 		resetGlobalLogger()
-		buf, cleanup := captureOutput(t)
-		defer cleanup()
+		// FIX: Removed captureOutput calls.
 
 		cfg := config.LoggerConfig{
 			Level:       "debug",
@@ -67,7 +56,10 @@ func TestInitializeLogger(t *testing.T) {
 				Info: "green",
 			},
 		}
-		InitializeLogger(cfg)
+
+		// FIX: Use the new helper to initialize and capture output.
+		buf := setupTestLogger(cfg)
+
 		logger := GetLogger()
 		logger.Info("This is a test message.")
 		Sync() // -- ensure the log is flushed --
@@ -81,15 +73,17 @@ func TestInitializeLogger(t *testing.T) {
 
 	t.Run("should initialize json logger", func(t *testing.T) {
 		resetGlobalLogger()
-		buf, cleanup := captureOutput(t)
-		defer cleanup()
+		// FIX: Removed captureOutput calls.
 
 		cfg := config.LoggerConfig{
 			Level:       "info",
 			Format:      "json",
 			ServiceName: "JSONTest",
 		}
-		InitializeLogger(cfg)
+
+		// FIX: Use the new helper.
+		buf := setupTestLogger(cfg)
+
 		logger := GetLogger()
 		logger.Warn("This is a JSON message.", zap.String("key", "value"))
 		Sync()
@@ -99,7 +93,8 @@ func TestInitializeLogger(t *testing.T) {
 		err := json.Unmarshal(buf.Bytes(), &logEntry)
 		require.NoError(t, err, "Log output should be valid JSON")
 
-		assert.Equal(t, "warn", logEntry["level"])
+		// FIX: The JSON encoder is configured to use CapitalLevelEncoder, so the level is "WARN", not "warn".
+		assert.Equal(t, "WARN", logEntry["level"])
 		assert.Equal(t, "JSONTest", logEntry["logger"])
 		assert.Equal(t, "This is a JSON message.", logEntry["msg"])
 		assert.Equal(t, "value", logEntry["key"])
@@ -118,6 +113,7 @@ func TestInitializeLogger(t *testing.T) {
 			LogFile: tmpFile.Name(),
 			MaxSize: 1, // 1 MB
 		}
+		// We can use InitializeLogger here as we are testing file output, not console output.
 		InitializeLogger(cfg)
 		logger := GetLogger()
 		logger.Error("This should go to the file.")
@@ -130,27 +126,34 @@ func TestInitializeLogger(t *testing.T) {
 
 	t.Run("should only initialize once", func(t *testing.T) {
 		resetGlobalLogger()
-		buf, cleanup := captureOutput(t)
-		defer cleanup()
+		// FIX: Removed captureOutput calls.
 
 		// -- first initialization --
-		cfg1 := config.LoggerConfig{Level: "info", ServiceName: "First"}
-		InitializeLogger(cfg1)
+		// Use console format for easier string comparison of the service name.
+		cfg1 := config.LoggerConfig{Level: "info", Format: "console", ServiceName: "First"}
+		// FIX: Use the helper for the first initialization.
+		buf1 := setupTestLogger(cfg1)
 		logger1 := GetLogger()
 
 		// -- second, should be ignored --
-		cfg2 := config.LoggerConfig{Level: "debug", ServiceName: "Second"}
-		InitializeLogger(cfg2)
+		cfg2 := config.LoggerConfig{Level: "debug", Format: "console", ServiceName: "Second"}
+		// FIX: Attempt initialization again. once.Do prevents it.
+		// The global logger remains configured with buf1. buf2 will be empty.
+		buf2 := setupTestLogger(cfg2)
 		logger2 := GetLogger()
 
 		// -- check that the logger is the same instance with the first config --
 		assert.Equal(t, logger1, logger2)
-		logger2.Info("test")
+		logger2.Info("test message") // This writes to buf1.
 		Sync()
 
 		// The service name should be "First", not "Second"
-		assert.True(t, strings.Contains(buf.String(), "First"))
-		assert.False(t, strings.Contains(buf.String(), "Second"))
+		output := buf1.String()
+		assert.True(t, strings.Contains(output, "First"))
+		assert.True(t, strings.Contains(output, "test message"))
+		assert.False(t, strings.Contains(output, "Second"))
+		// Ensure the second buffer remains empty.
+		assert.Empty(t, buf2.String())
 	})
 }
 

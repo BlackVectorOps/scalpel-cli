@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -16,17 +17,44 @@ import (
 
 	"go.uber.org/zap"
 	"golang.org/x/time/rate"
-
-	// The 'scope' package import has been removed as ScopeManager is now defined in this package.
-	"github.com/xkilldash9x/scalpel-cli/internal/network"
 )
+
+// HTTPClient defines the interface for making HTTP GET requests.
+// This allows for mocking the HTTP client in tests.
+type HTTPClient interface {
+	Get(ctx context.Context, url string) (body []byte, statusCode int, err error)
+}
+
+// httpClientAdapter adapts the standard *http.Client to the HTTPClient interface.
+// This is a classic adapter pattern to resolve the interface mismatch.
+type httpClientAdapter struct {
+	client *http.Client
+}
+
+func (a *httpClientAdapter) Get(ctx context.Context, url string) ([]byte, int, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	resp, err := a.client.Do(req)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, resp.StatusCode, err
+	}
+	return body, resp.StatusCode, nil
+}
 
 // PassiveRunner handles passive discovery techniques. These are designed to be less noisy
 // and yield high value intelligence without directly engaging the target in an aggressive manner.
 type PassiveRunner struct {
 	config      Config
-	httpClient  network.HTTPClient
-	// Use the ScopeManager interface now defined locally within the discovery package.
+	httpClient  HTTPClient
 	scope       ScopeManager
 	logger      *zap.Logger
 	// resilience: rate limiter for external services. gotta be a good net citizen.
@@ -36,8 +64,8 @@ type PassiveRunner struct {
 }
 
 // NewPassiveRunner creates a new PassiveRunner.
-// The signature is updated to use the local ScopeManager interface.
-func NewPassiveRunner(cfg Config, client network.HTTPClient, scope ScopeManager, logger *zap.Logger) *PassiveRunner {
+// The signature is updated to use the local ScopeManager and HTTPClient interfaces.
+func NewPassiveRunner(cfg Config, client HTTPClient, scope ScopeManager, logger *zap.Logger) *PassiveRunner {
 	// Ensure defaults are applied if this runner is initialized independently.
 	cfg.SetDefaults()
 
@@ -341,12 +369,4 @@ func (p *PassiveRunner) parseSitemap(ctx context.Context, sitemapURL string, res
 	}
 
 	p.logger.Debug("Could not parse sitemap format (not index or urlset)", zap.String("url", sitemapURL))
-}
-
-// min is a helper function to find the minimum of two integers.
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }

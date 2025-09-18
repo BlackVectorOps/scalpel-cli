@@ -13,8 +13,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
-	// Import the cmd package to access the injected version variable
-	"github.com/xkilldash9x/scalpel-cli/cmd"
+	// The import "github.com/xkilldash9x/scalpel-cli/cmd" has been removed to break the import cycle.
 	"github.com/xkilldash9x/scalpel-cli/internal/reporting/sarif"
 )
 
@@ -42,9 +41,10 @@ type SARIFReporter struct {
 }
 
 // NewSARIFReporter creates a new reporter that writes SARIF output.
-func NewSARIFReporter(writer io.WriteCloser, logger *zap.Logger) *SARIFReporter {
+// The signature is updated to accept the toolVersion via dependency injection.
+func NewSARIFReporter(writer io.WriteCloser, logger *zap.Logger, toolVersion string) *SARIFReporter {
 	// Initialize the SARIF log structure with tool information.
-	// The tool version is sourced dynamically from the cmd package.
+	// The tool version is now passed in as an argument.
 	log := &sarif.Log{
 		Version: SARIFVersion,
 		Schema:  SARIFSchema,
@@ -53,7 +53,7 @@ func NewSARIFReporter(writer io.WriteCloser, logger *zap.Logger) *SARIFReporter 
 				Tool: &sarif.Tool{
 					Driver: &sarif.ToolComponent{
 						Name:           ToolName,
-						Version:        pString(cmd.Version),
+						Version:        pString(toolVersion),
 						InformationURI: pString(ToolInfoURI),
 						// Initialize empty slices (not nil) for proper JSON marshalling
 						Rules: []*sarif.ReportingDescriptor{},
@@ -163,9 +163,9 @@ func (r *SARIFReporter) Close() error {
 // NOTE: Must be called while holding the mutex.
 func (r *SARIFReporter) ensureRule(finding schemas.Finding) string {
 	// Use the structured vulnerability ID if available, otherwise fall back to its name.
-	baseID := finding.Vulnerability.ID
+	baseID := finding.Vulnerability.Name
 	if baseID == "" {
-		baseID = finding.Vulnerability.Name
+		baseID = "Unnamed-Vulnerability"
 	}
 
 	// 1. Convert to uppercase.

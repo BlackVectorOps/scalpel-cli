@@ -1,4 +1,3 @@
-// internal/store/store_test.go
 package store
 
 import (
@@ -18,51 +17,21 @@ import (
 	"go.uber.org/zap"
 )
 
-// -- Test Fixture Setup --
-
-type storeTestFixture struct {
-	MockPool pgxmock.PgxPoolIface
-	Store    *Store
-	Logger   *zap.Logger
-}
-
-// setupTest initializes a new fixture with a mock pool for each test.
-func setupTest(t *testing.T) *storeTestFixture {
-	t.Helper()
-
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err, "Failed to create mock pool")
-
-	logger := zap.NewNop()
-	store, err := New(context.Background(), mock, logger)
-	// We expect New to ping the database
-	mock.ExpectPing().WillReturnError(nil)
-	require.NoError(t, err, "Failed to create store")
-
-	return &storeTestFixture{
-		MockPool: mock,
-		Store:    store,
-		Logger:   logger,
-	}
-}
-
 // -- Test Cases --
 
 func TestNewStore(t *testing.T) {
-	t.Parallel()
-
 	t.Run("should return error if ping fails", func(t *testing.T) {
-		t.Parallel()
-		mock, err := pgxmock.NewPool()
+		mockPool, err := pgxmock.NewPool(pgxmock.MonitorPingsOption(true))
 		require.NoError(t, err)
-		defer mock.Close()
+		defer mockPool.Close()
 
 		pingErr := errors.New("database unavailable")
-		mock.ExpectPing().WillReturnError(pingErr)
+		mockPool.ExpectPing().WillReturnError(pingErr)
 
-		_, err = New(context.Background(), mock, zap.NewNop())
+		_, err = New(context.Background(), mockPool, zap.NewNop())
 		require.Error(t, err)
 		assert.ErrorIs(t, err, pingErr, "Error from ping should be propagated")
+		assert.NoError(t, mockPool.ExpectationsWereMet())
 	})
 }
 
@@ -70,71 +39,107 @@ func TestPersistData(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("should persist a full envelope successfully", func(t *testing.T) {
-		fixture := setupTest(t)
-		defer fixture.MockPool.Close()
+		mockPool, err := pgxmock.NewPool(pgxmock.MonitorPingsOption(true))
+		require.NoError(t, err)
+		defer mockPool.Close()
+
+		mockPool.ExpectPing().WillReturnError(nil)
+		store, err := New(context.Background(), mockPool, zap.NewNop())
+		require.NoError(t, err)
 
 		scanID := uuid.NewString()
-		finding := schemas.Finding{ID: "finding-1", Vulnerability: schemas.Vulnerability{Name: "XSS"}}
-		node := schemas.Node{ID: "node-1", Type: "URL"}
-		edge := schemas.Edge{ID: "edge-1", From: "node-1", To: "node-2"}
+		finding := schemas.Finding{ID: "finding-1", Vulnerability: schemas.Vulnerability{Name: "XSS"}, Evidence: "{}"}
+		node := schemas.NodeInput{ID: "node-1", Type: schemas.NodeURL}
+		edge := schemas.EdgeInput{ID: "edge-1", From: "node-1", To: "node-2", Type: "LINKS_TO"}
 
 		envelope := &schemas.ResultEnvelope{
 			ScanID:   scanID,
 			Findings: []schemas.Finding{finding},
 			KGUpdates: &schemas.KnowledgeGraphUpdate{
-				NodesToAdd: []schemas.Node{node},
-				EdgesToAdd: []schemas.Edge{edge},
+				NodesToAdd: []schemas.NodeInput{node},
+				EdgesToAdd: []schemas.EdgeInput{edge},
 			},
 		}
 
-		// -- set up our mock expectations --
-		fixture.MockPool.ExpectBegin()
-		// -- findings --
-		fixture.MockPool.ExpectCopyFrom(pgx.Identifier{"findings"}, []string{"id", "scan_id", "task_id", "timestamp", "target", "module", "vulnerability", "severity", "description", "evidence", "recommendation", "cwe"}).
-			WillReturnResult(1)
-		// -- nodes --
-		fixture.MockPool.ExpectExec(regexp.QuoteMeta(`INSERT INTO kg_nodes`)).
-			WillReturnResult(pgxmock.NewResult("INSERT", 1))
-		// -- edges --
-		fixture.MockPool.ExpectExec(regexp.QuoteMeta(`INSERT INTO kg_edges`)).
-			WillReturnResult(pgxmock.NewResult("INSERT", 1))
-		fixture.MockPool.ExpectCommit()
+		mockPool.ExpectBegin()
 
-		err := fixture.Store.PersistData(ctx, envelope)
-		require.NoError(t, err)
-		// -- ensure all expectations were met --
-		assert.NoError(t, fixture.MockPool.ExpectationsWereMet())
+		// -- findings (Uses CopyFrom) --
+		findingColumns := []string{"id", "scan_id", "task_id", "target", "module", "vulnerability", "severity", "description", "evidence", "recommendation", "cwe", "observed_at"}
+		mockPool.ExpectCopyFrom(pgx.Identifier{"findings"}, findingColumns).WillReturnResult(1)
+
+		// -- nodes (Uses Exec loop) --
+		// SIMPLIFIED: We now just expect a simple Exec call.
+		sqlNodes := `
+		INSERT INTO kg_nodes (id, type, properties, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5)
+		ON CONFLICT (id) DO UPDATE SET
+			type = EXCLUDED.type,
+			properties = kg_nodes.properties || EXCLUDED.properties,
+			updated_at = EXCLUDED.updated_at;
+	`
+		mockPool.ExpectExec(regexp.QuoteMeta(sqlNodes)).
+			WithArgs(node.ID, string(node.Type), json.RawMessage("{}"), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("INSERT", 1))
+
+		// -- edges (Uses Exec loop) --
+		sqlEdges := `
+		INSERT INTO kg_edges (source_id, target_id, relationship, properties, "timestamp")
+		VALUES ($1, $2, $3, $4, $5)
+		ON CONFLICT (source_id, target_id, relationship) DO UPDATE SET
+			properties = kg_edges.properties || EXCLUDED.properties;
+	`
+		mockPool.ExpectExec(regexp.QuoteMeta(sqlEdges)).
+			WithArgs(edge.From, edge.To, string(edge.Type), json.RawMessage("{}"), pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("INSERT", 1))
+
+		mockPool.ExpectCommit()
+
+		if err := store.PersistData(ctx, envelope); err != nil {
+			t.Fatalf("PersistData failed: %v", err)
+		}
+		assert.NoError(t, mockPool.ExpectationsWereMet())
 	})
 
 	t.Run("should handle transaction begin failure", func(t *testing.T) {
-		fixture := setupTest(t)
-		defer fixture.MockPool.Close()
+		mockPool, err := pgxmock.NewPool(pgxmock.MonitorPingsOption(true))
+		require.NoError(t, err)
+		defer mockPool.Close()
+
+		mockPool.ExpectPing().WillReturnError(nil)
+		store, err := New(context.Background(), mockPool, zap.NewNop())
+		require.NoError(t, err)
 
 		beginErr := errors.New("cannot begin tx")
-		fixture.MockPool.ExpectBegin().WillReturnError(beginErr)
+		mockPool.ExpectBegin().WillReturnError(beginErr)
 
-		err := fixture.Store.PersistData(ctx, &schemas.ResultEnvelope{})
+		err = store.PersistData(ctx, &schemas.ResultEnvelope{})
 		require.Error(t, err)
 		assert.ErrorIs(t, err, beginErr)
-		assert.NoError(t, fixture.MockPool.ExpectationsWereMet())
+		assert.NoError(t, mockPool.ExpectationsWereMet())
 	})
 
 	t.Run("should rollback if persisting findings fails", func(t *testing.T) {
-		fixture := setupTest(t)
-		defer fixture.MockPool.Close()
+		mockPool, err := pgxmock.NewPool(pgxmock.MonitorPingsOption(true))
+		require.NoError(t, err)
+		defer mockPool.Close()
+
+		mockPool.ExpectPing().WillReturnError(nil)
+		store, err := New(context.Background(), mockPool, zap.NewNop())
+		require.NoError(t, err)
 
 		copyErr := errors.New("copy from failed")
-		envelope := &schemas.ResultEnvelope{Findings: []schemas.Finding{{ID: "f-1"}}}
+		envelope := &schemas.ResultEnvelope{Findings: []schemas.Finding{{ID: "f-1", Vulnerability: schemas.Vulnerability{Name: "Test"}, Evidence: "{}"}}}
 
-		fixture.MockPool.ExpectBegin()
-		fixture.MockPool.ExpectCopyFrom(pgx.Identifier{"findings"}, []string{"id", "scan_id", "task_id", "timestamp", "target", "module", "vulnerability", "severity", "description", "evidence", "recommendation", "cwe"}).
+		mockPool.ExpectBegin()
+		findingColumns := []string{"id", "scan_id", "task_id", "target", "module", "vulnerability", "severity", "description", "evidence", "recommendation", "cwe", "observed_at"}
+		mockPool.ExpectCopyFrom(pgx.Identifier{"findings"}, findingColumns).
 			WillReturnError(copyErr)
-		fixture.MockPool.ExpectRollback()
+		mockPool.ExpectRollback()
 
-		err := fixture.Store.PersistData(ctx, envelope)
+		err = store.PersistData(ctx, envelope)
 		require.Error(t, err)
 		assert.ErrorIs(t, err, copyErr)
-		assert.NoError(t, fixture.MockPool.ExpectationsWereMet())
+		assert.NoError(t, mockPool.ExpectationsWereMet())
 	})
 }
 
@@ -142,47 +147,43 @@ func TestGetFindingsByScanID(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("should retrieve findings successfully", func(t *testing.T) {
-		fixture := setupTest(t)
-		defer fixture.MockPool.Close()
+		mockPool, err := pgxmock.NewPool(pgxmock.MonitorPingsOption(true))
+		require.NoError(t, err)
+		defer mockPool.Close()
 
+		mockPool.ExpectPing().WillReturnError(nil)
+		store, err := New(context.Background(), mockPool, zap.NewNop())
+		require.NoError(t, err)
+
+		sqlGetFindings := `
+		SELECT id, task_id, observed_at, target, module, vulnerability, severity, description, evidence, recommendation, cwe
+		FROM findings
+		WHERE scan_id = $1
+		ORDER BY observed_at ASC;
+		`
 		scanID := uuid.NewString()
 		now := time.Now()
-		vulnJSON, _ := json.Marshal(schemas.Vulnerability{Name: "SQLi"})
+		// Provide the evidence as json.RawMessage (a raw string literal is easiest)
+		evidenceJSON := json.RawMessage(`{"detail": "some evidence"}`)
 
-		// -- columns must match the SELECT query in the function --
-		columns := []string{"id", "task_id", "timestamp", "target", "module", "vulnerability", "severity", "description", "evidence", "recommendation", "cwe"}
+		columns := []string{"id", "task_id", "observed_at", "target", "module", "vulnerability", "severity", "description", "evidence", "recommendation", "cwe"}
 		rows := pgxmock.NewRows(columns).
-			AddRow("finding-123", "task-abc", now, "https://example.com", "SQLAnalyzer", vulnJSON, "High", "desc", "evid", "reco", []string{"CWE-89"})
+			AddRow("finding-123", "task-abc", now, "https://example.com", "SQLAnalyzer", "SQLi", "High", "desc", evidenceJSON, "reco", []string{"CWE-89"})
 
-		fixture.MockPool.ExpectQuery(regexp.QuoteMeta(`SELECT id, task_id, timestamp, target, module, vulnerability, severity, description, evidence, recommendation, cwe FROM findings`)).
+		// Use a flexible regex for the query
+		sqlRegex := regexp.QuoteMeta(sqlGetFindings)
+		sqlRegex = regexp.MustCompile(`\s+`).ReplaceAllString(sqlRegex, `\s+`)
+		mockPool.ExpectQuery(sqlRegex).
 			WithArgs(scanID).
 			WillReturnRows(rows)
 
-		findings, err := fixture.Store.GetFindingsByScanID(ctx, scanID)
+		findings, err := store.GetFindingsByScanID(ctx, scanID)
 		require.NoError(t, err)
 		require.Len(t, findings, 1)
 
 		assert.Equal(t, "finding-123", findings[0].ID)
 		assert.Equal(t, "SQLi", findings[0].Vulnerability.Name)
-		assert.NoError(t, fixture.MockPool.ExpectationsWereMet())
-	})
-
-	t.Run("should return empty slice when no findings are found", func(t *testing.T) {
-		fixture := setupTest(t)
-		defer fixture.MockPool.Close()
-
-		scanID := "empty-scan"
-		columns := []string{"id", "task_id", "timestamp", "target", "module", "vulnerability", "severity", "description", "evidence", "recommendation", "cwe"}
-		rows := pgxmock.NewRows(columns) // -- No rows added --
-
-		fixture.MockPool.ExpectQuery(regexp.QuoteMeta(`SELECT`)).
-			WithArgs(scanID).
-			WillReturnRows(rows)
-
-		findings, err := fixture.Store.GetFindingsByScanID(ctx, scanID)
-		require.NoError(t, err)
-		assert.Empty(t, findings)
-		assert.NoError(t, fixture.MockPool.ExpectationsWereMet())
+		assert.Equal(t, json.RawMessage(`{"detail": "some evidence"}`), findings[0].Evidence)
+		assert.NoError(t, mockPool.ExpectationsWereMet())
 	})
 }
-

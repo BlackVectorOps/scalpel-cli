@@ -13,7 +13,6 @@ import (
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
-	"github.com/xkilldash9x/scalpel-cli/internal/browser/stealth"
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
 	"github.com/xkilldash9x/scalpel-cli/internal/knowledgegraph"
 	"github.com/xkilldash9x/scalpel-cli/internal/llmclient"
@@ -111,22 +110,20 @@ func (a *Agent) RunMission(ctx context.Context) (*MissionResult, error) {
 	defer cancelMission()
 
 	// 1. Create a dedicated browser session.
-	// FIX: Changed from InitializeSession to NewAnalysisContext and provided the required arguments.
-	session, err := a.globalCtx.BrowserManager.NewAnalysisContext(missionCtx, a.globalCtx.Config, stealth.DefaultPersona, "", "")
+	// FIX: The call to NewAnalysisContext now uses the updated BrowserManager interface.
+	// It passes the config as an interface{} and the Persona from the schemas package.
+	session, err := a.globalCtx.BrowserManager.NewAnalysisContext(missionCtx, a.globalCtx.Config, schemas.DefaultPersona, "", "")
 	if err != nil {
 		return nil, fmt.Errorf("failed to get browser session for agent: %w", err)
 	}
 	defer session.Close(context.Background())
 
-	// Verifies that the browser session implements the expected interface for our executors.
-	sessionCtx, ok := interface{}(session).(SessionContext)
-	if !ok {
-		// If this fails, the browser package needs to be updated to implement the agent.SessionContext interface.
-		return nil, fmt.Errorf("browser session (type %T) does not implement agent.SessionContext interface", session)
-	}
+	// FIX: The session variable is now of type schemas.SessionContext, which matches what the executor expects.
+	// The type assertion is no longer needed.
+	sessionCtx := session
 
 	// Inject the live session provider into the executor registry.
-	a.executors.UpdateSessionProvider(func() SessionContext {
+	a.executors.UpdateSessionProvider(func() schemas.SessionContext {
 		return sessionCtx
 	})
 

@@ -1,41 +1,40 @@
+// File: internal/analysis/active/protopollution/analyze/analyzer.go
 package protopollution
 
 import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"html/template"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
-	// Assuming these paths based on the provided context
-	// "github.com/xkilldash9x/scalpel-cli/internal/analysis/core" // core seems unused in the analyzer implementation
+	// "github.com/xkilldash9x/scalpel-cli/internal/analysis/core" // core seems unused
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
-	"github.com/xkilldash9x/scalpel-cli/internal/browser"
+	// FIX: Removed internal/browser import as we now rely on schemas interfaces.
 	"go.uber.org/zap"
 )
 
 const (
-	jsCallbackName    = "__scalpel_protopollution_proof"
-	defaultWaitDuration = 8 * time.Second // Define the default duration
+	jsCallbackName      = "__scalpel_protopollution_proof"
+	defaultWaitDuration = 8 * time.Second
 )
 
 // Config holds the configuration for the prototype pollution analyzer.
 type Config struct {
-	// WaitDuration is the time to wait for asynchronous pollution events after initial page load.
 	WaitDuration time.Duration
 }
 
 // Analyzer checks for client side prototype pollution vulnerabilities using an advanced shim.
 type Analyzer struct {
 	logger      *zap.Logger
-	browser     browser.SessionManager
+	// FIX: Use the canonical BrowserManager interface from schemas.
+	browser     schemas.BrowserManager
 	findingChan chan schemas.Finding
 	canary      string
 	taskID      string
-	config      Config // Store configuration
+	config      Config
 }
 
 // PollutionProofEvent is the data sent from the JS shim when pollution is detected.
@@ -45,14 +44,13 @@ type PollutionProofEvent struct {
 }
 
 // Creates a new prototype pollution analyzer.
-// If config is nil, default values are used.
-func NewAnalyzer(logger *zap.Logger, browserManager browser.SessionManager, config *Config) *Analyzer {
+// FIX: Updated signature to accept schemas.BrowserManager.
+func NewAnalyzer(logger *zap.Logger, browserManager schemas.BrowserManager, config *Config) *Analyzer {
 	// Initialize configuration with defaults.
 	cfg := Config{
 		WaitDuration: defaultWaitDuration,
 	}
 	if config != nil {
-		// Allow overriding defaults only if values are positive/valid
 		if config.WaitDuration > 0 {
 			cfg.WaitDuration = config.WaitDuration
 		}
@@ -61,25 +59,28 @@ func NewAnalyzer(logger *zap.Logger, browserManager browser.SessionManager, conf
 	return &Analyzer{
 		logger:      logger.Named("protopollution_analyzer"),
 		browser:     browserManager,
-		findingChan: make(chan schemas.Finding, 5), // Buffer for multiple potential findings
+		findingChan: make(chan schemas.Finding, 5),
 		canary:      uuid.New().String()[:8],
-		config:      cfg, // Assign configuration
+		config:      cfg,
 	}
 }
 
 // Performs the prototype pollution check against a given URL.
 func (a *Analyzer) Analyze(ctx context.Context, taskID, targetURL string) ([]schemas.Finding, error) {
 	a.taskID = taskID
-	// Note: The browser interface signatures are inferred from the implementation's usage.
-	session, err := a.browser.InitializeSession(ctx)
+
+	// FIX: Use NewAnalysisContext instead of InitializeSession to align with schemas.BrowserManager contract.
+	// We provide nil config, an empty persona, and empty taint configs as this analyzer doesn't require them.
+	session, err := a.browser.NewAnalysisContext(ctx, nil, schemas.Persona{}, "", "")
 	if err != nil {
-		return nil, fmt.Errorf("could not initialize browser session: %w", err)
+		return nil, fmt.Errorf("could not initialize browser analysis context: %w", err)
 	}
-	// Ensure the context passed to Close matches the interface signature used by the implementation.
+	// Ensure the context passed to Close matches the schemas.SessionContext signature.
 	defer session.Close(ctx)
 
 	// Expose the Go function that the JS shim will call upon success.
-	if err := session.ExposeFunction(jsCallbackName, a.handlePollutionProof); err != nil {
+	// FIX: Pass ctx to align with schemas.SessionContext.
+	if err := session.ExposeFunction(ctx, jsCallbackName, a.handlePollutionProof); err != nil {
 		return nil, fmt.Errorf("failed to expose proof function: %w", err)
 	}
 
@@ -88,25 +89,25 @@ func (a *Analyzer) Analyze(ctx context.Context, taskID, targetURL string) ([]sch
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate pp shim: %w", err)
 	}
-	if err := session.InjectScriptPersistently(shimScript); err != nil {
+	// FIX: Pass ctx to align with schemas.SessionContext.
+	if err := session.InjectScriptPersistently(ctx, shimScript); err != nil {
 		return nil, fmt.Errorf("failed to inject pp shim: %w", err)
 	}
 
 	// Navigate to the target and wait for async events.
 	a.logger.Info("Navigating and monitoring for prototype pollution", zap.String("target", targetURL))
-	if err := session.Navigate(targetURL); err != nil {
-		// This could be a navigation to a page that triggers pollution via URL params.
+	// FIX: Pass ctx to align with schemas.SessionContext.
+	if err := session.Navigate(ctx, targetURL); err != nil {
 		// A non fatal error is fine here.
 		a.logger.Debug("Navigation completed (or failed gracefully)", zap.String("target", targetURL), zap.Error(err))
 	}
 
-	// Wait for asynchronous events (like fetch/XHR) to complete.
-	// CRITICAL CHANGE: Use configured duration instead of hardcoded value.
+	// Wait for asynchronous events using the configured duration.
 	select {
 	case <-time.After(a.config.WaitDuration):
 		a.logger.Info("Monitoring period finished.", zap.String("target", targetURL))
 	case <-ctx.Done():
-		// IMPROVED ROBUSTNESS: If cancelled, record the error but continue to collect findings received so far.
+		// If cancelled, record the error but continue to collect findings received so far.
 		a.logger.Info("Analysis context cancelled during monitoring.", zap.Error(ctx.Err()))
 		err = ctx.Err()
 	}
@@ -115,7 +116,7 @@ func (a *Analyzer) Analyze(ctx context.Context, taskID, targetURL string) ([]sch
 	close(a.findingChan)
 	var findings []schemas.Finding
 	for f := range a.findingChan {
-		f.Target = targetURL
+		// Note: If Target URL needs to be recorded, it should be added to the Finding schema.
 		findings = append(findings, f)
 	}
 
@@ -130,24 +131,34 @@ func (a *Analyzer) handlePollutionProof(event PollutionProofEvent) {
 		return
 	}
 
-	vulnerability := "Client-Side Prototype Pollution"
-	cwe := "CWE-1321" // Prototype Pollution
+	vulnerabilityName := "Client-Side Prototype Pollution"
+	// FIX: CWE is defined as []string in schemas.Finding.
+	cwe := []string{"CWE-1321"} // Prototype Pollution
 	severity := schemas.SeverityHigh
 
 	// Make the finding more specific based on the reported vector.
 	if strings.Contains(event.Source, "DOM_Clobbering") {
-		vulnerability = "DOM Clobbering"
-		cwe = "CWE-1339" // DOM Clobbering
+		vulnerabilityName = "DOM Clobbering"
+		cwe = []string{"CWE-1339"} // DOM Clobbering
 		severity = schemas.SeverityMedium
 	}
 
-	a.logger.Warn("Potential vulnerability detected!", zap.String("type", vulnerability), zap.String("vector", event.Source))
+	a.logger.Warn("Potential vulnerability detected!", zap.String("type", vulnerabilityName), zap.String("vector", event.Source))
 
 	desc := fmt.Sprintf(
 		"A client-side vulnerability related to object prototypes was detected via the '%s' vector. This can allow an attacker to add or modify properties of all objects, potentially leading to Cross-Site Scripting (XSS), Denial of Service (DoS), or application logic bypasses.",
 		event.Source,
 	)
-	evidence, _ := json.Marshal(event)
+
+	// FIX: Evidence is defined as string in schemas.Finding. Marshal the event struct.
+	evidenceBytes, _ := json.Marshal(event)
+	evidence := string(evidenceBytes)
+
+	// FIX: Use schemas.Vulnerability struct instead of assigning a string directly.
+	vulnerability := schemas.Vulnerability{
+		Name:        vulnerabilityName,
+		Description: desc,
+	}
 
 	finding := schemas.Finding{
 		ID:             uuid.New().String(),
@@ -162,7 +173,7 @@ func (a *Analyzer) handlePollutionProof(event PollutionProofEvent) {
 		CWE:            cwe,
 	}
 
-	// ROBUSTNESS: Use a non blocking send to prevent deadlocks if the channel is full or closed.
+	// ROBUSTNESS: Use a non blocking send.
 	select {
 	case a.findingChan <- finding:
 	default:

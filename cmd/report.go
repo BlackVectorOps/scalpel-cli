@@ -33,7 +33,8 @@ func newReportCmd() *cobra.Command {
 			cfg := config.Get()
 
 			// Initialize the database connection pool
-			pool, err := pgxpool.New(ctx, cfg.Postgres.URL)
+			// FIX: The 'Postgres' config field was renamed to 'Database'.
+			pool, err := pgxpool.New(ctx, cfg.Database.URL)
 			if err != nil {
 				return fmt.Errorf("failed to connect to database: %w", err)
 			}

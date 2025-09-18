@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"go.uber.org/zap"
 )
 
@@ -18,6 +19,15 @@ const (
 	// TypeAgent analyzers are for autonomous agent missions.
 	TypeAgent AnalyzerType = "AGENT"
 )
+
+// Analyzer defines the standard interface for all analysis modules.
+// This is the contract that the MonolithicWorker uses to manage and dispatch tasks to different adapters.
+type Analyzer interface {
+	Name() string
+	Description() string
+	Type() AnalyzerType
+	Analyze(ctx context.Context, analysisCtx *AnalysisContext) error
+}
 
 // BaseAnalyzer provides foundational fields and methods for all analysis modules.
 // It is intended to be embedded in specific analyzer implementations.
@@ -54,4 +64,3 @@ func (b *BaseAnalyzer) Description() string {
 func (b *BaseAnalyzer) Type() AnalyzerType {
 	return b.analyzerType
 }
-

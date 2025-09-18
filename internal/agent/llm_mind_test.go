@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sync" // FIX: Added sync import
 	"testing"
 	"time"
 
@@ -83,7 +84,7 @@ func TestLLMMind_SetMission(t *testing.T) {
 	// A signal should have been sent to kick off the decision loop.
 	select {
 	case <-mind.stateReadyChan:
-	// This is what we wanted.
+		// This is what we wanted.
 	default:
 		t.Fatal("SetMission did not signal the stateReadyChan as expected")
 	}
@@ -169,7 +170,11 @@ func TestOODALoop_HappyPath(t *testing.T) {
 	mockKG.On("AddNode", mock.Anything, mock.MatchedBy(func(node schemas.Node) bool {
 		// Check that we're adding an Action node with the right status.
 		props := make(map[string]interface{})
-		json.Unmarshal(node.Properties, &props)
+		// Handle potential nil Properties if initialization logic changes
+		if node.Properties != nil {
+			json.Unmarshal(node.Properties, &props)
+		}
+
 		if node.Type == schemas.NodeAction && props["status"] == string(schemas.StatusNew) {
 			action1ID = node.ID // This is our chance to grab the ID.
 			return true
@@ -200,7 +205,11 @@ func TestOODALoop_HappyPath(t *testing.T) {
 	select {
 	case msg := <-actionChan:
 		bus.Acknowledge(msg)
-		postedAction1 = msg.Payload.(Action)
+		var ok bool
+		postedAction1, ok = msg.Payload.(Action)
+		if !ok {
+			t.Fatalf("Received non-Action payload on action channel: %T", msg.Payload)
+		}
 	case <-ctx.Done():
 		t.Fatal("Timeout waiting for Cycle 1 Action on the bus")
 	}
@@ -222,7 +231,9 @@ func TestOODALoop_HappyPath(t *testing.T) {
 	// 4d. ...and then updated with the result.
 	mockKG.On("AddNode", mock.Anything, mock.MatchedBy(func(node schemas.Node) bool {
 		props := make(map[string]interface{})
-		json.Unmarshal(node.Properties, &props)
+		if node.Properties != nil {
+			json.Unmarshal(node.Properties, &props)
+		}
 		return node.ID == action1ID && props["status"] == string(schemas.StatusAnalyzed)
 	})).Return(nil).Once()
 
@@ -230,6 +241,7 @@ func TestOODALoop_HappyPath(t *testing.T) {
 	mockKG.On("GetNode", mock.Anything, missionID).Return(missionNode, nil).Once()
 	mockKG.On("GetNeighbors", mock.Anything, missionID).Return([]schemas.Node{action1Node}, nil).Once()
 	mockKG.On("GetEdges", mock.Anything, missionID).Return([]schemas.Edge{}, nil).Once()
+	// Ensure BFS traversal expectations for the action node are also set.
 	mockKG.On("GetNeighbors", mock.Anything, action1ID).Return([]schemas.Node{}, nil).Once()
 	mockKG.On("GetEdges", mock.Anything, action1ID).Return([]schemas.Edge{}, nil).Once()
 
@@ -244,6 +256,7 @@ func TestOODALoop_HappyPath(t *testing.T) {
 
 	// Trigger the second cycle by posting an observation, just like an executor tool would.
 	observation := Observation{
+		ID:             "obs-1", // Provide an ID for the observation
 		SourceActionID: action1ID,
 		Data:           "success data",
 		Result:         ExecutionResult{Status: "success"},
@@ -255,7 +268,10 @@ func TestOODALoop_HappyPath(t *testing.T) {
 	select {
 	case msg := <-actionChan:
 		bus.Acknowledge(msg)
-		postedAction2 := msg.Payload.(Action)
+		postedAction2, ok := msg.Payload.(Action)
+		if !ok {
+			t.Fatalf("Received non-Action payload on action channel in cycle 2: %T", msg.Payload)
+		}
 		assert.Equal(t, ActionConclude, postedAction2.Type)
 	case <-ctx.Done():
 		t.Fatal("Timeout waiting for Cycle 2 Action (Conclude) on the bus")
@@ -326,11 +342,17 @@ func TestOODALoop_ObservationKGFailure(t *testing.T) {
 // Verifies the Mind handles LLM API failures gracefully.
 func TestOODALoop_DecisionLLMFailure(t *testing.T) {
 	mind, mockLLM, mockKG, _ := setupLLMMind(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	// Use a sufficient timeout.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	missionID := "mission-llm-fail"
 	missionNode := schemas.Node{ID: missionID, Type: schemas.NodeMission}
+
+	// FIX: Use a WaitGroup to ensure the asynchronous OODA cycle has executed
+	// before we assert mock expectations. This prevents the race condition.
+	cycleCompleteWg := sync.WaitGroup{}
+	cycleCompleteWg.Add(1)
 
 	// -- Mock Setup in strict execution order --
 	// 1. Mock the SetMission calls.
@@ -345,24 +367,34 @@ func TestOODALoop_DecisionLLMFailure(t *testing.T) {
 
 	// D(ecide) is the failure point we are testing.
 	expectedError := errors.New("LLM API timeout")
-	mockLLM.On("Generate", mock.Anything, mock.Anything).Return("", expectedError).Once()
+	// FIX: Use .Run() to signal the WaitGroup when this specific mock is hit.
+	mockLLM.On("Generate", mock.Anything, mock.Anything).Return("", expectedError).Once().Run(func(args mock.Arguments) {
+		cycleCompleteWg.Done()
+	})
 
 	// Start the mind and trigger the cycle.
 	go mind.Start(ctx)
 	mind.SetMission(Mission{ID: missionID})
 
-	// -- Corrected Assertion --
-	// 1. First, wait for the mind to reach the expected state. This confirms
-	// the async operation has finished processing the error.
+	// -- Wait for the cycle to complete --
+	// Use the waitTimeout helper (defined in cognitive_bus_test.go) to wait safely.
+	// We rely on the waitTimeout helper defined in cognitive_bus_test.go being available in the package scope.
+	if !waitTimeout(&cycleCompleteWg, 5*time.Second) {
+		t.Fatal("Timeout waiting for the OODA loop (LLM Generate call) to execute.")
+	}
+
+	// Now that we know the operation is complete:
+	// 1. Verify the final state.
+	// We use Eventually here because the state transition happens asynchronously after the mock returns.
 	assert.Eventually(t, func() bool {
 		mind.mu.RLock()
 		currentState := mind.currentState
 		mind.mu.RUnlock()
+		// The mind should recover from an LLM error and return to Observing.
 		return currentState == StateObserving
-	}, 2*time.Second, 50*time.Millisecond, "Mind did not return to OBSERVING state after LLM failure.")
+	}, 1*time.Second, 50*time.Millisecond, "Mind should return to OBSERVING after LLM failure")
 
-	// 2. NOW that we know the operation is complete, we can safely assert
-	// that all our mock expectations were met.
+	// 2. Assert that all our mock expectations were met.
 	mockLLM.AssertExpectations(t)
 	mockKG.AssertExpectations(t)
 }

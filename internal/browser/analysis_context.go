@@ -1,1326 +1,403 @@
 package browser
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"strings"
 	"sync"
+	"text/template"
 	"time"
 
 	"github.com/chromedp/cdproto/cdp"
 	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/cdproto/page"
 	"github.com/chromedp/cdproto/runtime"
-	"github.com/chromedp/cdproto/storage"
-	"github.com/chromedp/cdproto/target"
 	"github.com/chromedp/chromedp"
-	"github.com/google/uuid"
 	"go.uber.org/zap"
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
-	"github.com/xkilldash9x/scalpel-cli/internal/browser/shim"
-	"github.com/xkilldash9x/scalpel-cli/internal/browser/stealth"
-	"github.package browser
-
-import (
-	"context"
-	"fmt"
-	"sync"
-	"time"
-
-	"github.com/chromedp/cdproto/cdp"
-	"github.com/chromedp/cdproto/network"
-	"github.com/chromedp/cdproto/page"
-	"github.com/chromedp/cdproto/runtime"
-	"github.com/chromedp/cdproto/storage"
-	"github.com/chromedp/cdproto/target"
-	"github.com/chromedp/chromedp"
-	"github.com/google/uuid"
-	"go.uber.org/zap"
-
-	"github.com/xkilldash9x/scalpel-cli/api/schemas"
-	"github.com/xkilldash9x/scalpel-cli/internal/browser/shim"
-	"github.com/xkilldash9x/scalpel-cli/internal/browser/stealth"
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
 	"github.com/xkilldash9x/scalpel-cli/internal/humanoid"
 )
 
-const (
-	// Timeouts (Principle 3)
-	defaultNavigationTimeout  = 60 * time.Second
-	artifactCollectionTimeout = 30 * time.Second
-	contextDisposeTimeout     = 10 * time.Second
-	finalSessionCloseWait     = 5 * time.Second
-
-	// Stabilization (Principle 2)
-	networkIdleQuietPeriod = 500 * time.Millisecond
-	networkIdleMaxWait     = 15 * time.Second
-)
-
-// AnalysisContext represents a single, isolated browser session (equivalent to an incognito profile/tab).
+// AnalysisContext implements the schemas.SessionContext interface.
+// It provides methods for interacting with a specific browser session (tab).
 type AnalysisContext struct {
-	id           string
-	globalConfig *config.Config
-	logger       *zap.Logger
-	persona      stealth.Persona
-
-	// parentCtx is the context from the allocator, used as the parent for the session context.
-	parentCtx context.Context
-	// controllerCtx is the context of the main browser CDP session, used for creating/disposing BrowserContexts.
-	controllerCtx context.Context
-	// contextCreationLock is shared by the manager to synchronize context/target creation.
-	contextCreationLock *sync.Mutex
-
-	// sessionContext is the chromedp context specific to this session's target.
-	sessionContext context.Context
-	// sessionCancel cancels the sessionContext.
-	sessionCancel context.CancelFunc
-	// browserContextID is the ID of the isolated CDP BrowserContext.
-	browserContextID cdp.BrowserContextID
+	ctx       context.Context
+	cancel    context.CancelFunc
+	logger    *zap.Logger
+	config    *config.Config
+	persona   schemas.Persona
+	sessionID string
+	manager   *Manager
 
 	humanoid   *humanoid.Humanoid
-	harvester  *Harvester
 	interactor *Interactor
 
-	taintShimTemplate string
-	taintConfigJSON   string
+	// -- Fields for analyzer communication and data collection --
+	artifacts      *schemas.Artifacts
+	artifactsMutex sync.RWMutex
 
-	findings []schemas.Finding
-	// capturedScreenshot stores the last screenshot taken (Principle 5).
-	capturedScreenshot []byte
+	findings      []schemas.Finding
+	findingsMutex sync.RWMutex
 
-	// State synchronization
-	isClosed      bool
-	isInitialized bool
-	mu            sync.Mutex
-
-	// observer is the entity to notify when the session closes (the Manager).
-	observer SessionLifecycleObserver
+	// Staging area for building HAR entries from network events.
+	harEntries map[network.RequestID]*schemas.Entry
+	harMutex   sync.Mutex
 }
 
-// NewAnalysisContext creates the structure for a new session but does not initialize the browser resources.
+// Ensure AnalysisContext implements the interface.
+var _ schemas.SessionContext = (*AnalysisContext)(nil)
+
+// NewAnalysisContext creates a new wrapper around a ChromeDP context that automatically records session data.
 func NewAnalysisContext(
-	parentCtx context.Context,
-	controllerCtx context.Context,
-	cfg *config.Config,
+	ctx context.Context,
+	cancel context.CancelFunc,
 	logger *zap.Logger,
-	persona stealth.Persona,
-	taintTemplate string,
-	taintConfig string,
-	contextCreationLock *sync.Mutex,
-	observer SessionLifecycleObserver,
+	cfg *config.Config,
+	persona schemas.Persona,
+	manager *Manager,
+	sessionID string,
 ) *AnalysisContext {
-	id := uuid.New().String()
-	l := logger.With(zap.String("session_id", id))
-	return &AnalysisContext{
-		id:                  id,
-		parentCtx:           parentCtx,
-		controllerCtx:       controllerCtx,
-		contextCreationLock: contextCreationLock,
-		globalConfig:        cfg,
-		logger:              l,
-		persona:             persona,
-		taintShimTemplate:   taintTemplate,
-		taintConfigJSON:     taintConfig,
-		findings:            make([]schemas.Finding, 0),
-		observer:            observer,
-	}
-}
-
-// Initialize sets up the isolated browser context (incognito profile) and the target (tab).
-func (ac *AnalysisContext) Initialize(ctx context.Context) error {
-	ac.logger.Debug("Initialize: START", zap.Error(ctx.Err()))
-	ac.mu.Lock()
-	if ac.isInitialized {
-		ac.mu.Unlock()
-		return fmt.Errorf("session already initialized")
-	}
-	ac.mu.Unlock()
-
-	// Ensure cleanup if initialization fails at any point.
-	success := false
-	defer func() {
-		if !success {
-			ac.logger.Debug("Initialize: Defer triggered due to failure.")
-			cleanupCtx, cancel := context.WithTimeout(context.Background(), contextDisposeTimeout)
-			defer cancel()
-			ac.internalClose(cleanupCtx)
-		}
-	}()
-
-	// 1. Create the Isolated Browser Context and Target (Synchronized)
-	ac.contextCreationLock.Lock()
-	ac.logger.Debug("Initialize: Context creation lock acquired.")
-	defer func() {
-		ac.logger.Debug("Initialize: Context creation lock released.")
-		ac.contextCreationLock.Unlock()
-	}()
-
-	if err := ctx.Err(); err != nil {
-		return fmt.Errorf("context cancelled before creating browser context: %w", err)
+	ac := &AnalysisContext{
+		ctx:       ctx,
+		cancel:    cancel,
+		logger:    logger.Named("analysis_context").With(zap.String("session_id", sessionID)),
+		config:    cfg,
+		persona:   persona,
+		manager:   manager,
+		sessionID: sessionID,
+		findings:  make([]schemas.Finding, 0),
+		artifacts: &schemas.Artifacts{
+			HAR:         schemas.NewHAR(),
+			ConsoleLogs: make([]schemas.ConsoleLog, 0),
+			Storage:     schemas.StorageState{},
+		},
+		harEntries: make(map[network.RequestID]*schemas.Entry),
 	}
 
-	initCmdCtx, cancelInitCmd := context.WithDeadline(ac.controllerCtx, getContextDeadline(ctx))
-	defer cancelInitCmd()
-	ac.logger.Debug("Initialize: Checking controller context state before creating target.", zap.Error(initCmdCtx.Err()))
-
-	browserContextID, targetID, err := ac.createIsolatedTarget(initCmdCtx)
-	if err != nil {
-		return err
+	if cfg.Browser.Humanoid.Enabled {
+		ac.humanoid = humanoid.New(cfg.Browser.Humanoid, ac.logger, cdp.BrowserContextID(ac.sessionID))
 	}
-	ac.logger.Debug("Initialize: Isolated target created.", zap.String("targetID", string(targetID)))
 
-	// 2. Create the Chromedp Context for the new Target
-	sessionCtx, cancelSession := chromedp.NewContext(ac.parentCtx, chromedp.WithTargetID(targetID))
-	ac.logger.Debug("Initialize: New chromedp session context created.", zap.Error(sessionCtx.Err()))
-
-	// 3. Initialize Components
-	ac.humanoid = humanoid.New(ac.globalConfig.Browser.Humanoid, ac.logger, browserContextID)
-	ac.harvester = NewHarvester(sessionCtx, ac.logger, ac.globalConfig.Network.CaptureResponseBodies)
 	stabilizeFn := func(c context.Context) error {
-		idleCtx, cancelIdle := context.WithTimeout(c, networkIdleMaxWait)
-		defer cancelIdle()
-		return ac.harvester.WaitNetworkIdle(idleCtx, networkIdleQuietPeriod)
+		return chromedp.Sleep(1 * time.Second).Do(c)
 	}
 	ac.interactor = NewInteractor(ac.logger, ac.humanoid, stabilizeFn)
 
-	chromedp.ListenTarget(sessionCtx, ac.eventListener)
+	// Start the background listeners for data collection.
+	ac.setupListeners()
 
-	// 4. Apply Configuration and Start Harvester
-	if err := ac.setupSession(sessionCtx); err != nil {
-		return fmt.Errorf("failed to setup session: %w", err)
-	}
-
-	// 5. Finalize Initialization State
-	ac.mu.Lock()
-	ac.sessionContext = sessionCtx
-	ac.sessionCancel = cancelSession
-	ac.browserContextID = browserContextID
-	ac.isInitialized = true
-	ac.mu.Unlock()
-
-	success = true
-	ac.logger.Info("Browser session initialized, instrumented, and ready.")
-	ac.logger.Debug("Initialize: END")
-	return nil
+	return ac
 }
 
-// createIsolatedTarget handles the CDP commands to create an incognito context and a blank tab within it.
-func (ac *AnalysisContext) createIsolatedTarget(ctx context.Context) (cdp.BrowserContextID, target.ID, error) {
-	// Create an isolated BrowserContext (incognito profile).
-	browserContextID, err := target.CreateBrowserContext().Do(ctx)
-	if err != nil {
-		return "", "", fmt.Errorf("failed to create browser context: %w", err)
-	}
-
-	// Create a new target (tab) within that isolated context.
-	targetID, err := target.CreateTarget("about:blank").
-		WithBrowserContextID(browserContextID).
-		Do(ctx)
-	if err != nil {
-		// Clean up the orphaned browser context if target creation failed.
-		ac.bestEffortCleanupBrowserContext(browserContextID)
-		return "", "", fmt.Errorf("failed to create target: %w", err)
-	}
-
-	return browserContextID, targetID, nil
-}
-
-// setupSession applies initial configuration, instrumentation, and starts the harvester.
-func (ac *AnalysisContext) setupSession(ctx context.Context) error {
-	tasks := chromedp.Tasks{
-		// Apply stealth evasions and persona settings.
-		stealth.Apply(ac.persona, ac.logger),
-
-		// Apply IAST instrumentation if available.
-		chromedp.ActionFunc(func(c context.Context) error {
-			if err := ac.applyInstrumentation(c); err != nil {
-				// Non-critical error.
-				ac.logger.Error("Failed to apply IAST instrumentation. Proceeding without runtime analysis.", zap.Error(err))
-			}
-			return nil
-		}),
-
-		// Start the Harvester (enables Network/Log/Runtime domains).
-		chromedp.ActionFunc(func(c context.Context) error {
-			if ac.harvester != nil {
-				return ac.harvester.Start(c)
-			}
-			return nil
-		}),
-	}
-	return tasks.Do(ctx)
-}
-
-// Navigate directs the browser session to a specific URL and waits for stabilization.
-func (ac *AnalysisContext) Navigate(url string) error {
-	ac.logger.Debug("Navigating to URL.", zap.String("url", url))
-	ctx := ac.GetContext()
-	if ctx.Err() != nil {
-		return fmt.Errorf("session context is invalid before navigation: %w", ctx.Err())
-	}
-
-	// Principle 3: Apply specific timeout for navigation.
-	// Accessing the newly added NavigationTimeout field.
-	navTimeout := ac.globalConfig.Network.NavigationTimeout
-	if navTimeout <= 0 {
-		navTimeout = defaultNavigationTimeout
-	}
-	navCtx, cancelNav := context.WithTimeout(ctx, navTimeout)
-	defer cancelNav()
-
-	tasks := chromedp.Tasks{
-		// Pre-navigation actions
-		chromedp.ActionFunc(func(c context.Context) error {
-			if ac.globalConfig.Browser.DisableCache {
-				if err := network.SetCacheDisabled(true).Do(c); err != nil {
-					ac.logger.Warn("Failed to disable browser cache", zap.Error(err))
-				}
-			}
-			return ac.humanoid.CognitivePause(500, 200).Do(c)
-		}),
-
-		// Main navigation action
-		chromedp.Navigate(url),
-
-		// Principle 2: Wait Dynamically for the DOM to be ready.
-		chromedp.WaitReady("body", chromedp.ByQuery),
-
-		// Principle 2: Wait Dynamically for the network to stabilize.
-		chromedp.ActionFunc(func(c context.Context) error {
-			ac.logger.Debug("Waiting for post-load network stabilization.")
-			// Use a specific timeout context for the stabilization wait (Principle 3).
-			idleCtx, cancelIdle := context.WithTimeout(c, networkIdleMaxWait)
-			defer cancelIdle()
-			return ac.harvester.WaitNetworkIdle(idleCtx, networkIdleQuietPeriod)
-		}),
-	}
-
-	if err := chromedp.Run(navCtx, tasks); err != nil {
-		// Principle 5: Capture screenshot on failure.
-		ac.logger.Error("Navigation failed. Capturing screenshot.", zap.Error(err), zap.String("url", url))
-		// Use the original session context for the screenshot, not the potentially cancelled navCtx.
-		ac.captureScreenshot(ctx)
-		return fmt.Errorf("navigation failed: %w", err)
-	}
-
-	return nil
-}
-
-// Interact starts the automated interaction phase.
-func (ac *AnalysisContext) Interact(config schemas.InteractionConfig) error {
-	ac.logger.Debug("Starting automated humanoid interaction phase.")
-	ctx := ac.GetContext()
-	if ctx.Err() != nil {
-		return fmt.Errorf("session context is invalid before interaction: %w", ctx.Err())
-	}
-
-	// Note: The RecursiveInteract implementation relies on the provided ctx having a timeout (Principle 3).
-	// If the overall analysis task has a time limit, it should be enforced on the context passed here.
-	err := ac.interactor.RecursiveInteract(ctx, config)
-	if err != nil {
-		// Principle 5: Capture screenshot if interaction fails.
-		ac.captureScreenshot(ctx)
-		return err
-	}
-	return nil
-}
-
-// CollectArtifacts gathers data collected during the session (HAR, DOM, Storage, Logs).
-func (ac *AnalysisContext) CollectArtifacts() (*schemas.Artifacts, error) {
-	ac.mu.Lock()
-	if !ac.isInitialized {
-		ac.mu.Unlock()
-		return nil, fmt.Errorf("session is not initialized")
-	}
-	// Check if the session is still active for live artifact collection.
-	isSessionActive := !ac.isClosed && ac.sessionContext != nil && ac.sessionContext.Err() == nil
-	ac.mu.Unlock()
-
-	ac.logger.Debug("Starting artifact collection.")
-	artifacts := &schemas.Artifacts{}
-
-	// 1. Collect Harvested Artifacts (HAR, Console Logs)
-	// Use a background context with a timeout for harvester processing (Principle 3).
-	harvesterCtx, cancelHarvester := context.WithTimeout(context.Background(), artifactCollectionTimeout)
-	defer cancelHarvester()
-
-	if ac.harvester != nil {
-		artifacts.HAR, artifacts.ConsoleLogs = ac.harvester.Stop(harvesterCtx)
-	}
-
-	// 2. Collect Live Artifacts (DOM, Storage) - Only if the session is still active.
-	if !isSessionActive {
-		ac.logger.Debug("Session context closed, skipping live artifact collection (DOM, Storage).")
-		return artifacts, nil
-	}
-
-	// Principle 3: Enforce a strict timeout for live collection using the active session context.
-	liveCollectCtx, cancelLive := context.WithTimeout(ac.GetContext(), artifactCollectionTimeout)
-	defer cancelLive()
-
-	// Collect DOM and Storage concurrently.
-	var domCaptureErr, storageErr error
-	var wg sync.WaitGroup
-	wg.Add(2)
-
-	// DOM Collection
-	go func() {
-		defer wg.Done()
-		var domContent string
-		if err := chromedp.Run(liveCollectCtx, chromedp.OuterHTML("html", &domContent, chromedp.ByQuery)); err != nil {
-			// Log error only if it wasn't caused by the context closing (e.g., timeout).
-			if liveCollectCtx.Err() == nil {
-				ac.logger.Error("Failed to collect final DOM snapshot.", zap.Error(err))
-				domCaptureErr = err
-			}
-		} else {
-			artifacts.DOM = domContent
+// setupListeners attaches listeners to the browser context to collect data in real-time.
+func (ac *AnalysisContext) setupListeners() {
+	chromedp.ListenTarget(ac.ctx, func(ev interface{}) {
+		switch ev := ev.(type) {
+		case *runtime.EventConsoleAPICalled:
+			ac.handleConsoleAPICalled(ev)
+		case *network.EventRequestWillBeSent:
+			ac.handleRequestWillBeSent(ev)
+		case *network.EventResponseReceived:
+			ac.handleResponseReceived(ev)
+		case *network.EventLoadingFinished:
+			ac.handleLoadingFinished(ev)
 		}
-	}()
-
-	// Storage Collection
-	go func() {
-		defer wg.Done()
-		if err := ac.collectStorageState(liveCollectCtx, artifacts); err != nil {
-			if liveCollectCtx.Err() == nil {
-				ac.logger.Error("Failed to collect storage state.", zap.Error(err))
-				storageErr = err
-			}
-		}
-	}()
-
-	wg.Wait()
-
-	if domCaptureErr != nil || storageErr != nil {
-		return artifacts, fmt.Errorf("artifact collection partially failed (DOM: %v, Storage: %v)", domCaptureErr, storageErr)
-	}
-
-	ac.logger.Debug("Artifact collection complete.")
-	return artifacts, nil
+	})
 }
 
-// Close terminates the session, cleans up resources, and notifies the manager.
-func (ac *AnalysisContext) Close(ctx context.Context) {
-	ac.mu.Lock()
-	if ac.isClosed {
-		ac.mu.Unlock()
-		return
-	}
-	// Mark as closed immediately to prevent new operations.
-	ac.isClosed = true
-
-	// Determine if unregistration is needed.
-	shouldUnregister := ac.isInitialized && ac.observer != nil
-	ac.mu.Unlock()
-
-	// Unregister from the manager (Principle 4).
-	if shouldUnregister {
-		// We do this outside the lock.
-		ac.observer.unregisterSession(ac)
-	}
-
-	// Perform the actual resource cleanup.
-	ac.internalClose(ctx)
-}
-
-// internalClose handles the actual cleanup of browser resources (CDP context, target).
-func (ac *AnalysisContext) internalClose(ctx context.Context) {
-	ac.logger.Debug("internalClose: START", zap.String("session_id", ac.id))
-
-	// Safely retrieve required fields.
-	ac.mu.Lock()
-	sessionCancel := ac.sessionCancel
-	browserCtxID := ac.browserContextID
-	controllerCtx := ac.controllerCtx
-	harvester := ac.harvester
-	ac.mu.Unlock()
-
-	// 1. Stop the Harvester (if running)
-	if harvester != nil {
-		stopCtx, cancelStop := context.WithTimeout(context.Background(), artifactCollectionTimeout)
-		defer cancelStop()
-		harvester.Stop(stopCtx)
-	}
-
-	// 2. Cancel the session context (signals tasks in the tab to stop).
-	if sessionCancel != nil {
-		ac.logger.Debug("internalClose: Cancelling session context.")
-		sessionCancel()
-	}
-
-	// 3. Dispose of the isolated BrowserContext (Principle 4).
-	if browserCtxID != "" && controllerCtx != nil && controllerCtx.Err() == nil {
-		disposeCtx, cancelDispose := context.WithTimeout(controllerCtx, contextDisposeTimeout)
-		defer cancelDispose()
-
-		ac.logger.Debug("internalClose: Disposing browser context...", zap.String("browserContextID", string(browserCtxID)))
-		if err := target.DisposeBrowserContext(browserCtxID).Do(disposeCtx); err != nil {
-			if controllerCtx.Err() == nil {
-				ac.logger.Warn("Failed to dispose of browser context.", zap.Error(err))
-			}
-		} else {
-			ac.logger.Debug("internalClose: Disposed browser context successfully.")
-		}
-	} else {
-		ac.logger.Debug("internalClose: Skipping browser context disposal.",
-			zap.Bool("hasID", browserCtxID != ""),
-			zap.Bool("controllerValid", controllerCtx != nil && controllerCtx.Err() == nil),
-		)
-	}
-	ac.logger.Debug("internalClose: END")
-}
-
-// -- Helper Functions, Storage, Instrumentation, etc. --
-
-// GetContext provides safe access to the session context.
-func (ac *AnalysisContext) GetContext() context.Context {
-	ac.mu.Lock()
-	defer ac.mu.Unlock()
-	if !ac.isInitialized || ac.isClosed || ac.sessionContext == nil {
-		// Return a cancelled context if the session is invalid.
-		ctx, cancel := context.WithCancel(context.Background())
-		cancel()
-		return ctx
-	}
-	return ac.sessionContext
-}
-
-func (ac *AnalysisContext) ID() string {
-	return ac.id
-}
-
-// GetScreenshot returns the last captured screenshot, if any (Principle 5).
-func (ac *AnalysisContext) GetScreenshot() []byte {
-	ac.mu.Lock()
-	defer ac.mu.Unlock()
-	return ac.capturedScreenshot
-}
-
-// AddFinding is a helper method to append a finding to the context.
-// This resolves the build error in the ATO analyzer.
+// AddFinding allows an analyzer to report a finding.
 func (ac *AnalysisContext) AddFinding(finding schemas.Finding) {
-	ac.mu.Lock()
-	defer ac.mu.Unlock()
+	ac.findingsMutex.Lock()
+	defer ac.findingsMutex.Unlock()
 	ac.findings = append(ac.findings, finding)
+	ac.logger.Info("Finding added", zap.String("module", finding.Module), zap.String("vulnerability", finding.Vulnerability.Name))
 }
 
-// captureScreenshot attempts to take a full-page screenshot (Principle 5).
-func (ac *AnalysisContext) captureScreenshot(ctx context.Context) {
-	// Enforce a strict timeout for taking the screenshot (Principle 3).
-	captureCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-
-	var screenshotData []byte
-	if err := chromedp.Run(captureCtx, chromedp.FullScreenshot(&screenshotData, 80)); err != nil {
-		// Log only if the error wasn't due to context cancellation.
-		if captureCtx.Err() == nil && ctx.Err() == nil {
-			ac.logger.Warn("Failed to capture screenshot.", zap.Error(err))
-		}
-		return
-	}
-
-	ac.mu.Lock()
-	ac.capturedScreenshot = screenshotData
-	ac.mu.Unlock()
-	ac.logger.Info("Screenshot captured successfully.", zap.Int("size_bytes", len(screenshotData)))
-}
-
-// bestEffortCleanupBrowserContext is used during failed initialization.
-func (ac *AnalysisContext) bestEffortCleanupBrowserContext(id cdp.BrowserContextID) {
-	if ac.controllerCtx == nil || ac.controllerCtx.Err() != nil {
-		return
-	}
-	cleanupCtx, cleanupCancel := context.WithTimeout(ac.controllerCtx, 5*time.Second)
-	defer cleanupCancel()
-	if err := target.DisposeBrowserContext(id).Do(cleanupCtx); err != nil {
-		ac.logger.Debug("Failed best-effort cleanup of orphaned browser context.", zap.String("browserContextID", string(id)), zap.Error(err))
-	}
-}
-
-// getContextDeadline helper to safely retrieve a context deadline.
-func getContextDeadline(ctx context.Context) time.Time {
-	deadline, ok := ctx.Deadline()
-	if !ok {
-		// If no deadline is set, return a time far in the future.
-		return time.Now().Add(24 * time.Hour)
-	}
-	return deadline
-}
-
-// applyInstrumentation injects the IAST shim.
-func (ac *AnalysisContext) applyInstrumentation(ctx context.Context) error {
-	if ac.taintShimTemplate == "" {
-		return nil
-	}
-	script, err := shim.BuildTaintShim(ac.taintShimTemplate, ac.taintConfigJSON)
-	if err != nil {
-		return fmt.Errorf("failed to build taint shim script: %w", err)
-	}
-	const callbackName = "scalpel_sink_event"
-	// Expose the callback function to JavaScript.
-	if err := runtime.AddBinding(callbackName).Do(ctx); err != nil {
-		return fmt.Errorf("failed to expose taint callback (%s): %w", callbackName, err)
-	}
-	// Inject the script to run on every new document load.
-	if _, err = page.AddScriptToEvaluateOnNewDocument(script).Do(ctx); err != nil {
-		return fmt.Errorf("failed to inject taint shim persistently: %w", err)
-	}
-	ac.logger.Debug("IAST instrumentation applied successfully.")
-	return nil
-}
-
-// eventListener handles various CDP events for the session.
-func (ac *AnalysisContext) eventListener(ev interface{}) {
-	// Handle instrumentation bindings.
-	if binding, ok := ev.(*runtime.EventBindingCalled); ok {
-		if binding.Name == "scalpel_sink_event" {
-			ac.handleTaintEvent(binding.Payload)
-		}
-		return
-	}
-
-	// Handle JavaScript dialogs (alerts, prompts, confirms) to prevent hanging the browser.
-	if msg, ok := ev.(*page.EventJavascriptDialogOpening); ok {
-		ac.logger.Info("JavaScript dialog opened. Automatically handling.", zap.String("type", string(msg.Type)), zap.String("message", msg.Message))
-		go ac.handleJSDialog(msg)
-	}
-}
-
-// handleJSDialog automatically accepts JS dialogs.
-func (ac *AnalysisContext) handleJSDialog(ev *page.EventJavascriptDialogOpening) {
-	ctx := ac.GetContext()
-	if ctx.Err() != nil {
-		return
-	}
-	// Principle 3: Timeout for handling the dialog.
-	dialogCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-	defer cancel()
-
-	// Accept the dialog.
-	err := page.HandleJavaScriptDialog(true).Do(dialogCtx)
-	if err != nil && dialogCtx.Err() == nil {
-		ac.logger.Warn("Failed to handle JavaScript dialog.", zap.Error(err))
-	}
-}
-
-func (ac *AnalysisContext) handleTaintEvent(payload string) {
-	// Placeholder: In a real implementation, this would parse the payload and generate a Finding.
-	ac.logger.Info("Taint Sink Triggered (IAST Event)", zap.String("payload", payload))
-}
-
-// collectStorageState gathers cookies, localStorage, and sessionStorage.
-func (ac *AnalysisContext) collectStorageState(ctx context.Context, artifacts *schemas.Artifacts) error {
-	storageResult := schemas.StorageState{
-		LocalStorage:   make(map[string]string),
-		SessionStorage: make(map[string]string),
-	}
-
-	// 1. Collect Cookies using the Storage domain (includes HttpOnly).
-	// This requires the BrowserContextID.
-	var cookies []*network.Cookie
-	err := chromedp.Run(ctx, chromedp.ActionFunc(func(c context.Context) (err error) {
-		cookies, err = storage.GetCookies().WithBrowserContextID(ac.browserContextID).Do(c)
-		return err
-	}))
-
-	storageResult.Cookies = cookies
-	artifacts.Storage = storageResult
-
-	if err != nil {
-		ac.logger.Warn("Could not retrieve cookies via CDP. Proceeding with JS fallback for other storage.", zap.Error(err))
-	}
-
-	// 2. Collect LocalStorage and SessionStorage using JavaScript evaluation.
-	return ac.collectStorageStateJSFallback(ctx, &storageResult)
-}
-
-// collectStorageStateJSFallback uses JavaScript evaluation to extract storage.
-func (ac *AnalysisContext) collectStorageStateJSFallback(ctx context.Context, storageResult *schemas.StorageState) error {
-	var jsStorage struct {
-		LocalStorage   map[string]string `json:"localStorage"`
-		SessionStorage map[string]string `json:"sessionStorage"`
-	}
-
-	// JavaScript snippet to safely collect storage data, handling potential SecurityErrors (e.g., cross-origin iframes).
-	jsScript := `(function() {
-        const result = { localStorage: {}, sessionStorage: {} };
-        try {
-            if (window.localStorage) {
-                Object.assign(result.localStorage, localStorage);
-            }
-        } catch (e) {
-            result.localStorage = { 'error': 'Access Denied: ' + e.message };
-        }
-        try {
-            if (window.sessionStorage) {
-                Object.assign(result.sessionStorage, sessionStorage);
-            }
-        } catch (e) {
-            result.sessionStorage = { 'error': 'Access Denied: ' + e.message };
-        }
-        return result;
-    })()`
-
-	err := chromedp.Run(ctx,
-		chromedp.Evaluate(jsScript, &jsStorage),
-	)
-
-	if err != nil {
-		return fmt.Errorf("JS evaluation for storage retrieval failed: %w", err)
-	}
-
-	storageResult.LocalStorage = jsStorage.LocalStorage
-	storageResult.SessionStorage = jsStorage.SessionStorage
-	return nil
-}
-com/xkilldash9x/scalpel-cli/internal/config"
-	"github.com/xkilldash9x/scalpel-cli/internal/humanoid"
-)
-
-const (
-	// Timeouts (Principle 3)
-	defaultNavigationTimeout  = 60 * time.Second
-	artifactCollectionTimeout = 30 * time.Second
-	contextDisposeTimeout     = 10 * time.Second
-	finalSessionCloseWait     = 5 * time.Second
-
-	// Stabilization (Principle 2)
-	networkIdleQuietPeriod = 500 * time.Millisecond
-	networkIdleMaxWait     = 15 * time.Second
-)
-
-// AnalysisContext represents a single, isolated browser session (equivalent to an incognito profile/tab).
-type AnalysisContext struct {
-	id           string
-	globalConfig *config.Config
-	logger       *zap.Logger
-	persona      stealth.Persona
-
-	// parentCtx is the context from the allocator, used as the parent for the session context.
-	parentCtx context.Context
-	// controllerCtx is the context of the main browser CDP session, used for creating/disposing BrowserContexts.
-	controllerCtx context.Context
-	// contextCreationLock is shared by the manager to synchronize context/target creation.
-	contextCreationLock *sync.Mutex
-
-	// sessionContext is the chromedp context specific to this session's target.
-	sessionContext context.Context
-	// sessionCancel cancels the sessionContext.
-	sessionCancel context.CancelFunc
-	// browserContextID is the ID of the isolated CDP BrowserContext.
-	browserContextID cdp.BrowserContextID
-
-	humanoid   *humanoid.Humanoid
-	harvester  *Harvester
-	interactor *Interactor
-
-	taintShimTemplate string
-	taintConfigJSON   string
-
-	findings []schemas.Finding
-	// capturedScreenshot stores the last screenshot taken (Principle 5).
-	capturedScreenshot []byte
-
-	// State synchronization
-	isClosed      bool
-	isInitialized bool
-	mu            sync.Mutex
-
-	// observer is the entity to notify when the session closes (the Manager).
-	observer SessionLifecycleObserver
-}
-
-// NewAnalysisContext creates the structure for a new session but does not initialize the browser resources.
-func NewAnalysisContext(
-	parentCtx context.Context,
-	controllerCtx context.Context,
-	cfg *config.Config,
-	logger *zap.Logger,
-	persona stealth.Persona,
-	taintTemplate string,
-	taintConfig string,
-	contextCreationLock *sync.Mutex,
-	observer SessionLifecycleObserver,
-) *AnalysisContext {
-	id := uuid.New().String()
-	l := logger.With(zap.String("session_id", id))
-	return &AnalysisContext{
-		id:                  id,
-		parentCtx:           parentCtx,
-		controllerCtx:       controllerCtx,
-		contextCreationLock: contextCreationLock,
-		globalConfig:        cfg,
-		logger:              l,
-		persona:             persona,
-		taintShimTemplate:   taintTemplate,
-		taintConfigJSON:     taintConfig,
-		findings:            make([]schemas.Finding, 0),
-		observer:            observer,
-	}
-}
-
-// Initialize sets up the isolated browser context (incognito profile) and the target (tab).
-func (ac *AnalysisContext) Initialize(ctx context.Context) error {
-	ac.mu.Lock()
-	if ac.isInitialized {
-		ac.mu.Unlock()
-		return fmt.Errorf("session already initialized")
-	}
-	ac.mu.Unlock()
-
-	// Ensure cleanup if initialization fails at any point.
-	success := false
-	defer func() {
-		if !success {
-			// Use a background context for cleanup if the initialization context is already cancelled.
-			cleanupCtx, cancel := context.WithTimeout(context.Background(), contextDisposeTimeout)
-			defer cancel()
-			ac.internalClose(cleanupCtx)
-		}
-	}()
-
-	// 1. Create the Isolated Browser Context and Target (Synchronized)
-	// Principle 1 implementation: Manually creating isolated context.
-	ac.contextCreationLock.Lock()
-
-	if err := ctx.Err(); err != nil {
-		ac.contextCreationLock.Unlock()
-		return fmt.Errorf("context cancelled before creating browser context: %w", err)
-	}
-
-	// We use the controllerCtx for these commands, but respect the deadline of the initialization ctx.
-	initCmdCtx, cancelInitCmd := context.WithDeadline(ac.controllerCtx, getContextDeadline(ctx))
-	defer cancelInitCmd()
-
-	browserContextID, targetID, err := ac.createIsolatedTarget(initCmdCtx)
-	if err != nil {
-		ac.contextCreationLock.Unlock()
-		return err
-	}
-
-	// 2. Create the Chromedp Context for the new Target
-	// We derive from the parentCtx (allocator context).
-	sessionCtx, cancelSession := chromedp.NewContext(ac.parentCtx, chromedp.WithTargetID(targetID))
-
-	// We can release the lock now that the target is created and attached.
-	ac.contextCreationLock.Unlock()
-
-	// 3. Initialize Components
-	ac.humanoid = humanoid.New(ac.globalConfig.Browser.Humanoid, ac.logger, browserContextID)
-	// Principle 6: Initialize Harvester
-	ac.harvester = NewHarvester(sessionCtx, ac.logger, ac.globalConfig.Network.CaptureResponseBodies)
-
-	// Principle 2: Define the dynamic stabilization function for the Interactor.
-	stabilizeFn := func(c context.Context) error {
-		ac.logger.Debug("Interactor waiting for stabilization (network idle).")
-		// Apply specific timeout for stabilization wait (Principle 3).
-		idleCtx, cancelIdle := context.WithTimeout(c, networkIdleMaxWait)
-		defer cancelIdle()
-		return ac.harvester.WaitNetworkIdle(idleCtx, networkIdleQuietPeriod)
-	}
-	ac.interactor = NewInteractor(ac.logger, ac.humanoid, stabilizeFn)
-
-	// Listen for custom events (e.g., IAST instrumentation callbacks).
-	chromedp.ListenTarget(sessionCtx, ac.eventListener)
-
-	// 4. Apply Configuration and Start Harvester
-	if err := ac.setupSession(sessionCtx); err != nil {
-		return fmt.Errorf("failed to setup session: %w", err)
-	}
-
-	// 5. Finalize Initialization State
-	ac.mu.Lock()
-	ac.sessionContext = sessionCtx
-	ac.sessionCancel = cancelSession
-	ac.browserContextID = browserContextID
-	ac.isInitialized = true
-	ac.mu.Unlock()
-
-	success = true
-	ac.logger.Info("Browser session initialized, instrumented, and ready.")
-	return nil
-}
-
-// createIsolatedTarget handles the CDP commands to create an incognito context and a blank tab within it.
-func (ac *AnalysisContext) createIsolatedTarget(ctx context.Context) (cdp.BrowserContextID, target.ID, error) {
-	// Create an isolated BrowserContext (incognito profile).
-	browserContextID, err := target.CreateBrowserContext().Do(ctx)
-	if err != nil {
-		return "", "", fmt.Errorf("failed to create browser context: %w", err)
-	}
-
-	// Create a new target (tab) within that isolated context.
-	targetID, err := target.CreateTarget("about:blank").
-		WithBrowserContextID(browserContextID).
-		Do(ctx)
-	if err != nil {
-		// Clean up the orphaned browser context if target creation failed.
-		ac.bestEffortCleanupBrowserContext(browserContextID)
-		return "", "", fmt.Errorf("failed to create target: %w", err)
-	}
-
-	return browserContextID, targetID, nil
-}
-
-// setupSession applies initial configuration, instrumentation, and starts the harvester.
-func (ac *AnalysisContext) setupSession(ctx context.Context) error {
-	tasks := chromedp.Tasks{
-		// Apply stealth evasions and persona settings.
-		stealth.Apply(ac.persona, ac.logger),
-
-		// Apply IAST instrumentation if available.
-		chromedp.ActionFunc(func(c context.Context) error {
-			if err := ac.applyInstrumentation(c); err != nil {
-				// Non-critical error.
-				ac.logger.Error("Failed to apply IAST instrumentation. Proceeding without runtime analysis.", zap.Error(err))
-			}
-			return nil
-		}),
-
-		// Start the Harvester (enables Network/Log/Runtime domains).
-		chromedp.ActionFunc(func(c context.Context) error {
-			if ac.harvester != nil {
-				return ac.harvester.Start(c)
-			}
-			return nil
-		}),
-	}
-	return tasks.Do(ctx)
-}
-
-// Navigate directs the browser session to a specific URL and waits for stabilization.
-func (ac *AnalysisContext) Navigate(url string) error {
-	ac.logger.Debug("Navigating to URL.", zap.String("url", url))
-	ctx := ac.GetContext()
-	if ctx.Err() != nil {
-		return fmt.Errorf("session context is invalid before navigation: %w", ctx.Err())
-	}
-
-	// Principle 3: Apply specific timeout for navigation.
-	// Accessing the newly added NavigationTimeout field.
-	navTimeout := ac.globalConfig.Network.NavigationTimeout
-	if navTimeout <= 0 {
-		navTimeout = defaultNavigationTimeout
-	}
-	navCtx, cancelNav := context.WithTimeout(ctx, navTimeout)
-	defer cancelNav()
-
-	tasks := chromedp.Tasks{
-		// Pre-navigation actions
-		chromedp.ActionFunc(func(c context.Context) error {
-			if ac.globalConfig.Browser.DisableCache {
-				if err := network.SetCacheDisabled(true).Do(c); err != nil {
-					ac.logger.Warn("Failed to disable browser cache", zap.Error(err))
-				}
-			}
-			return ac.humanoid.CognitivePause(500, 200).Do(c)
-		}),
-
-		// Main navigation action
-		chromedp.Navigate(url),
-
-		// Principle 2: Wait Dynamically for the DOM to be ready.
-		chromedp.WaitReady("body", chromedp.ByQuery),
-
-		// Principle 2: Wait Dynamically for the network to stabilize.
-		chromedp.ActionFunc(func(c context.Context) error {
-			ac.logger.Debug("Waiting for post-load network stabilization.")
-			// Use a specific timeout context for the stabilization wait (Principle 3).
-			idleCtx, cancelIdle := context.WithTimeout(c, networkIdleMaxWait)
-			defer cancelIdle()
-			return ac.harvester.WaitNetworkIdle(idleCtx, networkIdleQuietPeriod)
-		}),
-	}
-
-	if err := chromedp.Run(navCtx, tasks); err != nil {
-		// Principle 5: Capture screenshot on failure.
-		ac.logger.Error("Navigation failed. Capturing screenshot.", zap.Error(err), zap.String("url", url))
-		// Use the original session context for the screenshot, not the potentially cancelled navCtx.
-		ac.captureScreenshot(ctx)
-		return fmt.Errorf("navigation failed: %w", err)
-	}
-
-	return nil
-}
-
-// Interact starts the automated interaction phase.
-func (ac *AnalysisContext) Interact(config schemas.InteractionConfig) error {
-	ac.logger.Debug("Starting automated humanoid interaction phase.")
-	ctx := ac.GetContext()
-	if ctx.Err() != nil {
-		return fmt.Errorf("session context is invalid before interaction: %w", ctx.Err())
-	}
-
-	// Note: The RecursiveInteract implementation relies on the provided ctx having a timeout (Principle 3).
-	// If the overall analysis task has a time limit, it should be enforced on the context passed here.
-	err := ac.interactor.RecursiveInteract(ctx, config)
-	if err != nil {
-		// Principle 5: Capture screenshot if interaction fails.
-		ac.captureScreenshot(ctx)
-		return err
-	}
-	return nil
-}
-
-// CollectArtifacts gathers data collected during the session (HAR, DOM, Storage, Logs).
+// CollectArtifacts gathers data from the current browser state, including data collected by listeners.
 func (ac *AnalysisContext) CollectArtifacts() (*schemas.Artifacts, error) {
-	ac.mu.Lock()
-	if !ac.isInitialized {
-		ac.mu.Unlock()
-		return nil, fmt.Errorf("session is not initialized")
-	}
-	// Check if the session is still active for live artifact collection.
-	isSessionActive := !ac.isClosed && ac.sessionContext != nil && ac.sessionContext.Err() == nil
-	ac.mu.Unlock()
+	ac.logger.Debug("Collecting final artifacts snapshot")
+	var dom string
+	var cookies []*network.Cookie
+	var localStorage, sessionStorage map[string]string
 
-	ac.logger.Debug("Starting artifact collection.")
-	artifacts := &schemas.Artifacts{}
-
-	// 1. Collect Harvested Artifacts (HAR, Console Logs)
-	// Use a background context with a timeout for harvester processing (Principle 3).
-	harvesterCtx, cancelHarvester := context.WithTimeout(context.Background(), artifactCollectionTimeout)
-	defer cancelHarvester()
-
-	if ac.harvester != nil {
-		artifacts.HAR, artifacts.ConsoleLogs = ac.harvester.Stop(harvesterCtx)
+	snapshotTask := chromedp.Tasks{
+		chromedp.OuterHTML("html", &dom, chromedp.ByQuery),
+		chromedp.ActionFunc(func(ctx context.Context) error {
+			var err error
+			cookies, err = network.GetCookies().Do(ctx)
+			return err
+		}),
 	}
 
-	// 2. Collect Live Artifacts (DOM, Storage) - Only if the session is still active.
-	if !isSessionActive {
-		ac.logger.Debug("Session context closed, skipping live artifact collection (DOM, Storage).")
-		return artifacts, nil
+	if err := chromedp.Run(ac.ctx, snapshotTask); err != nil {
+		return nil, fmt.Errorf("failed to collect page state snapshot: %w", err)
 	}
 
-	// Principle 3: Enforce a strict timeout for live collection using the active session context.
-	liveCollectCtx, cancelLive := context.WithTimeout(ac.GetContext(), artifactCollectionTimeout)
-	defer cancelLive()
+	ac.artifactsMutex.RLock()
+	defer ac.artifactsMutex.RUnlock()
 
-	// Collect DOM and Storage concurrently.
-	var domCaptureErr, storageErr error
-	var wg sync.WaitGroup
-	wg.Add(2)
-
-	// DOM Collection
-	go func() {
-		defer wg.Done()
-		var domContent string
-		if err := chromedp.Run(liveCollectCtx, chromedp.OuterHTML("html", &domContent, chromedp.ByQuery)); err != nil {
-			// Log error only if it wasn't caused by the context closing (e.g., timeout).
-			if liveCollectCtx.Err() == nil {
-				ac.logger.Error("Failed to collect final DOM snapshot.", zap.Error(err))
-				domCaptureErr = err
-			}
-		} else {
-			artifacts.DOM = domContent
-		}
-	}()
-
-	// Storage Collection
-	go func() {
-		defer wg.Done()
-		if err := ac.collectStorageState(liveCollectCtx, artifacts); err != nil {
-			if liveCollectCtx.Err() == nil {
-				ac.logger.Error("Failed to collect storage state.", zap.Error(err))
-				storageErr = err
-			}
-		}
-	}()
-
-	wg.Wait()
-
-	if domCaptureErr != nil || storageErr != nil {
-		return artifacts, fmt.Errorf("artifact collection partially failed (DOM: %v, Storage: %v)", domCaptureErr, storageErr)
+	finalArtifacts := &schemas.Artifacts{
+		DOM:         dom,
+		ConsoleLogs: append([]schemas.ConsoleLog(nil), ac.artifacts.ConsoleLogs...),
+		HAR: &schemas.HAR{
+			Log: schemas.HARLog{
+				Version: ac.artifacts.HAR.Log.Version,
+				Creator: ac.artifacts.HAR.Log.Creator,
+				Entries: append([]schemas.Entry(nil), ac.artifacts.HAR.Log.Entries...),
+			},
+		},
+		Storage: schemas.StorageState{
+			Cookies:        cookies,
+			LocalStorage:   localStorage,
+			SessionStorage: sessionStorage,
+		},
 	}
 
-	ac.logger.Debug("Artifact collection complete.")
-	return artifacts, nil
+	return finalArtifacts, nil
 }
 
-// Close terminates the session, cleans up resources, and notifies the manager.
-func (ac *AnalysisContext) Close(ctx context.Context) {
-	ac.mu.Lock()
-	if ac.isClosed {
-		ac.mu.Unlock()
-		return
-	}
-	// Mark as closed immediately to prevent new operations.
-	ac.isClosed = true
-
-	// Determine if unregistration is needed.
-	shouldUnregister := ac.isInitialized && ac.observer != nil
-	ac.mu.Unlock()
-
-	// Unregister from the manager (Principle 4).
-	if shouldUnregister {
-		// We do this outside the lock.
-		ac.observer.unregisterSession(ac)
-	}
-
-	// Perform the actual resource cleanup.
-	ac.internalClose(ctx)
+// GetContext returns the underlying ChromeDP context.
+func (ac *AnalysisContext) GetContext() context.Context {
+	return ac.ctx
 }
 
-// internalClose handles the actual cleanup of browser resources (CDP context, target).
-func (ac *AnalysisContext) internalClose(ctx context.Context) {
-	ac.logger.Debug("Closing analysis context.")
-
-	// Safely retrieve required fields.
-	ac.mu.Lock()
-	sessionCtx := ac.sessionContext
-	sessionCancel := ac.sessionCancel
-	browserCtxID := ac.browserContextID
-	controllerCtx := ac.controllerCtx
-	harvester := ac.harvester
-	ac.mu.Unlock()
-
-	// 1. Stop the Harvester (if running)
-	if harvester != nil {
-		// Use a background context with timeout for cleanup (Principle 3).
-		stopCtx, cancelStop := context.WithTimeout(context.Background(), artifactCollectionTimeout)
-		defer cancelStop()
-		harvester.Stop(stopCtx)
+// InitializeTaint handles the specific initialization logic for IAST/Taint analysis.
+func (ac *AnalysisContext) InitializeTaint(taintTemplate string, taintConfig string) error {
+	tmpl, err := template.New("taint_shim").Parse(taintTemplate)
+	if err != nil {
+		return fmt.Errorf("failed to parse taint template: %w", err)
 	}
-
-	// 2. Cancel the session context (signals tasks in the tab to stop).
-	if sessionCancel != nil {
-		sessionCancel()
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, &struct{ ConfigJSON string }{ConfigJSON: taintConfig}); err != nil {
+		return fmt.Errorf("failed to execute taint template: %w", err)
 	}
+	return ac.InjectScriptPersistently(ac.ctx, buf.String())
+}
 
-	// 3. Dispose of the isolated BrowserContext (Principle 4).
-	// This is crucial when manually managing contexts. Check if controllerCtx is valid.
-	if browserCtxID != "" && controllerCtx != nil && controllerCtx.Err() == nil {
-		// Enforce a strict timeout for the disposal command.
-		disposeCtx, cancelDispose := context.WithTimeout(controllerCtx, contextDisposeTimeout)
-		defer cancelDispose()
+// -- Browser Interaction Methods --
 
-		if err := target.DisposeBrowserContext(browserCtxID).Do(disposeCtx); err != nil {
-			// Log if the failure wasn't due to the controller shutting down.
-			if controllerCtx.Err() == nil {
-				ac.logger.Warn("Failed to dispose of browser context. It may be orphaned.",
-					zap.String("browserContextID", string(browserCtxID)),
-					zap.Error(err),
-				)
-			}
-		} else {
-			ac.logger.Debug("Disposed browser context.", zap.String("browserContextID", string(browserCtxID)))
-		}
-	}
-
-	// 4. Wait for the session context to be fully closed.
-	if sessionCtx != nil {
+func (ac *AnalysisContext) createActionContext(opCtx context.Context) (context.Context, context.CancelFunc) {
+	runCtx, cancel := context.WithCancel(ac.ctx)
+	go func() {
 		select {
-		case <-sessionCtx.Done():
-			ac.logger.Debug("Browser session context closed.")
-		case <-ctx.Done():
-			// The external closing context timed out.
-			ac.logger.Warn("Context cancelled while waiting for session close.", zap.Error(ctx.Err()))
-		case <-time.After(finalSessionCloseWait):
-			// Hard timeout waiting for the tab to close.
-			ac.logger.Warn("Timeout waiting for browser session context to close.")
+		case <-opCtx.Done():
+			cancel()
+		case <-runCtx.Done():
 		}
-	}
+	}()
+	return runCtx, cancel
 }
 
-// -- Helper Functions, Storage, Instrumentation, etc. --
-
-// GetContext provides safe access to the session context.
-func (ac *AnalysisContext) GetContext() context.Context {
-	ac.mu.Lock()
-	defer ac.mu.Unlock()
-	if !ac.isInitialized || ac.isClosed || ac.sessionContext == nil {
-		// Return a cancelled context if the session is invalid.
-		ctx, cancel := context.WithCancel(context.Background())
-		cancel()
-		return ctx
-	}
-	return ac.sessionContext
-}
-
-func (ac *AnalysisContext) ID() string {
-	return ac.id
-}
-
-// GetScreenshot returns the last captured screenshot, if any (Principle 5).
-func (ac *AnalysisContext) GetScreenshot() []byte {
-	ac.mu.Lock()
-	defer ac.mu.Unlock()
-	return ac.capturedScreenshot
-}
-
-// AddFinding is a helper method to append a finding to the context.
-// This resolves the build error in the ATO analyzer.
-func (ac *AnalysisContext) AddFinding(finding schemas.Finding) {
-	ac.mu.Lock()
-	defer ac.mu.Unlock()
-	ac.findings = append(ac.findings, finding)
-}
-
-// captureScreenshot attempts to take a full-page screenshot (Principle 5).
-func (ac *AnalysisContext) captureScreenshot(ctx context.Context) {
-	// Enforce a strict timeout for taking the screenshot (Principle 3).
-	captureCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+func (ac *AnalysisContext) Navigate(ctx context.Context, url string) error {
+	ac.logger.Debug("Navigating", zap.String("url", url))
+	runCtx, cancel := ac.createActionContext(ctx)
 	defer cancel()
-
-	var screenshotData []byte
-	if err := chromedp.Run(captureCtx, chromedp.FullScreenshot(&screenshotData, 80)); err != nil {
-		// Log only if the error wasn't due to context cancellation.
-		if captureCtx.Err() == nil && ctx.Err() == nil {
-			ac.logger.Warn("Failed to capture screenshot.", zap.Error(err))
-		}
-		return
-	}
-
-	ac.mu.Lock()
-	ac.capturedScreenshot = screenshotData
-	ac.mu.Unlock()
-	ac.logger.Info("Screenshot captured successfully.", zap.Int("size_bytes", len(screenshotData)))
+	return chromedp.Run(runCtx, chromedp.Navigate(url), chromedp.WaitReady("body", chromedp.ByQuery))
 }
 
-// bestEffortCleanupBrowserContext is used during failed initialization.
-func (ac *AnalysisContext) bestEffortCleanupBrowserContext(id cdp.BrowserContextID) {
-	if ac.controllerCtx == nil || ac.controllerCtx.Err() != nil {
-		return
+func (ac *AnalysisContext) Click(selector string) error {
+	ac.logger.Debug("Clicking", zap.String("selector", selector))
+	if ac.humanoid != nil {
+		return ac.humanoid.IntelligentClick(selector, nil).Do(ac.ctx)
 	}
-	cleanupCtx, cleanupCancel := context.WithTimeout(ac.controllerCtx, 5*time.Second)
-	defer cleanupCancel()
-	if err := target.DisposeBrowserContext(id).Do(cleanupCtx); err != nil {
-		ac.logger.Debug("Failed best-effort cleanup of orphaned browser context.", zap.String("browserContextID", string(id)), zap.Error(err))
-	}
+	return chromedp.Run(ac.ctx, chromedp.Click(selector, chromedp.NodeVisible))
 }
 
-// getContextDeadline helper to safely retrieve a context deadline.
-func getContextDeadline(ctx context.Context) time.Time {
-	deadline, ok := ctx.Deadline()
-	if !ok {
-		// If no deadline is set, return a time far in the future.
-		return time.Now().Add(24 * time.Hour)
+func (ac *AnalysisContext) Type(selector string, text string) error {
+	ac.logger.Debug("Typing", zap.String("selector", selector), zap.Int("length", len(text)))
+	if ac.humanoid != nil {
+		return ac.humanoid.Type(selector, text).Do(ac.ctx)
 	}
-	return deadline
+	return chromedp.Run(ac.ctx, chromedp.SendKeys(selector, text, chromedp.NodeVisible))
 }
 
-// applyInstrumentation injects the IAST shim.
-func (ac *AnalysisContext) applyInstrumentation(ctx context.Context) error {
-	if ac.taintShimTemplate == "" {
-		return nil
-	}
-	script, err := shim.BuildTaintShim(ac.taintShimTemplate, ac.taintConfigJSON)
-	if err != nil {
-		return fmt.Errorf("failed to build taint shim script: %w", err)
-	}
-	const callbackName = "scalpel_sink_event"
-	// Expose the callback function to JavaScript.
-	if err := runtime.AddBinding(callbackName).Do(ctx); err != nil {
-		return fmt.Errorf("failed to expose taint callback (%s): %w", callbackName, err)
-	}
-	// Inject the script to run on every new document load.
-	if _, err = page.AddScriptToEvaluateOnNewDocument(script).Do(ctx); err != nil {
-		return fmt.Errorf("failed to inject taint shim persistently: %w", err)
-	}
-	ac.logger.Debug("IAST instrumentation applied successfully.")
-	return nil
+func (ac *AnalysisContext) Submit(selector string) error {
+	ac.logger.Debug("Submitting form", zap.String("selector", selector))
+	return chromedp.Run(ac.ctx, chromedp.Submit(selector, chromedp.NodeVisible))
 }
 
-// eventListener handles various CDP events for the session.
-func (ac *AnalysisContext) eventListener(ev interface{}) {
-	// Handle instrumentation bindings.
-	if binding, ok := ev.(*runtime.EventBindingCalled); ok {
-		if binding.Name == "scalpel_sink_event" {
-			ac.handleTaintEvent(binding.Payload)
-		}
-		return
+func (ac *AnalysisContext) ScrollPage(direction string) error {
+	ac.logger.Debug("Scrolling", zap.String("direction", direction))
+	script := `window.scrollBy(0, window.innerHeight * 0.8);`
+	if direction == "up" {
+		script = `window.scrollBy(0, -window.innerHeight * 0.8);`
 	}
-
-	// Handle JavaScript dialogs (alerts, prompts, confirms) to prevent hanging the browser.
-	if msg, ok := ev.(*page.EventJavascriptDialogOpening); ok {
-		ac.logger.Info("JavaScript dialog opened. Automatically handling.", zap.String("type", string(msg.Type)), zap.String("message", msg.Message))
-		go ac.handleJSDialog(msg)
-	}
+	return chromedp.Run(ac.ctx, chromedp.Evaluate(script, nil))
 }
 
-// handleJSDialog automatically accepts JS dialogs.
-func (ac *AnalysisContext) handleJSDialog(ev *page.EventJavascriptDialogOpening) {
-	ctx := ac.GetContext()
-	if ctx.Err() != nil {
-		return
-	}
-	// Principle 3: Timeout for handling the dialog.
-	dialogCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+func (ac *AnalysisContext) WaitForAsync(milliseconds int) error {
+	ac.logger.Debug("Waiting for async operations", zap.Int("ms", milliseconds))
+	return chromedp.Run(ac.ctx, chromedp.Sleep(time.Duration(milliseconds)*time.Millisecond))
+}
+
+func (ac *AnalysisContext) ExposeFunction(ctx context.Context, name string, function interface{}) error {
+	ac.logger.Debug("Exposing function", zap.String("name", name))
+	return chromedp.Run(ac.ctx, runtime.AddBinding(name))
+}
+
+func (ac *AnalysisContext) InjectScriptPersistently(ctx context.Context, script string) error {
+	ac.logger.Debug("Injecting persistent script", zap.Int("length", len(script)))
+	runCtx, cancel := ac.createActionContext(ctx)
 	defer cancel()
-
-	// Accept the dialog.
-	err := page.HandleJavaScriptDialog(true).Do(dialogCtx)
-	if err != nil && dialogCtx.Err() == nil {
-		ac.logger.Warn("Failed to handle JavaScript dialog.", zap.Error(err))
-	}
-}
-
-func (ac *AnalysisContext) handleTaintEvent(payload string) {
-	// Placeholder: In a real implementation, this would parse the payload and generate a Finding.
-	ac.logger.Info("Taint Sink Triggered (IAST Event)", zap.String("payload", payload))
-}
-
-// collectStorageState gathers cookies, localStorage, and sessionStorage.
-func (ac *AnalysisContext) collectStorageState(ctx context.Context, artifacts *schemas.Artifacts) error {
-	storageResult := schemas.StorageState{
-		LocalStorage:   make(map[string]string),
-		SessionStorage: make(map[string]string),
-	}
-
-	// 1. Collect Cookies using the Storage domain (includes HttpOnly).
-	// This requires the BrowserContextID.
-	var cookies []*network.Cookie
-	err := chromedp.Run(ctx, chromedp.ActionFunc(func(c context.Context) (err error) {
-		cookies, err = storage.GetCookies().WithBrowserContextID(ac.browserContextID).Do(c)
+	return chromedp.Run(runCtx, chromedp.ActionFunc(func(ctx context.Context) error {
+		_, err := page.AddScriptToEvaluateOnNewDocument(script).Do(ctx)
 		return err
 	}))
-
-	storageResult.Cookies = cookies
-	artifacts.Storage = storageResult
-
-	if err != nil {
-		ac.logger.Warn("Could not retrieve cookies via CDP. Proceeding with JS fallback for other storage.", zap.Error(err))
-	}
-
-	// 2. Collect LocalStorage and SessionStorage using JavaScript evaluation.
-	return ac.collectStorageStateJSFallback(ctx, &storageResult)
 }
 
-// collectStorageStateJSFallback uses JavaScript evaluation to extract storage.
-func (ac *AnalysisContext) collectStorageStateJSFallback(ctx context.Context, storageResult *schemas.StorageState) error {
-	var jsStorage struct {
-		LocalStorage   map[string]string `json:"localStorage"`
-		SessionStorage map[string]string `json:"sessionStorage"`
-	}
-
-	// JavaScript snippet to safely collect storage data, handling potential SecurityErrors (e.g., cross-origin iframes).
-	jsScript := `(function() {
-        const result = { localStorage: {}, sessionStorage: {} };
-        try {
-            if (window.localStorage) {
-                Object.assign(result.localStorage, localStorage);
-            }
-        } catch (e) {
-            result.localStorage = { 'error': 'Access Denied: ' + e.message };
-        }
-        try {
-            if (window.sessionStorage) {
-                Object.assign(result.sessionStorage, sessionStorage);
-            }
-        } catch (e) {
-            result.sessionStorage = { 'error': 'Access Denied: ' + e.message };
-        }
-        return result;
-    })()`
-
-	err := chromedp.Run(ctx,
-		chromedp.Evaluate(jsScript, &jsStorage),
+func (ac *AnalysisContext) ExecuteScript(ctx context.Context, script string) error {
+	ac.logger.Debug("Executing script", zap.Int("length", len(script)))
+	runCtx, cancel := ac.createActionContext(ctx)
+	defer cancel()
+	return chromedp.Run(runCtx,
+		chromedp.Evaluate(script, nil),
 	)
+}
 
-	if err != nil {
-		return fmt.Errorf("JS evaluation for storage retrieval failed: %w", err)
+func (ac *AnalysisContext) Interact(ctx context.Context, config schemas.InteractionConfig) error {
+	ac.logger.Info("Starting automated interaction phase", zap.Int("max_depth", config.MaxDepth))
+	if ac.interactor == nil {
+		return fmt.Errorf("interactor not initialized")
+	}
+	return ac.interactor.RecursiveInteract(ctx, config)
+}
+
+func (ac *AnalysisContext) Close(ctx context.Context) error {
+	ac.logger.Debug("Closing analysis context")
+	if ac.manager != nil {
+		ac.manager.UnregisterSession(ac.sessionID)
+	}
+	if ac.cancel != nil {
+		ac.cancel()
+	}
+	return nil
+}
+
+// -- Private methods for handling listener events --
+
+func (ac *AnalysisContext) handleConsoleAPICalled(event *runtime.EventConsoleAPICalled) {
+	ac.artifactsMutex.Lock()
+	defer ac.artifactsMutex.Unlock()
+
+	logEntry := schemas.ConsoleLog{
+		Type:      event.Type.String(),
+		Timestamp: time.Now().UTC(),
+	}
+	for _, arg := range event.Args {
+		logEntry.Text += string(arg.Value) + " "
+	}
+	ac.artifacts.ConsoleLogs = append(ac.artifacts.ConsoleLogs, logEntry)
+}
+
+func (ac *AnalysisContext) handleRequestWillBeSent(event *network.EventRequestWillBeSent) {
+	ac.harMutex.Lock()
+	defer ac.harMutex.Unlock()
+
+	if _, ok := ac.harEntries[event.RequestID]; ok {
+		return
 	}
 
-	storageResult.LocalStorage = jsStorage.LocalStorage
-	storageResult.SessionStorage = jsStorage.SessionStorage
-	return nil
+	headers := make([]schemas.NVPair, 0, len(event.Request.Headers))
+	for k, v := range event.Request.Headers {
+		headers = append(headers, schemas.NVPair{Name: k, Value: fmt.Sprintf("%s", v)})
+	}
+
+	entry := &schemas.Entry{
+		StartedDateTime: event.Timestamp.Time(),
+		Request: schemas.Request{
+			Method:      event.Request.Method,
+			URL:         event.Request.URL,
+			Headers:     headers,
+			HeadersSize: -1,
+			BodySize:    -1, // We don't know the body size yet.
+		},
+		Response: schemas.Response{},
+		Cache:    struct{}{},
+		Timings:  schemas.Timings{},
+	}
+
+	ac.harEntries[event.RequestID] = entry
+}
+
+func (ac *AnalysisContext) handleResponseReceived(event *network.EventResponseReceived) {
+	ac.harMutex.Lock()
+	defer ac.harMutex.Unlock()
+
+	entry, ok := ac.harEntries[event.RequestID]
+	if !ok {
+		return
+	}
+
+	entry.Request.HTTPVersion = event.Response.Protocol
+	entry.Response.HTTPVersion = event.Response.Protocol
+
+	headers := make([]schemas.NVPair, 0, len(event.Response.Headers))
+	for k, v := range event.Response.Headers {
+		headers = append(headers, schemas.NVPair{Name: k, Value: fmt.Sprintf("%s", v)})
+	}
+
+	var redirectURL string
+	if loc, ok := event.Response.Headers["Location"].(string); ok {
+		redirectURL = loc
+	}
+
+	entry.Response.Status = int(event.Response.Status)
+	entry.Response.StatusText = event.Response.StatusText
+	entry.Response.Headers = headers
+	entry.Response.HeadersSize = -1
+	entry.Response.BodySize = int64(event.Response.EncodedDataLength)
+	entry.Response.RedirectURL = redirectURL
+	entry.Response.Content = schemas.Content{
+		Size:     int64(event.Response.EncodedDataLength),
+		MimeType: event.Response.MimeType,
+	}
+}
+
+func (ac *AnalysisContext) handleLoadingFinished(event *network.EventLoadingFinished) {
+	ac.harMutex.Lock()
+	entry, ok := ac.harEntries[event.RequestID]
+	ac.harMutex.Unlock()
+
+	if !ok {
+		return
+	}
+
+	entry.Time = event.Timestamp.Time().Sub(entry.StartedDateTime).Seconds() * 1000
+
+	// If the request was a POST, fetch the post data now.
+	if strings.ToUpper(entry.Request.Method) == "POST" {
+		// This action must be run against the session context.
+		postData, err := network.GetRequestPostData(event.RequestID).Do(ac.ctx)
+		if err == nil {
+			entry.Request.BodySize = int64(len(postData))
+			if entry.Request.PostData == nil {
+				entry.Request.PostData = &schemas.PostData{}
+			}
+			entry.Request.PostData.Text = postData
+			for _, h := range entry.Request.Headers {
+				if strings.EqualFold(h.Name, "Content-Type") {
+					entry.Request.PostData.MimeType = h.Value
+					break
+				}
+			}
+		}
+	}
+
+	if ac.config.Network.CaptureResponseBodies {
+		body, err := network.GetResponseBody(event.RequestID).Do(ac.ctx)
+		if err == nil {
+			entry.Response.Content.Text = string(body)
+		}
+	}
+
+	ac.artifactsMutex.Lock()
+	ac.artifacts.HAR.Log.Entries = append(ac.artifacts.HAR.Log.Entries, *entry)
+	ac.artifactsMutex.Unlock()
+
+	ac.harMutex.Lock()
+	delete(ac.harEntries, event.RequestID)
+	ac.harMutex.Unlock()
 }

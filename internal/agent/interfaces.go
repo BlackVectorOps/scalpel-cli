@@ -3,6 +3,7 @@ package agent
 
 import (
 	"context"
+
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 )
 
@@ -27,12 +28,4 @@ type ActionExecutor interface {
 	Execute(ctx context.Context, action Action) (*ExecutionResult, error)
 }
 
-// SessionContext defines the interface for interacting with a browser session.
-type SessionContext interface {
-	Navigate(url string) error
-	Click(selector string) error
-	Type(selector string, text string) error
-	Submit(selector string) error
-	ScrollPage(direction string) error
-	WaitForAsync(milliseconds int) error
-}
+// The internal SessionContext interface was removed as the codebase now relies on schemas.SessionContext.

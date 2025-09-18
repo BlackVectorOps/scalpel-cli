@@ -1,11 +1,11 @@
-// internal/discovery/discovery.go
+// internal/discovery/interfaces.go
 package discovery
 
 import (
 	"context"
 
-	// an interface to abstract away the concrete browser session implementation.
-	interfaces "github.com/xkilldash9x/scalpel-cli/internal/agent"
+	// Import the canonical schemas package for interface definitions.
+	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 )
 
 // Technology represents a detected web technology.
@@ -18,7 +18,7 @@ type Technology struct {
 
 // Discoverer defines the interface for technology discovery modules.
 // we keep this interface generic and decoupled from the underlying browser implementation.
-// It now operates on a SessionContext to allow for DOM-based and other interactive discoveries.
+// It now operates on the canonical SessionContext interface.
 type Discoverer interface {
-	Discover(ctx context.Context, session interfaces.SessionContext) ([]Technology, error)
+	Discover(ctx context.Context, session schemas.SessionContext) ([]Technology, error)
 }

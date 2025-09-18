@@ -1,8 +1,4 @@
 // File: cmd/scan.go
-// Description: Defines the `scan` command, which serves as the application's composition root.
-// This file is responsible for initializing all components and injecting them as interfaces
-// into the orchestrator, following the Dependency Injection pattern.
-
 package cmd
 
 import (
@@ -14,21 +10,26 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 	"go.uber.org/zap"
 
+	"github.com/xkilldash9x/scalpel-cli/api/schemas"
+	"github.com/xkilldash9x/scalpel-cli/internal/agent"
 	"github.com/xkilldash9x/scalpel-cli/internal/browser"
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
 	"github.com/xkilldash9x/scalpel-cli/internal/discovery"
 	"github.com/xkilldash9x/scalpel-cli/internal/engine"
-	"github.com/xkilldash9x/scalpel-cli/api/schemas"
-	"github.com/xkilldash9x/scalpel-cli/internal/knowledgegraph"
+	"github.com/xkilldash9x/scalpel-cli/internal/network"
 	"github.com/xkilldash9x/scalpel-cli/internal/observability"
 	"github.com/xkilldash9x/scalpel-cli/internal/orchestrator"
+	"github.com/xkilldash9x/scalpel-cli/internal/reporting"
+	"github.com/xkilldash9x/scalpel-cli/internal/results"
 	"github.com/xkilldash9x/scalpel-cli/internal/store"
-	"github.com/xkilldash9x/scalpel-cli/internal/worker"
 )
 
+// newScanCmd creates and configures the `scan` command and its flags.
 func newScanCmd() *cobra.Command {
 	var scanCfg config.ScanConfig
 
@@ -39,182 +40,139 @@ func newScanCmd() *cobra.Command {
 This includes discovery, task execution, and analysis against one or more root targets.
 Targets can be specified as command-line arguments.`,
 		Args: cobra.MinimumNArgs(1),
-		RunE: func(cmd *cobra.Command, argsstring) error {
+		RunE: func(cmd *cobra.Command, args []string) error {
 			scanCfg.Targets = args
 			scanID := uuid.New().String()
 			logger := observability.GetLogger()
 			cfg := config.Get()
 
+			if err := viper.BindPFlags(cmd.Flags()); err != nil {
+				return fmt.Errorf("failed to bind command flags: %w", err)
+			}
+			if err := viper.Unmarshal(cfg); err != nil {
+				return fmt.Errorf("failed to re-unmarshal config with flag overrides: %w", err)
+			}
+
 			logger.Info("Starting new scan", zap.String("scanID", scanID), zap.Strings("targets", scanCfg.Targets))
 
-			// Setup context for graceful shutdown
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 
-			// Handle termination signals
 			sigChan := make(chan os.Signal, 1)
 			signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 			go func() {
 				sig := <-sigChan
 				logger.Warn("Received termination signal, shutting down gracefully...", zap.String("signal", sig.String()))
 				cancel()
-				// Allow a moment for cleanup before force-exiting
 				time.Sleep(2 * time.Second)
 				os.Exit(1)
 			}()
 
-			// ========================================================================
-			// 1. COMPOSITION ROOT: Initialize all concrete component implementations
-			// ========================================================================
+			logger.Debug("Initializing components...")
 
-			// Initialize data stores
-			dbStore, err := store.New(cfg.Database)
-			if err!= nil {
+			dbPool, err := pgxpool.New(ctx, cfg.Database.URL)
+			if err != nil {
+				return fmt.Errorf("failed to connect to database: %w", err)
+			}
+			defer dbPool.Close()
+
+			dbStore, err := store.New(ctx, dbPool, logger)
+			if err != nil {
 				return fmt.Errorf("failed to initialize database store: %w", err)
 			}
-			defer dbStore.Close()
 
-			kg, err := knowledgegraph.NewPostgresKG(cfg.Database, logger)
-			if err!= nil {
-				return fmt.Errorf("failed to initialize knowledge graph: %w", err)
-			}
-
-			// Initialize browser manager
-			browserManager, err := browser.NewManager(ctx, *cfg, logger)
-			if err!= nil {
+			browserManager, err := browser.NewManager(ctx, logger, cfg)
+			if err != nil {
 				return fmt.Errorf("failed to initialize browser manager: %w", err)
 			}
-			defer browserManager.Close()
+			defer browserManager.Shutdown(ctx)
 
-			// Initialize worker pool and task engine
-			workerPool := worker.NewPool(cfg.Engine.WorkerConcurrency, cfg, logger, browserManager, kg, dbStore)
-			taskEngine := engine.New(cfg.Engine, logger, workerPool)
+			kg, err := agent.NewGraphStoreFromConfig(ctx, cfg.Agent.KnowledgeGraph, dbPool, logger)
+			if err != nil {
+				return fmt.Errorf("failed to initialize knowledge graph store: %w", err)
+			}
 
-			// Initialize discovery engine
-			// Note: Passive runner is currently nil, can be implemented later
-			var passiveRunner interfaces.DiscoveryEngine // Example of an injectable component
-			discoveryEngine := discovery.NewEngine(cfg.Discovery, logger, kg, browserManager, passiveRunner)
+			taskEngine, err := engine.New(cfg, logger, dbStore, browserManager, kg)
+			if err != nil {
+				return fmt.Errorf("failed to initialize task engine: %w", err)
+			}
 
-			// ========================================================================
-			// 2. DEPENDENCY INJECTION: Pass components as interfaces to the orchestrator
-			// ========================================================================
+			scopeManager, err := discovery.NewBasicScopeManager(args[0], true)
+			if err != nil {
+				return fmt.Errorf("failed to initialize scope manager: %w", err)
+			}
+
+			httpClient := network.NewClient(nil)
+			httpAdapter := discovery.NewHTTPClientAdapter(httpClient)
+
+			discoveryCfg := discovery.Config{
+				MaxDepth:           cfg.Discovery.MaxDepth,
+				Concurrency:        cfg.Discovery.Concurrency,
+				Timeout:            cfg.Discovery.Timeout,
+				PassiveEnabled:     cfg.Discovery.PassiveEnabled,
+				CrtShRateLimit:     cfg.Discovery.CrtShRateLimit,
+				CacheDir:           cfg.Discovery.CacheDir,
+				PassiveConcurrency: cfg.Discovery.PassiveConcurrency,
+			}
+
+			passiveRunner := discovery.NewPassiveRunner(discoveryCfg, httpAdapter, scopeManager, logger)
+			discoveryEngine := discovery.NewEngine(discoveryCfg, scopeManager, kg, browserManager, passiveRunner, logger)
+
+			logger.Debug("Injecting dependencies into orchestrator...")
 
 			orch, err := orchestrator.New(cfg, logger, discoveryEngine, taskEngine)
-			if err!= nil {
+			if err != nil {
 				return fmt.Errorf("failed to create orchestrator: %w", err)
 			}
 
-			// ========================================================================
-			// 3. EXECUTION: Start the scan
-			// ========================================================================
-
-			if err := orch.StartScan(ctx, scanCfg.Targets, scanID); err!= nil {
-				logger.Error("Scan failed", zap.Error(err), zap.String("scanID", scanID))
+			if err := orch.StartScan(ctx, scanCfg.Targets, scanID); err != nil {
+				logger.Error("Scan failed during orchestration", zap.Error(err), zap.String("scanID", scanID))
 				return err
 			}
 
-			logger.Info("Scan completed successfully", zap.String("scanID", scanID))
+			logger.Info("Scan discovery and task execution completed successfully", zap.String("scanID", scanID))
+
+			if scanCfg.Output != "" {
+				logger.Info("Generating scan report...", zap.String("format", scanCfg.Format), zap.String("output_path", scanCfg.Output))
+				reporter, err := reporting.New(scanCfg.Format, scanCfg.Output, logger, Version)
+				if err != nil {
+					return fmt.Errorf("failed to initialize reporter: %w", err)
+				}
+
+				pipeline := results.NewPipeline(dbStore, logger)
+				results, err := pipeline.ProcessScanResults(ctx, scanID)
+				if err != nil {
+					return fmt.Errorf("failed to process scan results for reporting: %w", err)
+				}
+
+				finalEnvelope := &schemas.ResultEnvelope{
+					ScanID:   scanID,
+					Findings: results.Findings,
+				}
+
+				if err := reporter.Write(finalEnvelope); err != nil {
+					_ = reporter.Close()
+					return fmt.Errorf("failed to write report: %w", err)
+				}
+				if err := reporter.Close(); err != nil {
+					return fmt.Errorf("failed to finalize and close report: %w", err)
+				}
+				logger.Info("Report generated successfully.", zap.String("path", scanCfg.Output))
+			}
+
 			fmt.Printf("\nScan Complete. Scan ID: %s\n", scanID)
-			fmt.Println("To generate a report, run: scalpel-cli report --scan-id", scanID)
+			if scanCfg.Output == "" {
+				fmt.Printf("To generate a report, run: scalpel-cli report --scan-id %s\n", scanID)
+			}
 
 			return nil
 		},
 	}
 
-	// Add flags for scan configuration here if needed, e.g., depth, etc.
-	// For now, we rely on the config file.
+	scanCmd.Flags().StringVarP(&scanCfg.Output, "output", "o", "", "Output file path for the report. If unset, no report is generated.")
+	scanCmd.Flags().StringVarP(&scanCfg.Format, "format", "f", "sarif", "Format for the output report (e.g., 'sarif', 'json').")
+	scanCmd.Flags().IntVar(&scanCfg.Depth, "depth", 0, "Maximum crawl depth. (0 uses config default)")
+	scanCmd.Flags().IntVar(&scanCfg.Concurrency, "concurrency", 0, "Number of concurrent browser instances. (0 uses config default)")
 
 	return scanCmd
-}
---------------------------------------------
-// File: internal/orchestrator/orchestrator.go
-// Description: Manages the high-level lifecycle of a scan. It is injected with
-// fully configured engine components via interfaces, making it decoupled and testable.
-
-package orchestrator
-
-import (
-	"context"
-	"fmt"
-	"time"
-
-	"go.uber.org/zap"
-
-	"github.com/xkilldash9x/scalpel-cli/internal/config"
-	// CORRECTED: All dependencies are now abstract interfaces.
-	"github.com/xkilldash9x/scalpel-cli/api/schemas"
-)
-
-// Orchestrator manages the high-level lifecycle of a scan.
-// It is injected with fully configured engine components.
-type Orchestrator struct {
-	cfg             *config.Config
-	logger          *zap.Logger
-	discoveryEngine interfaces.DiscoveryEngine
-	taskEngine      interfaces.TaskEngine
-}
-
-// New creates a new Orchestrator with its dependencies provided as interfaces.
-// This decoupling is crucial for testability and architectural flexibility.
-func New(
-	cfg *config.Config,
-	logger *zap.Logger,
-	discoveryEngine interfaces.DiscoveryEngine,
-	taskEngine interfaces.TaskEngine,
-) (*Orchestrator, error) {
-	if cfg == nil |
-
-| logger == nil |
-| discoveryEngine == nil |
-| taskEngine == nil {
-		return nil, fmt.Errorf("cannot initialize orchestrator with nil dependencies")
-	}
-	return &Orchestrator{
-		cfg:             cfg,
-		logger:          logger,
-		discoveryEngine: discoveryEngine,
-		taskEngine:      taskEngine,
-	}, nil
-}
-
-// StartScan executes the main scanning workflow.
-func (o *Orchestrator) StartScan(ctx context.Context, targetsstring, scanID string) error {
-	o.logger.Info("Orchestrator starting scan", zap.String("scanID", scanID))
-
-	// 1. Start the discovery engine. It will return a channel from which the
-	//    orchestrator can read newly discovered tasks.
-	taskChan, err := o.discoveryEngine.Start(ctx, targets)
-	if err!= nil {
-		return fmt.Errorf("failed to start discovery engine: %w", err)
-	}
-	o.logger.Info("Discovery engine started")
-
-	// 2. Start the task engine. It will begin consuming tasks from the channel
-	//    as they are produced by the discovery engine.
-	o.taskEngine.Start(ctx, taskChan)
-	o.logger.Info("Task engine started and waiting for tasks")
-
-	// 3. Wait for the context to be cancelled (e.g., by signal or timeout).
-	//    The engines are designed to run until the context is done.
-	<-ctx.Done()
-	o.logger.Info("Orchestrator received context cancellation signal")
-
-	// 4. Gracefully stop the engines.
-	o.logger.Info("Shutting down engines...")
-	o.discoveryEngine.Stop()
-	o.taskEngine.Stop()
-
-	// Allow a brief moment for final logs or cleanup to complete.
-	time.Sleep(500 * time.Millisecond)
-
-	o.logger.Info("Scan orchestration finished", zap.String("scanID", scanID))
-
-	// The discovery engine might have encountered a non-fatal error during its run.
-	// If the context was cancelled due to an error from one of the components,
-	// that error should be propagated up.
-	if err := ctx.Err(); err!= nil && err!= context.Canceled && err!= context.DeadlineExceeded {
-		return err
-	}
-
-	return nil
 }

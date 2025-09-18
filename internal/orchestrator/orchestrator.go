@@ -42,7 +42,6 @@ func New(
 	discoveryEngine schemas.DiscoveryEngine,
 	taskEngine schemas.TaskEngine,
 ) (*Orchestrator, error) {
-	// Fixed: Changed bitwise OR (|) to logical OR (||) and fixed formatting.
 	if cfg == nil ||
 		logger == nil ||
 		discoveryEngine == nil ||
@@ -58,27 +57,23 @@ func New(
 }
 
 // StartScan executes the main scanning workflow.
-// FIX: Changed signature to accept []string instead of a single string.
 func (o *Orchestrator) StartScan(ctx context.Context, targets []string, scanID string) error {
-	// FIX: Updated logging to include the targets slice.
 	o.logger.Info("Orchestrator starting scan", zap.String("scanID", scanID), zap.Strings("targets", targets))
 
-	// 1. Start the discovery engine. It will return a channel from which the
-	//    orchestrator can read newly discovered tasks.
-	// FIX: Pass the 'targets' slice, which matches the expected type for o.discoveryEngine.Start.
+	// 1. Start the discovery engine. It returns a channel that streams tasks.
 	taskChan, err := o.discoveryEngine.Start(ctx, targets)
 	if err != nil {
 		return fmt.Errorf("failed to start discovery engine: %w", err)
 	}
 	o.logger.Info("Discovery engine started")
 
-	// 2. Start the task engine. It will begin consuming tasks from the channel
-	//    as they are produced by the discovery engine.
+	// 2. Start the task engine, passing it the channel from the discovery engine.
+	// FIX: The TaskEngine now consumes tasks directly from the channel provided here.
 	o.taskEngine.Start(ctx, taskChan)
-	o.logger.Info("Task engine started and waiting for tasks")
+	o.logger.Info("Task engine started and consuming tasks")
 
-	// 3. Wait for the context to be cancelled (e.g., by signal or timeout).
-	//    The engines are designed to run until the context is done.
+	// 3. Wait for the context to be cancelled.
+	// The engines will run until discovery is complete or the context is cancelled.
 	<-ctx.Done()
 	o.logger.Info("Orchestrator received context cancellation signal")
 
@@ -92,9 +87,6 @@ func (o *Orchestrator) StartScan(ctx context.Context, targets []string, scanID s
 
 	o.logger.Info("Scan orchestration finished", zap.String("scanID", scanID))
 
-	// The discovery engine might have encountered a non-fatal error during its run.
-	// If the context was cancelled due to an error from one of the components,
-	// that error should be propagated up.
 	if err := ctx.Err(); err != nil && err != context.Canceled && err != context.DeadlineExceeded {
 		return err
 	}

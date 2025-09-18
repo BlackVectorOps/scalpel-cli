@@ -1,3 +1,4 @@
+// File: internal/observability/logger.go
 package observability
 
 import (
@@ -5,6 +6,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
 	"go.uber.org/zap"
@@ -13,9 +15,10 @@ import (
 )
 
 var (
-	// Use an atomic pointer for safe concurrent access.
+	// globalLogger stores the global logger instance safely across goroutines.
 	globalLogger atomic.Pointer[zap.Logger]
-	once         sync.Once
+	// once ensures that initialization happens exactly once.
+	once sync.Once
 )
 
 // ANSI color codes for the terminal.
@@ -44,7 +47,16 @@ var colorMap = map[string]string{
 }
 
 // InitializeLogger sets up the global Zap logger based on the configuration.
+// This function is thread-safe and idempotent. It defaults console output to Stdout.
 func InitializeLogger(cfg config.LoggerConfig) {
+	// FIX: Pass a locked Stdout to the internal initializer.
+	initializeLogger(cfg, zapcore.Lock(os.Stdout))
+}
+
+// initializeLogger is the internal implementation that accepts a WriteSyncer for console output.
+// This allows redirecting output during tests.
+func initializeLogger(cfg config.LoggerConfig, consoleWriter zapcore.WriteSyncer) {
+	// Ensures initialization logic runs only once.
 	once.Do(func() {
 		level := zap.NewAtomicLevel()
 		if err := level.UnmarshalText([]byte(cfg.Level)); err != nil {
@@ -52,12 +64,14 @@ func InitializeLogger(cfg config.LoggerConfig) {
 		}
 
 		consoleEncoder := getEncoder(cfg)
-		consoleCore := zapcore.NewCore(consoleEncoder, zapcore.Lock(os.Stdout), level)
+		// FIX: Use the provided consoleWriter instead of hardcoding os.Stdout.
+		consoleCore := zapcore.NewCore(consoleEncoder, consoleWriter, level)
 		cores := []zapcore.Core{consoleCore}
 
 		if cfg.LogFile != "" {
 			// File encoder is always JSON for structured logging.
 			fileEncoder := getEncoder(config.LoggerConfig{Format: "json"})
+			// lumberjack handles file rotation and thread-safe writes.
 			fileWriter := zapcore.AddSync(&lumberjack.Logger{
 				Filename:   cfg.LogFile,
 				MaxSize:    cfg.MaxSize,
@@ -76,22 +90,20 @@ func InitializeLogger(cfg config.LoggerConfig) {
 		}
 
 		logger := zap.New(core, options...).Named(cfg.ServiceName)
-		globalLogger.Store(logger) // Atomic store
+		globalLogger.Store(logger) // Atomically store the initialized logger.
 
+		// Replace the standard library logger and Zap's global loggers.
 		zap.ReplaceGlobals(logger)
 		zap.RedirectStdLog(logger)
 	})
 }
 
-// newColorizedLevelEncoder creates a zapcore.LevelEncoder that colorizes the log level
-// based on the provided color configuration. This function returns a closure that
-// matches the required zapcore.LevelEncoder type signature.
+// newColorizedLevelEncoder creates a zapcore.LevelEncoder that colorizes the log level.
 func newColorizedLevelEncoder(colors config.ColorConfig) zapcore.LevelEncoder {
 	return func(level zapcore.Level, enc zapcore.PrimitiveArrayEncoder) {
 		var color string
 		levelStr := strings.ToUpper(level.String())
 
-		// Grab the right color from the config map.
 		switch level {
 		case zapcore.DebugLevel:
 			color = colorMap[colors.Debug]
@@ -108,11 +120,9 @@ func newColorizedLevelEncoder(colors config.ColorConfig) zapcore.LevelEncoder {
 		case zapcore.FatalLevel:
 			color = colorMap[colors.Fatal]
 		default:
-			// Fallback for any other levels.
 			color = colorReset
 		}
 
-		// Apply color if it's defined.
 		if color != "" {
 			enc.AppendString(fmt.Sprintf("%s%s%s", color, levelStr, colorReset))
 		} else {
@@ -126,40 +136,44 @@ func getEncoder(cfg config.LoggerConfig) zapcore.Encoder {
 	encoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
 
 	if cfg.Format == "console" {
-		// If we're in console mode, we override the level encoder with our custom one.
 		encoderConfig.EncodeLevel = newColorizedLevelEncoder(cfg.Colors)
 		return zapcore.NewConsoleEncoder(encoderConfig)
 	}
 
-	// For JSON format, we don't want color codes, so we use the default.
+	// JSON format defaults.
 	encoderConfig.EncodeLevel = zapcore.CapitalLevelEncoder
 	return zapcore.NewJSONEncoder(encoderConfig)
 }
 
 // GetLogger returns the initialized global logger instance.
 func GetLogger() *zap.Logger {
-	logger := globalLogger.Load() // Atomic load
+	logger := globalLogger.Load() // Atomically load the logger pointer.
 	if logger == nil {
-		// Fallback mechanism
+		// Fallback mechanism if InitializeLogger hasn't been called.
 		l, err := zap.NewDevelopment()
 		if err != nil {
-			// Return NewNop() to prevent panic if development logger fails
 			return zap.NewNop()
 		}
+		// Log a warning that the fallback is being used.
+		l.Warn("Global logger requested before initialization; using fallback.")
 		return l.Named("fallback")
 	}
 	return logger
 }
 
-// Sync flushes any buffered log entries.
+// Sync flushes any buffered log entries. Applications should call this before exiting.
 func Sync() {
-	logger := globalLogger.Load() // Atomic load
+	logger := globalLogger.Load()
 	if logger != nil {
-		// Error is commonly ignored during shutdown, but log to stderr if critical.
 		if err := logger.Sync(); err != nil {
-			// Cannot rely on the logger itself, so print to stderr.
-			fmt.Fprintln(os.Stderr, "Error: failed to sync logger:", err)
+			// Handle common sync errors gracefully (e.g., writing to closed stdout/stderr on some OSes).
+			// This prevents noisy errors during application shutdown or test teardown.
+			errMsg := err.Error()
+			if !strings.Contains(errMsg, "sync /dev/stdout") &&
+				!strings.Contains(errMsg, "invalid argument") &&
+				!strings.Contains(errMsg, "operation not supported") {
+				fmt.Fprintln(os.Stderr, "Error: failed to sync logger:", err)
+			}
 		}
 	}
 }
-

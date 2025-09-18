@@ -1,4 +1,3 @@
-// internal/engine/engine.go
 package engine
 
 import (
@@ -6,14 +5,12 @@ import (
 	"fmt"
 	"net/url"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"go.uber.org/zap"
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
-	"github.com/xkilldash9x/scalpel-cli/internal/agent"
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
 	"github.com/xkilldash9x/scalpel-cli/internal/store"
 	"github.com/xkilldash9x/scalpel-cli/internal/worker"
@@ -25,11 +22,8 @@ type TaskEngine struct {
 	logger       *zap.Logger
 	storeService *store.Store
 	worker       *worker.MonolithicWorker
-	taskQueue    chan schemas.Task
 	wg           sync.WaitGroup
 	globalCtx    *core.GlobalContext
-	// an atomic flag to prevent submissions after Stop() has been called.
-	isStopping atomic.Bool
 }
 
 // New creates a new TaskEngine.
@@ -37,17 +31,15 @@ func New(
 	cfg *config.Config,
 	logger *zap.Logger,
 	storeService *store.Store,
-	browserManager interfaces.BrowserManager, // using the interface for decoupling
-	kg core.KnowledgeGraphClient,
+	browserManager schemas.BrowserManager,
+	kg schemas.KnowledgeGraphClient,
 ) (*TaskEngine, error) {
 
-	// This global context will be shared by all analyzers.
 	globalCtx := &core.GlobalContext{
 		Config:         cfg,
 		Logger:         logger,
 		BrowserManager: browserManager,
 		KGClient:       kg,
-		// Other global services like HTTPClient, etc. would be added here.
 	}
 
 	monoWorker, err := worker.NewMonolithicWorker(cfg, logger, globalCtx)
@@ -60,13 +52,13 @@ func New(
 		logger:       logger.With(zap.String("component", "task_engine")),
 		storeService: storeService,
 		worker:       monoWorker,
-		taskQueue:    make(chan schemas.Task, cfg.Engine.QueueSize),
 		globalCtx:    globalCtx,
 	}, nil
 }
 
-// Start launches the worker pool.
-func (e *TaskEngine) Start(ctx context.Context) {
+// Start launches the worker pool and begins consuming tasks from the provided channel.
+// This method now correctly implements the schemas.TaskEngine interface.
+func (e *TaskEngine) Start(ctx context.Context, taskChan <-chan schemas.Task) {
 	concurrency := e.cfg.Engine.WorkerConcurrency
 	if concurrency <= 0 {
 		concurrency = 4 // A sensible default.
@@ -76,56 +68,28 @@ func (e *TaskEngine) Start(ctx context.Context) {
 
 	for i := 0; i < concurrency; i++ {
 		e.wg.Add(1)
-		go e.runWorker(ctx, i+1)
+		// The worker now consumes from the taskChan passed in from the orchestrator.
+		go e.runWorker(ctx, i+1, taskChan)
 	}
 }
 
-// Stop gracefully shuts down the engine, ensuring all queued tasks are processed.
+// Stop gracefully shuts down the engine by waiting for all workers to finish.
 func (e *TaskEngine) Stop() {
-	// Atomically set the stopping flag. If it's already set, do nothing.
-	if !e.isStopping.CompareAndSwap(false, true) {
-		e.logger.Info("Task engine is already in the process of stopping.")
-		return
-	}
-
-	e.logger.Info("Stopping task engine... closing task queue.")
-	// Closing the channel signals workers to finish their current task and exit.
-	close(e.taskQueue)
-
-	// Wait for all worker goroutines to finish processing and exit.
+	e.logger.Info("Stopping task engine... waiting for workers to finish.")
+	// The channel is closed by the orchestrator; the engine just waits.
 	e.wg.Wait()
 	e.logger.Info("Task engine stopped gracefully.")
 }
 
-// SubmitTask adds a new task to the processing queue.
-func (e *TaskEngine) SubmitTask(task schemas.Task) error {
-	// CONCURRENCY SAFETY: Check the atomic flag to prevent a panic from sending on a closed channel.
-	if e.isStopping.Load() {
-		return fmt.Errorf("task engine is shutting down, cannot accept new task")
-	}
-
-	select {
-	case e.taskQueue <- task:
-		e.logger.Debug("Task submitted to queue", zap.String("task_id", task.TaskID), zap.String("type", string(task.Type)))
-		return nil
-	default:
-		// This can happen if the buffered channel is full.
-		return fmt.Errorf("task queue is full, cannot accept new task")
-	}
-}
-
 // runWorker is the main loop for a single worker goroutine.
-func (e *TaskEngine) runWorker(ctx context.Context, workerID int) {
+// It now receives the task channel as an argument.
+func (e *TaskEngine) runWorker(ctx context.Context, workerID int, taskChan <-chan schemas.Task) {
 	defer e.wg.Done()
 	logger := e.logger.With(zap.Int("worker_id", workerID))
 	logger.Info("Worker goroutine started")
 
-	/* This is the idiomatic way to process tasks until a channel is closed and drained.
-	 It ensures a graceful shutdown, unlike the previous implementation that would exit
-	 immediately on context cancellation, potentially leaving tasks in the queue. **/
-	for task := range e.taskQueue {
-		// The parent context `ctx` is passed to `process` so that individual,
-		// long-running tasks can still be cancelled (e.g., by a global timeout or Ctrl+C).
+	// This loop will process tasks until the orchestrator closes taskChan.
+	for task := range taskChan {
 		e.process(ctx, task, logger)
 	}
 
@@ -148,7 +112,7 @@ func (e *TaskEngine) process(ctx context.Context, task schemas.Task, logger *zap
 		TargetURL: targetURL,
 		Logger:    logger.With(zap.String("task_id", task.TaskID)),
 		Findings:  make([]schemas.Finding, 0),
-		KGUpdates: &schemas.KGUpdates{Nodes: []schemas.KGNode{}, Edges: []schemas.KGEdge{}},
+		KGUpdates: &schemas.KnowledgeGraphUpdate{NodesToAdd: []schemas.NodeInput{}, EdgesToAdd: []schemas.EdgeInput{}},
 	}
 
 	taskTimeout := e.cfg.Engine.DefaultTaskTimeout
@@ -163,7 +127,7 @@ func (e *TaskEngine) process(ctx context.Context, task schemas.Task, logger *zap
 		return
 	}
 
-	if len(analysisCtx.Findings) > 0 || (analysisCtx.KGUpdates != nil && (len(analysisCtx.KGUpdates.Nodes) > 0 || len(analysisCtx.KGUpdates.Edges) > 0)) {
+	if len(analysisCtx.Findings) > 0 || (analysisCtx.KGUpdates != nil && (len(analysisCtx.KGUpdates.NodesToAdd) > 0 || len(analysisCtx.KGUpdates.EdgesToAdd) > 0)) {
 		logger.Info("Task generated results, persisting...", zap.Int("findings", len(analysisCtx.Findings)))
 
 		resultEnvelope := &schemas.ResultEnvelope{
@@ -174,7 +138,6 @@ func (e *TaskEngine) process(ctx context.Context, task schemas.Task, logger *zap
 			KGUpdates: analysisCtx.KGUpdates,
 		}
 
-		// CONTEXT PROPAGATION: Derive persistence context from the main `ctx` to respect shutdown signals.
 		persistCtx, persistCancel := context.WithTimeout(ctx, 30*time.Second)
 		defer persistCancel()
 

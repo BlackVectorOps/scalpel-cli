@@ -1,4 +1,4 @@
-// core/core_test.go
+// File: internal/analysis/core/core_test.go
 package core
 
 import (
@@ -7,7 +7,7 @@ import (
 	"os"
 	"sync"
 	"testing"
-	"time"
+	// "time" // Removed unused import.
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -19,7 +19,6 @@ import (
 // -- Mock Implementations for Testing --
 
 // mockReporter is a thread safe mock for the Reporter interface.
-// It's used to capture the output of analyzers in a test environment.
 type mockReporter struct {
 	mu        sync.Mutex
 	envelopes []*schemas.ResultEnvelope
@@ -40,7 +39,6 @@ func (m *mockReporter) Write(envelope *schemas.ResultEnvelope) error {
 func (m *mockReporter) GetEnvelopes() []*schemas.ResultEnvelope {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	// returning a copy to prevent race conditions
 	envelopesCopy := make([]*schemas.ResultEnvelope, len(m.envelopes))
 	copy(envelopesCopy, m.envelopes)
 	return envelopesCopy
@@ -55,19 +53,15 @@ func (m *mockReporter) Reset() {
 
 // -- Test Fixture Setup --
 
-// coreTestFixture holds the shared resources for all tests in this package.
 type coreTestFixture struct {
 	Logger   *zap.Logger
 	Reporter *mockReporter
 }
 
-// globalFixture is the single, shared instance of our test fixture.
 var globalFixture *coreTestFixture
 
-// TestMain sets up the global test fixture before any tests are run
-// and handles teardown after all tests have completed.
+// TestMain sets up the global test fixture.
 func TestMain(m *testing.M) {
-	// -- setting up our global fixture --
 	logger, err := zap.NewDevelopment()
 	if err != nil {
 		fmt.Printf("Failed to create logger for tests: %v\n", err)
@@ -79,18 +73,15 @@ func TestMain(m *testing.M) {
 		Reporter: &mockReporter{},
 	}
 
-	// -- run all the tests --
 	exitCode := m.Run()
 
-	// -- a spot of cleanup --
-	_ = globalFixture.Logger.Sync() // flushes any buffered log entries
-
+	_ = globalFixture.Logger.Sync()
 	os.Exit(exitCode)
 }
 
 // -- Test Cases --
 
-// TestBaseAnalyzer thoroughly tests the BaseAnalyzer functionality.
+// TestBaseAnalyzer tests the BaseAnalyzer functionality.
 func TestBaseAnalyzer(t *testing.T) {
 	t.Parallel()
 	fixture := globalFixture
@@ -101,20 +92,19 @@ func TestBaseAnalyzer(t *testing.T) {
 	t.Run("NewBaseAnalyzer should create ACTIVE analyzer", func(t *testing.T) {
 		t.Parallel()
 		analyzer := NewBaseAnalyzer(analyzerName, analyzerDesc, TypeActive, fixture.Logger)
-		require.NotNil(t, analyzer, "NewBaseAnalyzer should not return nil")
+		require.NotNil(t, analyzer)
 
-		assert.Equal(t, analyzerName, analyzer.Name(), "Name() should return the correct name")
-		assert.Equal(t, analyzerDesc, analyzer.Description(), "Description() should return the correct description")
-		assert.Equal(t, TypeActive, analyzer.Type(), "Type() should return ACTIVE")
-		require.NotNil(t, analyzer.Logger, "Logger should not be nil")
+		assert.Equal(t, analyzerName, analyzer.Name())
+		assert.Equal(t, analyzerDesc, analyzer.Description())
+		assert.Equal(t, TypeActive, analyzer.Type())
+		require.NotNil(t, analyzer.Logger)
 	})
 
 	t.Run("NewBaseAnalyzer should create PASSIVE analyzer", func(t *testing.T) {
 		t.Parallel()
 		analyzer := NewBaseAnalyzer(analyzerName, analyzerDesc, TypePassive, fixture.Logger)
-		require.NotNil(t, analyzer, "NewBaseAnalyzer should not return nil")
-
-		assert.Equal(t, TypePassive, analyzer.Type(), "Type() should return PASSIVE")
+		require.NotNil(t, analyzer)
+		assert.Equal(t, TypePassive, analyzer.Type())
 	})
 }
 
@@ -122,14 +112,13 @@ func TestBaseAnalyzer(t *testing.T) {
 func TestAnalysisContext(t *testing.T) {
 	t.Parallel()
 
-	// -- creating a base context for the tests in this function --
 	baseAc := &AnalysisContext{
 		Global: &GlobalContext{
 			Logger: globalFixture.Logger,
 		},
 		Task: schemas.Task{
 			ScanID:  uuid.NewString(),
-			Timeout: 60,
+			// FIX: Timeout field removed as it's no longer in schemas.Task.
 		},
 		TargetURL: &url.URL{
 			Scheme: "https",
@@ -141,23 +130,26 @@ func TestAnalysisContext(t *testing.T) {
 
 	t.Run("AddFinding should correctly add findings", func(t *testing.T) {
 		t.Parallel()
-		// creating a copy of the base context to ensure test isolation
 		ac := *baseAc
-		ac.Findings = nil // Ensure we start with a clean slate
+		ac.Findings = nil
 
-		// first finding to add
-		finding1 := schemas.Finding{Title: "First Test Finding"}
+		// FIX: Updated to use Vulnerability struct instead of Title field.
+		finding1 := schemas.Finding{
+			Vulnerability: schemas.Vulnerability{Name: "First Test Finding"},
+		}
 		ac.AddFinding(finding1)
 
-		require.Len(t, ac.Findings, 1, "Should have one finding after the first addition")
-		assert.Equal(t, "First Test Finding", ac.Findings[0].Title)
+		require.Len(t, ac.Findings, 1)
+		// FIX: Updated assertion to check Vulnerability.Name instead of Title.
+		assert.Equal(t, "First Test Finding", ac.Findings[0].Vulnerability.Name)
 
-		// second finding to add
-		finding2 := schemas.Finding{Title: "Second Test Finding"}
+		finding2 := schemas.Finding{
+			Vulnerability: schemas.Vulnerability{Name: "Second Test Finding"},
+		}
 		ac.AddFinding(finding2)
 
-		require.Len(t, ac.Findings, 2, "Should have two findings after the second addition")
-		assert.Equal(t, "Second Test Finding", ac.Findings[1].Title)
+		require.Len(t, ac.Findings, 2)
+		assert.Equal(t, "Second Test Finding", ac.Findings[1].Vulnerability.Name)
 	})
 
 	t.Run("AddFinding should populate ScanID from task if missing", func(t *testing.T) {
@@ -165,11 +157,13 @@ func TestAnalysisContext(t *testing.T) {
 		ac := *baseAc
 		ac.Findings = nil
 
-		finding := schemas.Finding{Title: "Finding without ScanID"}
+		finding := schemas.Finding{
+			Vulnerability: schemas.Vulnerability{Name: "Finding without ScanID"},
+		}
 		ac.AddFinding(finding)
 
 		require.Len(t, ac.Findings, 1)
-		assert.Equal(t, ac.Task.ScanID, ac.Findings[0].ScanID, "ScanID should be populated from the task context")
+		assert.Equal(t, ac.Task.ScanID, ac.Findings[0].ScanID)
 	})
 
 	t.Run("AddFinding should not overwrite existing ScanID", func(t *testing.T) {
@@ -179,13 +173,13 @@ func TestAnalysisContext(t *testing.T) {
 
 		customScanID := "custom-" + uuid.NewString()
 		finding := schemas.Finding{
-			Title:  "Finding with custom ScanID",
+			Vulnerability: schemas.Vulnerability{Name: "Finding with custom ScanID"},
 			ScanID: customScanID,
 		}
 		ac.AddFinding(finding)
 
 		require.Len(t, ac.Findings, 1)
-		assert.Equal(t, customScanID, ac.Findings[0].ScanID, "Existing ScanID should be preserved")
+		assert.Equal(t, customScanID, ac.Findings[0].ScanID)
 	})
 }
 
@@ -193,7 +187,6 @@ func TestAnalysisContext(t *testing.T) {
 func TestIdentifierConstants(t *testing.T) {
 	t.Parallel()
 
-	// -- makes sure our types are what they say they are --
 	t.Run("IdentifierType constants", func(t *testing.T) {
 		t.Parallel()
 		assert.Equal(t, "Unknown", string(TypeUnknown))
@@ -203,7 +196,6 @@ func TestIdentifierConstants(t *testing.T) {
 		assert.Equal(t, "Base64", string(TypeBase64))
 	})
 
-	// -- makes sure our locations are where we think they are --
 	t.Run("IdentifierLocation constants", func(t *testing.T) {
 		t.Parallel()
 		assert.Equal(t, "URLPath", string(LocationURLPath))
