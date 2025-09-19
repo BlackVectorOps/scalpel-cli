@@ -99,8 +99,9 @@ func (m *MockSessionContext) Navigate(ctx context.Context, url string) error {
 	return args.Error(0)
 }
 
-func (m *MockSessionContext) WaitForAsync(ctx context.Context, milliseconds int) error {
-	args := m.Called(ctx, milliseconds)
+// FIX: Signature updated to match the interface (removed context.Context).
+func (m *MockSessionContext) WaitForAsync(milliseconds int) error {
+	args := m.Called(milliseconds)
 	return args.Error(0)
 }
 
@@ -241,7 +242,7 @@ func TestNewAnalyzer_Defaults(t *testing.T) {
 	require.NotNil(t, analyzer)
 
 	// Verify defaults
-	assert.Equal(t, 500, analyzer.config.EventChannelBuffer)
+	assert.Equal(t, 1000, analyzer.config.EventChannelBuffer)
 	assert.Equal(t, 10*time.Second, analyzer.config.FinalizationGracePeriod)
 	assert.Equal(t, 10*time.Minute, analyzer.config.ProbeExpirationDuration)
 	assert.Equal(t, 1*time.Minute, analyzer.config.CleanupInterval)
@@ -524,7 +525,8 @@ func setupCorrelationTest(t *testing.T) (*Analyzer, *MockResultsReporter) {
 
 	analyzer.backgroundCtx, analyzer.backgroundCancel = context.WithCancel(context.Background())
 	analyzer.wg.Add(1)
-	go analyzer.correlate()
+	// FIX: Call the correct worker method instead of the non-existent 'correlate'.
+	go analyzer.correlateWorker(0)
 	return analyzer, reporter
 }
 

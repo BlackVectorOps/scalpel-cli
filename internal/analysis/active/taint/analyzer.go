@@ -1,4 +1,3 @@
-// internal/analysis/active/taint/analyzer.go
 package taint
 
 import (
@@ -28,24 +27,35 @@ const taintShimFilename = "taint_shim.js"
 // Canary format: SCALPEL_{Prefix}_{Type}_{UUID_Short}
 var canaryRegex = regexp.MustCompile(`SCALPEL_[A-Z]+_[A-Z_]+_[a-f0-9]{8}`)
 
-// Analyzer is the brains of the whole IAST operation.
+// Analyzer is the central nervous system of the IAST operation. It orchestrates probe
+// injection, event collection, and vulnerability correlation.
 type Analyzer struct {
-	config           Config
-	reporter         ResultsReporter
-	oastProvider     OASTProvider
-	logger           *zap.Logger
-	activeProbes     map[string]ActiveProbe
-	probesMutex      sync.RWMutex
-	eventsChan       chan Event
-	wg               sync.WaitGroup
-	producersWG      sync.WaitGroup
+	config       Config
+	reporter     ResultsReporter
+	oastProvider OASTProvider
+	logger       *zap.Logger
+	shimTemplate *template.Template
+
+	// -- State Management --
+	activeProbes map[string]ActiveProbe
+	probesMutex  sync.RWMutex // Protects activeProbes. Optimized for many concurrent reads from correlation workers.
+
+	// -- Concurrency Control --
+	// The primary communication channel from producers (JS callbacks, OAST poller) to consumers (correlation workers).
+	eventsChan chan Event
+
+	// wg tracks the lifecycle of the correlation worker pool.
+	wg sync.WaitGroup
+	// producersWG tracks the background producer goroutines (probe cleanup, OAST polling).
+	producersWG sync.WaitGroup
+
+	// backgroundCtx and backgroundCancel are used to signal a graceful shutdown to the producer goroutines.
 	backgroundCtx    context.Context
 	backgroundCancel context.CancelFunc
-	shimTemplate     *template.Template
 }
 
-// NewAnalyzer initializes a new analyzer.
-// The signature no longer requires a BrowserInteractor. The session is passed to Analyze directly.
+// NewAnalyzer initializes the analyzer, applies configuration defaults,
+// and prepares the instrumentation shim template.
 func NewAnalyzer(config Config, reporter ResultsReporter, oastProvider OASTProvider, logger *zap.Logger) (*Analyzer, error) {
 	taskLogger := logger.Named("taint_analyzer").With(zap.String("task_id", config.TaskID))
 
@@ -55,21 +65,8 @@ func NewAnalyzer(config Config, reporter ResultsReporter, oastProvider OASTProvi
 		return nil, fmt.Errorf("failed to parse embedded shim: %w", err)
 	}
 
-	if config.EventChannelBuffer == 0 {
-		config.EventChannelBuffer = 500
-	}
-	if config.FinalizationGracePeriod == 0 {
-		config.FinalizationGracePeriod = 10 * time.Second
-	}
-	if config.ProbeExpirationDuration == 0 {
-		config.ProbeExpirationDuration = 10 * time.Minute
-	}
-	if config.CleanupInterval == 0 {
-		config.CleanupInterval = 1 * time.Minute
-	}
-	if config.OASTPollingInterval == 0 {
-		config.OASTPollingInterval = 20 * time.Second
-	}
+	// Apply robust defaults for performance and stability.
+	config = applyConfigDefaults(config)
 
 	return &Analyzer{
 		config:       config,
@@ -82,25 +79,52 @@ func NewAnalyzer(config Config, reporter ResultsReporter, oastProvider OASTProvi
 	}, nil
 }
 
-// Analyze kicks off the analysis for a given target, using a provided browser session.
-// The signature now accepts a SessionContext, decoupling the analyzer from session creation.
+// applyConfigDefaults ensures that critical configuration parameters have sane default values.
+func applyConfigDefaults(cfg Config) Config {
+	if cfg.EventChannelBuffer == 0 {
+		// A larger buffer is a good default for a worker pool model to absorb bursts.
+		cfg.EventChannelBuffer = 1000
+	}
+	if cfg.FinalizationGracePeriod == 0 {
+		cfg.FinalizationGracePeriod = 10 * time.Second
+	}
+	if cfg.ProbeExpirationDuration == 0 {
+		cfg.ProbeExpirationDuration = 10 * time.Minute
+	}
+	if cfg.CleanupInterval == 0 {
+		cfg.CleanupInterval = 1 * time.Minute
+	}
+	if cfg.OASTPollingInterval == 0 {
+		cfg.OASTPollingInterval = 20 * time.Second
+	}
+	if cfg.CorrelationWorkers == 0 {
+		// Default to a small pool of concurrent workers for processing events.
+		cfg.CorrelationWorkers = 5
+	}
+	return cfg
+}
+
+// Analyze executes the IAST analysis for a target URL using a provided browser session.
+// It orchestrates instrumentation, probing, and the graceful shutdown of background workers.
 func (a *Analyzer) Analyze(ctx context.Context, session SessionContext) error {
-	a.logger.Info("Starting IAST analysis", zap.String("target", a.config.Target.String()))
+	a.logger.Info("Starting IAST analysis",
+		zap.String("target", a.config.Target.String()),
+		zap.Int("correlation_workers", a.config.CorrelationWorkers),
+	)
 
 	analysisCtx, cancel := context.WithTimeout(ctx, a.config.AnalysisTimeout)
 	defer cancel()
 
 	a.backgroundCtx, a.backgroundCancel = context.WithCancel(context.Background())
 
-	// The session is now provided by the caller (the adapter).
-	// We no longer call a.browser.InitializeSession here.
-
 	if err := a.instrument(analysisCtx, session); err != nil {
 		return fmt.Errorf("failed to instrument browser: %w", err)
 	}
 
+	// Launch the concurrent machinery: the correlation worker pool and background producers.
 	a.startBackgroundWorkers()
 
+	// Execute the attack vectors and user interactions.
 	if err := a.executeProbes(analysisCtx, session); err != nil {
 		a.logger.Error("Error encountered during probing phase", zap.Error(err))
 	}
@@ -114,30 +138,54 @@ func (a *Analyzer) Analyze(ctx context.Context, session SessionContext) error {
 		a.logger.Warn("Analysis timeout reached during finalization grace period.")
 	}
 
-	a.backgroundCancel()
-	a.producersWG.Wait()
-	close(a.eventsChan)
-	a.wg.Wait()
+	// Initiate a graceful shutdown of all background processes.
+	a.shutdown()
 
 	a.logger.Info("IAST analysis completed")
 	return nil
 }
 
-// startBackgroundWorkers launches the necessary background goroutines.
-func (a *Analyzer) startBackgroundWorkers() {
-	a.wg.Add(1)
-	go a.correlate()
+// shutdown handles the ordered, graceful shutdown of all goroutines.
+// This ensures that all events are processed and no data is lost.
+func (a *Analyzer) shutdown() {
+	a.logger.Debug("Initiating graceful shutdown.")
+	// 1. Signal background producers (OAST, Cleanup) to stop their work.
+	a.backgroundCancel()
+	// 2. Wait for producers to finish their final cycles (e.g., one last OAST poll).
+	a.producersWG.Wait()
+	a.logger.Debug("All event producers have stopped.")
 
+	// 3. Close the event channel. This is the signal for the correlation workers to drain the channel and terminate.
+	close(a.eventsChan)
+	// 4. Wait for all correlation workers to complete processing any remaining events in the buffer.
+	a.wg.Wait()
+	a.logger.Debug("All correlation workers have finished.")
+}
+
+// startBackgroundWorkers launches the correlation worker pool and other background tasks.
+func (a *Analyzer) startBackgroundWorkers() {
+	a.logger.Debug("Starting background workers.", zap.Int("correlation_workers", a.config.CorrelationWorkers))
+	// -- Consumers --
+	// Launch the Correlation Worker Pool to process events concurrently.
+	for i := 0; i < a.config.CorrelationWorkers; i++ {
+		a.wg.Add(1)
+		go a.correlateWorker(i)
+	}
+
+	// -- Producers --
+	// Launch the background task to clean up expired probes.
 	a.producersWG.Add(1)
 	go a.cleanupExpiredProbes()
 
+	// Launch the OAST poller if a provider is configured.
 	if a.oastProvider != nil {
 		a.producersWG.Add(1)
 		go a.pollOASTInteractions()
 	}
 }
 
-// instrument hooks into the client side.
+// instrument hooks into the client side by exposing Go functions to JavaScript
+// and injecting the instrumentation shim.
 func (a *Analyzer) instrument(ctx context.Context, session SessionContext) error {
 	if err := session.ExposeFunction(ctx, JSCallbackSinkEvent, a.handleSinkEvent); err != nil {
 		return fmt.Errorf("failed to expose sink event callback: %w", err)
@@ -161,7 +209,7 @@ func (a *Analyzer) instrument(ctx context.Context, session SessionContext) error
 	return nil
 }
 
-// generateShim creates the javascript instrumentation code.
+// generateShim creates the javascript instrumentation code from the embedded template.
 func (a *Analyzer) generateShim() (string, error) {
 	sinksJSON, err := json.Marshal(a.config.Sinks)
 	if err != nil {
@@ -188,38 +236,38 @@ func (a *Analyzer) generateShim() (string, error) {
 	return buf.String(), nil
 }
 
-// handleSinkEvent is the callback from the JS shim.
-func (a *Analyzer) handleSinkEvent(event SinkEvent) {
+// enqueueEvent provides a safe, non blocking mechanism for sending an event to the correlation engine.
+// It handles shutdown signals and channel backpressure gracefully.
+func (a *Analyzer) enqueueEvent(event Event, eventType string) {
+	// First, check if a shutdown has been initiated. If so, don't accept new events.
 	select {
 	case <-a.backgroundCtx.Done():
-		a.logger.Debug("Dropping sink event during shutdown.", zap.String("sink", string(event.Type)))
+		a.logger.Debug("Dropping event during shutdown.", zap.String("type", eventType))
 		return
 	default:
+		// The context is still active, proceed to send the event.
 	}
 
+	// Attempt to send the event, but drop it if the channel is full to prevent blocking the producer.
 	select {
 	case a.eventsChan <- event:
-		a.logger.Debug("Sink event received", zap.String("sink", string(event.Type)), zap.String("detail", event.Detail))
+		// The event was successfully enqueued.
 	default:
-		a.logger.Warn("Event channel full, dropping sink event.", zap.String("sink", string(event.Type)))
+		// This case handles backpressure, which is critical for system stability.
+		a.logger.Warn("Event channel full, dropping event. Consider increasing CorrelationWorkers or EventChannelBuffer.", zap.String("type", eventType))
 	}
 }
 
-// handleExecutionProof is the callback when an XSS payload executes.
-func (a *Analyzer) handleExecutionProof(event ExecutionProofEvent) {
-	select {
-	case <-a.backgroundCtx.Done():
-		a.logger.Debug("Dropping execution proof during shutdown.", zap.String("canary", event.Canary))
-		return
-	default:
-	}
+// handleSinkEvent is the callback from the JS shim for a detected taint flow.
+func (a *Analyzer) handleSinkEvent(event SinkEvent) {
+	a.logger.Debug("Sink event received", zap.String("sink", string(event.Type)), zap.String("detail", event.Detail))
+	a.enqueueEvent(event, "SinkEvent")
+}
 
-	select {
-	case a.eventsChan <- event:
-		a.logger.Info("Execution proof received!", zap.String("canary", event.Canary))
-	default:
-		a.logger.Warn("Event channel full, dropping execution proof.")
-	}
+// handleExecutionProof is the callback when an XSS payload executes successfully.
+func (a *Analyzer) handleExecutionProof(event ExecutionProofEvent) {
+	a.logger.Info("Execution proof received!", zap.String("canary", event.Canary))
+	a.enqueueEvent(event, "ExecutionProofEvent")
 }
 
 // handleShimError is the callback for internal errors within the JavaScript instrumentation.
@@ -231,7 +279,7 @@ func (a *Analyzer) handleShimError(event ShimErrorEvent) {
 	)
 }
 
-// executeProbes orchestrates the probing strategies.
+// executeProbes orchestrates the various probing strategies against the target.
 func (a *Analyzer) executeProbes(ctx context.Context, session SessionContext) error {
 	if err := session.Navigate(ctx, a.config.Target.String()); err != nil {
 		a.logger.Warn("Initial navigation failed, attempting to continue probes.", zap.Error(err))
@@ -253,12 +301,12 @@ func (a *Analyzer) executeProbes(ctx context.Context, session SessionContext) er
 	return nil
 }
 
-// generateCanary creates a unique canary string.
+// generateCanary creates a unique canary string for tracking a probe.
 func (a *Analyzer) generateCanary(prefix string, probeType schemas.ProbeType) string {
 	return fmt.Sprintf("SCALPEL_%s_%s_%s", prefix, probeType, uuid.New().String()[:8])
 }
 
-// preparePayload replaces placeholders (Canary, OASTServer) in the probe definition.
+// preparePayload replaces placeholders in a probe definition with a canary and OAST server URL.
 func (a *Analyzer) preparePayload(probeDef ProbeDefinition, canary string) string {
 	requiresOAST := strings.Contains(probeDef.Payload, "{{.OASTServer}}")
 	if requiresOAST && a.oastProvider == nil {
@@ -289,55 +337,74 @@ func (a *Analyzer) probePersistentSources(ctx context.Context, session SessionCo
 	}
 
 	for i, probeDef := range a.config.Probes {
-		canary := a.generateCanary("P", probeDef.Type)
-		payload := a.preparePayload(probeDef, canary)
-		if payload == "" {
-			continue
+		// FIX: Generate a unique canary and payload for each storage type to prevent overwrites in the activeProbes map.
+
+		// -- LocalStorage --
+		lsCanary := a.generateCanary("P", probeDef.Type)
+		lsPayload := a.preparePayload(probeDef, lsCanary)
+		if lsPayload != "" {
+			jsonPayload, err := json.Marshal(lsPayload)
+			if err != nil {
+				a.logger.Error("Failed to JSON encode LocalStorage payload", zap.Error(err))
+			} else {
+				jsPayload := string(jsonPayload)
+				lsKey := fmt.Sprintf("%s%d", storageKeyPrefix, i)
+				fmt.Fprintf(&injectionScriptBuilder, "localStorage.setItem(%q, %s);\n", lsKey, jsPayload)
+				a.registerProbe(ActiveProbe{
+					Type:      probeDef.Type,
+					Key:       lsKey,
+					Value:     lsPayload,
+					Canary:    lsCanary,
+					Source:    schemas.SourceLocalStorage,
+					CreatedAt: time.Now(),
+				})
+			}
 		}
 
-		jsonPayload, err := json.Marshal(payload)
-		if err != nil {
-			a.logger.Error("Failed to JSON encode payload", zap.Error(err))
-			continue
+		// -- SessionStorage --
+		ssCanary := a.generateCanary("P", probeDef.Type)
+		ssPayload := a.preparePayload(probeDef, ssCanary)
+		if ssPayload != "" {
+			jsonPayload, err := json.Marshal(ssPayload)
+			if err != nil {
+				a.logger.Error("Failed to JSON encode SessionStorage payload", zap.Error(err))
+			} else {
+				jsPayload := string(jsonPayload)
+				ssKey := fmt.Sprintf("%s%d_s", storageKeyPrefix, i)
+				fmt.Fprintf(&injectionScriptBuilder, "sessionStorage.setItem(%q, %s);\n", ssKey, jsPayload)
+				a.registerProbe(ActiveProbe{
+					Type:      probeDef.Type,
+					Key:       ssKey,
+					Value:     ssPayload,
+					Canary:    ssCanary,
+					Source:    schemas.SourceSessionStorage,
+					CreatedAt: time.Now(),
+				})
+			}
 		}
-		jsPayload := string(jsonPayload)
 
-		// LocalStorage
-		lsKey := fmt.Sprintf("%s%d", storageKeyPrefix, i)
-		fmt.Fprintf(&injectionScriptBuilder, "localStorage.setItem(%q, %s);\n", lsKey, jsPayload)
-		a.registerProbe(ActiveProbe{
-			Type:      probeDef.Type,
-			Key:       lsKey,
-			Value:     payload,
-			Canary:    canary,
-			Source:    schemas.SourceLocalStorage,
-			CreatedAt: time.Now(),
-		})
-
-		// SessionStorage
-		ssKey := fmt.Sprintf("%s%d_s", storageKeyPrefix, i)
-		fmt.Fprintf(&injectionScriptBuilder, "sessionStorage.setItem(%q, %s);\n", ssKey, jsPayload)
-		a.registerProbe(ActiveProbe{
-			Type:      probeDef.Type,
-			Key:       ssKey,
-			Value:     payload,
-			Canary:    canary,
-			Source:    schemas.SourceSessionStorage,
-			CreatedAt: time.Now(),
-		})
-
-		// Cookies
-		cookieName := fmt.Sprintf("%s%d", cookieNamePrefix, i)
-		cookieCommand := fmt.Sprintf("document.cookie = `${%q}=${encodeURIComponent(%s)}; path=/; max-age=3600; samesite=Lax;%s`;\n", cookieName, jsPayload, secureFlag)
-		injectionScriptBuilder.WriteString(cookieCommand)
-		a.registerProbe(ActiveProbe{
-			Type:      probeDef.Type,
-			Key:       cookieName,
-			Value:     payload,
-			Canary:    canary,
-			Source:    schemas.SourceCookie,
-			CreatedAt: time.Now(),
-		})
+		// -- Cookies --
+		cookieCanary := a.generateCanary("P", probeDef.Type)
+		cookiePayload := a.preparePayload(probeDef, cookieCanary)
+		if cookiePayload != "" {
+			jsonPayload, err := json.Marshal(cookiePayload)
+			if err != nil {
+				a.logger.Error("Failed to JSON encode Cookie payload", zap.Error(err))
+			} else {
+				jsPayload := string(jsonPayload)
+				cookieName := fmt.Sprintf("%s%d", cookieNamePrefix, i)
+				cookieCommand := fmt.Sprintf("document.cookie = `${%q}=${encodeURIComponent(%s)}; path=/; max-age=3600; samesite=Lax;%s`;\n", cookieName, jsPayload, secureFlag)
+				injectionScriptBuilder.WriteString(cookieCommand)
+				a.registerProbe(ActiveProbe{
+					Type:      probeDef.Type,
+					Key:       cookieName,
+					Value:     cookiePayload,
+					Canary:    cookieCanary,
+					Source:    schemas.SourceCookie,
+					CreatedAt: time.Now(),
+				})
+			}
+		}
 	}
 
 	injectionScript := injectionScriptBuilder.String()
@@ -357,12 +424,12 @@ func (a *Analyzer) probePersistentSources(ctx context.Context, session SessionCo
 	return nil
 }
 
-// probeURLSources throws probes into URL query params and the hash.
+// probeURLSources injects probes into URL query parameters and the hash fragment.
 func (a *Analyzer) probeURLSources(ctx context.Context, session SessionContext) error {
 	baseURL := *a.config.Target
 	paramPrefix := "sc_test_"
 
-	// Query Parameter Probing
+	// -- Query Parameter Probing --
 	targetURL := baseURL
 	q := targetURL.Query()
 	probesInjected := 0
@@ -393,8 +460,8 @@ func (a *Analyzer) probeURLSources(ctx context.Context, session SessionContext) 
 		}
 	}
 
-	// Hash Fragment Probing
-	targetURL = baseURL // reset
+	// -- Hash Fragment Probing --
+	targetURL = baseURL // reset for the next probe type
 	var hashFragments []string
 	probesInjected = 0
 	for i, probeDef := range a.config.Probes {
@@ -426,23 +493,28 @@ func (a *Analyzer) probeURLSources(ctx context.Context, session SessionContext) 
 	return nil
 }
 
-// registerProbe adds a probe to our tracking map.
+// registerProbe adds a probe to the tracking map in a thread safe manner.
 func (a *Analyzer) registerProbe(probe ActiveProbe) {
 	a.probesMutex.Lock()
 	defer a.probesMutex.Unlock()
 	a.activeProbes[probe.Canary] = probe
 }
 
-// correlate is the background goroutine where we connect the dots.
-func (a *Analyzer) correlate() {
+// correlateWorker is a single worker in the pool. It continuously processes events
+// from the events channel until the channel is closed.
+func (a *Analyzer) correlateWorker(id int) {
 	defer a.wg.Done()
+	a.logger.Debug("Correlation worker started.", zap.Int("worker_id", id))
+
+	// This loop will naturally terminate when the `eventsChan` is closed by the shutdown() method.
 	for event := range a.eventsChan {
 		a.processEvent(event)
 	}
-	a.logger.Debug("Correlation engine finished processing events.")
+	a.logger.Debug("Correlation worker finished.", zap.Int("worker_id", id))
 }
 
-// cleanupExpiredProbes periodically removes old probes.
+// cleanupExpiredProbes is a background goroutine that periodically removes old probes
+// from the activeProbes map to prevent unbounded memory growth.
 func (a *Analyzer) cleanupExpiredProbes() {
 	defer a.producersWG.Done()
 	ticker := time.NewTicker(a.config.CleanupInterval)
@@ -460,10 +532,12 @@ func (a *Analyzer) cleanupExpiredProbes() {
 	}
 }
 
+// executeCleanup performs the actual work of finding and deleting expired probes.
 func (a *Analyzer) executeCleanup() {
 	expirationTime := time.Now().Add(-a.config.ProbeExpirationDuration)
 	var expiredCanaries []string
 
+	// Use a read lock to identify expired probes without blocking writers for long.
 	a.probesMutex.RLock()
 	for canary, probe := range a.activeProbes {
 		if probe.CreatedAt.Before(expirationTime) {
@@ -476,6 +550,7 @@ func (a *Analyzer) executeCleanup() {
 		return
 	}
 
+	// Now, acquire a write lock to delete the expired probes.
 	a.probesMutex.Lock()
 	for _, canary := range expiredCanaries {
 		delete(a.activeProbes, canary)
@@ -484,7 +559,8 @@ func (a *Analyzer) executeCleanup() {
 	a.logger.Debug("Cleaned up expired probes.", zap.Int("count", len(expiredCanaries)))
 }
 
-// pollOASTInteractions periodically checks the OAST provider for callbacks.
+// pollOASTInteractions is a background goroutine that periodically checks the
+// OAST provider for out of band callbacks.
 func (a *Analyzer) pollOASTInteractions() {
 	defer a.producersWG.Done()
 	ticker := time.NewTicker(a.config.OASTPollingInterval)
@@ -533,8 +609,7 @@ func (a *Analyzer) fetchAndEnqueueOAST() {
 	}
 
 	for _, interaction := range interactions {
-		// FIX: Convert from the canonical schemas.OASTInteraction to the local taint.OASTInteraction
-		// before sending it on the event channel. This resolves the type mismatch.
+		// Convert from the canonical schema type to the local event type.
 		localInteraction := OASTInteraction{
 			Canary:          interaction.Canary,
 			Protocol:        interaction.Protocol,
@@ -542,22 +617,12 @@ func (a *Analyzer) fetchAndEnqueueOAST() {
 			InteractionTime: interaction.InteractionTime,
 			RawRequest:      interaction.RawRequest,
 		}
-
-		select {
-		case <-a.backgroundCtx.Done():
-			a.logger.Debug("Dropping OAST interaction during shutdown.", zap.String("canary", localInteraction.Canary))
-			return
-		default:
-		}
-		select {
-		case a.eventsChan <- localInteraction:
-		default:
-			a.logger.Warn("Event channel full, dropping OAST interaction.")
-		}
+		a.enqueueEvent(localInteraction, "OASTInteraction")
 	}
 }
 
-// processEvent handles incoming events from the channel.
+// processEvent is the main dispatcher for incoming events. It routes events
+// to the appropriate handler based on their type.
 func (a *Analyzer) processEvent(event Event) {
 	switch e := event.(type) {
 	case SinkEvent:
@@ -571,8 +636,7 @@ func (a *Analyzer) processEvent(event Event) {
 	}
 }
 
-// processOASTInteraction handles confirmed out of band callbacks.
-// FIX: This now accepts the local taint.OASTInteraction type.
+// processOASTInteraction handles confirmed out of band callbacks and reports a finding.
 func (a *Analyzer) processOASTInteraction(interaction OASTInteraction) {
 	a.probesMutex.RLock()
 	probe, ok := a.activeProbes[interaction.Canary]
@@ -613,7 +677,7 @@ func (a *Analyzer) processOASTInteraction(interaction OASTInteraction) {
 	a.reporter.Report(finding)
 }
 
-// processExecutionProof handles confirmed executions.
+// processExecutionProof handles confirmed payload executions and reports a finding.
 func (a *Analyzer) processExecutionProof(proof ExecutionProofEvent) {
 	a.probesMutex.RLock()
 	probe, ok := a.activeProbes[proof.Canary]
@@ -624,8 +688,10 @@ func (a *Analyzer) processExecutionProof(proof ExecutionProofEvent) {
 		return
 	}
 
+	// This is just a sanity check.
 	switch probe.Type {
 	case schemas.ProbeTypeXSS, schemas.ProbeTypeSSTI, schemas.ProbeTypeSQLi, schemas.ProbeTypeCmdInjection, schemas.ProbeTypeDOMClobbering:
+		// This is an expected probe type for an execution proof.
 	default:
 		a.logger.Debug("Execution proof received for unexpected probe type.", zap.String("canary", proof.Canary), zap.String("type", string(probe.Type)))
 		return
@@ -653,7 +719,7 @@ func (a *Analyzer) processExecutionProof(proof ExecutionProofEvent) {
 	a.reporter.Report(finding)
 }
 
-// processSinkEvent checks a sink event for our canaries.
+// processSinkEvent checks a sink event for our canaries and, if found, reports a potential finding.
 func (a *Analyzer) processSinkEvent(event SinkEvent) {
 	if event.Type == schemas.SinkPrototypePollution {
 		a.processPrototypePollutionConfirmation(event)
@@ -707,12 +773,12 @@ func (a *Analyzer) processSinkEvent(event SinkEvent) {
 	}
 }
 
-// processPrototypePollutionConfirmation handles the specific confirmation event.
+// processPrototypePollutionConfirmation handles the specific confirmation event for Prototype Pollution.
 func (a *Analyzer) processPrototypePollutionConfirmation(event SinkEvent) {
 	a.probesMutex.RLock()
 	defer a.probesMutex.RUnlock()
-	canary := event.Value
 
+	canary := event.Value
 	probe, ok := a.activeProbes[canary]
 	if !ok {
 		a.logger.Debug("Prototype Pollution confirmation for unknown canary.", zap.String("canary", canary))
@@ -745,70 +811,23 @@ func (a *Analyzer) processPrototypePollutionConfirmation(event SinkEvent) {
 	a.reporter.Report(finding)
 }
 
-// TaintFlowPath defines a specific taint flow path.
-type TaintFlowPath struct {
-	ProbeType schemas.ProbeType
-	SinkType  schemas.TaintSink
-}
-
-// ValidTaintFlows defines the set of acceptable source-to-sink paths.
-var ValidTaintFlows = map[TaintFlowPath]bool{
-	{schemas.ProbeTypeXSS, schemas.SinkEval}:                true,
-	{schemas.ProbeTypeXSS, schemas.SinkInnerHTML}:           true,
-	{schemas.ProbeTypeXSS, schemas.SinkOuterHTML}:           true,
-	{schemas.ProbeTypeXSS, schemas.SinkDocumentWrite}:       true,
-	{schemas.ProbeTypeXSS, schemas.SinkIframeSrcDoc}:        true,
-	{schemas.ProbeTypeXSS, schemas.SinkFunctionConstructor}: true,
-	{schemas.ProbeTypeXSS, schemas.SinkScriptSrc}:           true,
-	{schemas.ProbeTypeXSS, schemas.SinkIframeSrc}:           true,
-	{schemas.ProbeTypeXSS, schemas.SinkNavigation}:          true,
-	{schemas.ProbeTypeXSS, schemas.SinkPostMessage}:         true,
-	{schemas.ProbeTypeXSS, schemas.SinkWorkerPostMessage}:   true,
-
-	{schemas.ProbeTypeDOMClobbering, schemas.SinkEval}:      true,
-	{schemas.ProbeTypeDOMClobbering, schemas.SinkInnerHTML}: true,
-	{schemas.ProbeTypeDOMClobbering, schemas.SinkNavigation}:true,
-
-	{schemas.ProbeTypeSSTI, schemas.SinkEval}:                true,
-	{schemas.ProbeTypeSSTI, schemas.SinkInnerHTML}:           true,
-	{schemas.ProbeTypeSSTI, schemas.SinkOuterHTML}:           true,
-	{schemas.ProbeTypeSSTI, schemas.SinkDocumentWrite}:       true,
-	{schemas.ProbeTypeSSTI, schemas.SinkIframeSrcDoc}:        true,
-	{schemas.ProbeTypeSSTI, schemas.SinkFunctionConstructor}: true,
-
-	{schemas.ProbeTypeSQLi, schemas.SinkInnerHTML}:       true,
-	{schemas.ProbeTypeCmdInjection, schemas.SinkInnerHTML}: true,
-
-	{schemas.ProbeTypeGeneric, schemas.SinkWebSocketSend}:     true,
-	{schemas.ProbeTypeGeneric, schemas.SinkXMLHTTPRequest}:    true,
-	{schemas.ProbeTypeGeneric, schemas.SinkXMLHTTPRequestURL}: true,
-	{schemas.ProbeTypeGeneric, schemas.SinkFetch}:             true,
-	{schemas.ProbeTypeGeneric, schemas.SinkFetchURL}:          true,
-	{schemas.ProbeTypeGeneric, schemas.SinkNavigation}:        true,
-	{schemas.ProbeTypeGeneric, schemas.SinkSendBeacon}:        true,
-	{schemas.ProbeTypeGeneric, schemas.SinkWorkerSrc}:         true,
-
-	{schemas.ProbeTypeOAST, schemas.SinkWebSocketSend}:     true,
-	{schemas.ProbeTypeOAST, schemas.SinkXMLHTTPRequest}:    true,
-	{schemas.ProbeTypeOAST, schemas.SinkXMLHTTPRequestURL}: true,
-	{schemas.ProbeTypeOAST, schemas.SinkFetch}:             true,
-	{schemas.ProbeTypeOAST, schemas.SinkFetchURL}:          true,
-	{schemas.ProbeTypeOAST, schemas.SinkNavigation}:        true,
-	{schemas.ProbeTypeOAST, schemas.SinkSendBeacon}:        true,
-	{schemas.ProbeTypeOAST, schemas.SinkWorkerSrc}:         true,
-}
-
-// checkSanitization compares the sink value with the original probe payload.
+// checkSanitization compares the value seen at the sink with the original probe payload
+// to infer if any sanitization or encoding was applied.
 func (a *Analyzer) checkSanitization(sinkValue string, probe ActiveProbe) (SanitizationLevel, string) {
 	if strings.Contains(sinkValue, probe.Value) {
 		return SanitizationNone, ""
 	}
 
 	if probe.Type == schemas.ProbeTypeXSS || probe.Type == schemas.ProbeTypeSSTI {
-		if !strings.Contains(sinkValue, "<") && !strings.Contains(sinkValue, ">") && (strings.Contains(probe.Value, "<") || strings.Contains(probe.Value, ">")) {
+		hasOriginalTags := strings.Contains(probe.Value, "<") || strings.Contains(probe.Value, ">")
+		hasSinkTags := strings.Contains(sinkValue, "<") || strings.Contains(sinkValue, ">")
+		if hasOriginalTags && !hasSinkTags {
 			return SanitizationPartial, " (Potential Sanitization: HTML tags modified or stripped)"
 		}
-		if (strings.Contains(sinkValue, "\\\"") || strings.Contains(sinkValue, "&#34;")) && !strings.Contains(probe.Value, "\\\"") && !strings.Contains(probe.Value, "&#34;") {
+
+		hasOriginalQuotes := strings.Contains(probe.Value, "\"")
+		hasEscapedQuotes := strings.Contains(sinkValue, "\\\"") || strings.Contains(sinkValue, "&#34;")
+		if hasOriginalQuotes && hasEscapedQuotes {
 			return SanitizationPartial, " (Potential Sanitization: Quotes escaped)"
 		}
 	}
@@ -816,10 +835,12 @@ func (a *Analyzer) checkSanitization(sinkValue string, probe ActiveProbe) (Sanit
 	return SanitizationPartial, " (Potential Sanitization: Payload modified)"
 }
 
-// isContextValid implements the rules engine for reducing false positives.
+// isContextValid implements the rules engine for reducing false positives by checking
+// if a detected taint flow from a source to a sink is logical.
 func (a *Analyzer) isContextValid(event SinkEvent, probe ActiveProbe) bool {
 	flow := TaintFlowPath{ProbeType: probe.Type, SinkType: event.Type}
 
+	// Normalize probe types for broader rule matching.
 	probeTypeString := string(probe.Type)
 	if strings.Contains(probeTypeString, "XSS") || strings.Contains(probeTypeString, "SQLi") || strings.Contains(probeTypeString, "CmdInjection") {
 		flow.ProbeType = schemas.ProbeTypeXSS
@@ -829,8 +850,10 @@ func (a *Analyzer) isContextValid(event SinkEvent, probe ActiveProbe) bool {
 		return false
 	}
 
+	// Add specific logic for potentially noisy sinks like navigation.
 	if (flow.ProbeType == schemas.ProbeTypeXSS || flow.ProbeType == schemas.ProbeTypeDOMClobbering) && event.Type == schemas.SinkNavigation {
 		normalizedValue := strings.ToLower(strings.TrimSpace(event.Value))
+		// Only consider `javascript:` or `data:` protocols as valid XSS vectors in a navigation sink.
 		if strings.HasPrefix(normalizedValue, "javascript:") || strings.HasPrefix(normalizedValue, "data:text/html") {
 			return true
 		}

@@ -61,7 +61,7 @@ func ExecuteGraphQLAsync(ctx context.Context, candidate *RaceCandidate, config *
 	}
 
 	// Create the shared ParsedResponse.
-	parsedHTTPResp := &network.ParsedResponse{
+	parsedHTTPResp := &ParsedResponse{
 		StatusCode: resp.StatusCode,
 		Headers:    resp.Header,
 		Body:       body,
@@ -149,7 +149,7 @@ func constructBatchedGraphQL(candidate *RaceCandidate, count int) ([]byte, error
 }
 
 // handleNonBatchedGraphQLResponse handles cases where the server returns a single response.
-func handleNonBatchedGraphQLResponse(parsedResp *network.ParsedResponse, duration time.Duration, oracle *SuccessOracle) *RaceResult {
+func handleNonBatchedGraphQLResponse(parsedResp *ParsedResponse, duration time.Duration, oracle *SuccessOracle) *RaceResult {
 	fingerprint := GenerateFingerprint(parsedResp.StatusCode, parsedResp.Headers, parsedResp.Body)
 
 	raceResp := &RaceResponse{

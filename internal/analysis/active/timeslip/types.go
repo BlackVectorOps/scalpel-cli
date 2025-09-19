@@ -8,8 +8,6 @@ import (
 	"regexp"
 	"sync"
 	"time"
-
-	"github.com/xkilldash9x/scalpel-cli/internal/network"
 )
 
 // Define custom error types for better classification.
@@ -20,6 +18,16 @@ var (
 	ErrConfigurationError  = errors.New("configuration or input data error")
 	ErrPayloadMutationFail = errors.New("payload mutation failed")
 )
+
+// ParsedResponse holds the essential details of an HTTP response.
+// This is a local definition to decouple the module from the refactored network package.
+type ParsedResponse struct {
+	StatusCode int
+	Headers    http.Header
+	Body       []byte
+	Duration   time.Duration
+	Raw        *http.Response
+}
 
 // RaceStrategy defines the technique used to induce the race condition.
 type RaceStrategy string
@@ -76,7 +84,7 @@ type Config struct {
 
 // RaceResponse is the result from a single operation within a race attempt.
 type RaceResponse struct {
-	*network.ParsedResponse
+	*ParsedResponse
 	// Fingerprint is the composite hash (Status+Headers+Body) used for comparison.
 	Fingerprint string
 	Error       error
@@ -120,7 +128,7 @@ type AnalysisResult struct {
 	Stats ResponseStatistics
 }
 
-// --- sync.Pool Implementation for Performance Optimization ---
+// -- sync.Pool Implementation for Performance Optimization --
 
 const maxResponseBodyBytes = 2 * 1024 * 1024 // 2 MB limit
 

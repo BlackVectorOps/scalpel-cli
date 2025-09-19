@@ -88,7 +88,7 @@ type Finding struct {
 	Vulnerability   Vulnerability   `json:"vulnerability"`
 	Severity        Severity        `json:"severity"`
 	Description     string          `json:"description"`
-	Evidence        json.RawMessage `json:"evidence"`
+	Evidence        string 			`json:"evidence"`
 	Recommendation  string          `json:"recommendation"`
 	CWE         []string        `json:"cwe,omitempty"`
 }
