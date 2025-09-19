@@ -2,7 +2,7 @@ package config
 
 import (
 	"bytes"
-	"sync" // FIX: Added the missing 'sync' import.
+	"sync"
 	"testing"
 	"time"
 
@@ -56,7 +56,9 @@ browser:
 	// Verify that subsequent calls to Load do not change the instance
 	v2 := viper.New()
 	v2.SetConfigType("yaml")
-	_ = v2.ReadConfig(bytes.NewBuffer([]byte(`database: {url: "new_url"}`)))
+	// This config is technically invalid (missing db url) but Load shouldn't
+	// re-evaluate or re-unmarshal because the singleton is already set.
+	_ = v2.ReadConfig(bytes.NewBuffer([]byte(`engine: {worker_concurrency: 99}`)))
 	err = Load(v2)
 	require.NoError(t, err)
 
@@ -83,8 +85,13 @@ func TestConfigValidation(t *testing.T) {
 			expectError: false,
 		},
 		{
-			name:        "missing database url",
-			config:      Config{},
+			name: "missing database url",
+			config: Config{
+				// This config provides valid values for the other checks
+				// to ensure we're testing the database URL validation specifically.
+				Engine:  EngineConfig{WorkerConcurrency: 1},
+				Browser: BrowserConfig{Concurrency: 1},
+			},
 			expectError: true,
 			errorMsg:    "database.url is a required configuration field",
 		},
@@ -93,6 +100,7 @@ func TestConfigValidation(t *testing.T) {
 			config: Config{
 				Database: DatabaseConfig{URL: "valid_url"},
 				Engine:   EngineConfig{WorkerConcurrency: 0},
+				Browser:  BrowserConfig{Concurrency: 1},
 			},
 			expectError: true,
 			errorMsg:    "engine.worker_concurrency must be a positive integer",
@@ -155,7 +163,7 @@ scanners:
       idor:
         enabled: true
         test_strategies:
-          NumericID: ["increment"]
+          numericid: ["increment"]
 `
 	v := viper.New()
 	v.SetConfigType("yaml")
@@ -182,7 +190,8 @@ scanners:
 	assert.Equal(t, "creds.txt", cfg.Scanners.Active.Auth.ATO.CredentialFile)
 	assert.Equal(t, 3, cfg.Scanners.Active.Auth.ATO.Concurrency)
 	require.NotNil(t, cfg.Scanners.Active.Auth.IDOR.TestStrategies)
-	assert.Contains(t, cfg.Scanners.Active.Auth.IDOR.TestStrategies["NumericID"], "increment")
+	// Viper lowercases all map keys, so we must assert against the lowercase version.
+	assert.Contains(t, cfg.Scanners.Active.Auth.IDOR.TestStrategies["numericid"], "increment")
 }
 
 // TestSet ensures that the Set function correctly sets the global instance.

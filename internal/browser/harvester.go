@@ -1,4 +1,3 @@
-// internal/browser/harvester.go
 package browser
 
 import (
@@ -22,15 +21,22 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 )
 
+// valueOnlyContext is a context that is not cancellable and carries only values.
+type valueOnlyContext struct{ context.Context }
+
+func (valueOnlyContext) Deadline() (deadline time.Time, ok bool) { return }
+func (valueOnlyContext) Done() <-chan struct{}                   { return nil }
+func (valueOnlyContext) Err() error                              { return nil }
+
 // requestState keeps tabs on the lifecycle of a single network request.
 type requestState struct {
 	Request       *network.Request
 	Response      *network.Response
 	StartTS       *cdp.TimeSinceEpoch // Wall time for HAR StartedDateTime
+	StartMonoTS   *cdp.MonotonicTime  // Monotonic time for accurate duration calculation
 	EndTS         *cdp.MonotonicTime
 	ResponseReady chan struct{} // Signals when response headers are received
 	Body          []byte
-	BodyBase64    bool
 	IsComplete    bool
 }
 
@@ -94,6 +100,10 @@ func (h *Harvester) Start() error {
 	)
 
 	if err != nil {
+		// If the session context is done, this error is expected and can be ignored.
+		if h.sessionCtx.Err() != nil {
+			return nil
+		}
 		h.cancelListener() // Clean up if we fail to enable the domains.
 		return err
 	}
@@ -197,6 +207,8 @@ func (h *Harvester) handleRequestWillBeSent(e *network.EventRequestWillBeSent) {
 		if prevState, ok := h.requests[e.RequestID]; ok && !prevState.IsComplete {
 			prevState.Response = e.RedirectResponse
 			prevState.IsComplete = true
+			// Use the timestamp of the redirect event as the end time for the previous leg.
+			prevState.EndTS = e.Timestamp
 			// Unblock any potential body fetcher for the redirected request.
 			select {
 			case <-prevState.ResponseReady:
@@ -210,6 +222,7 @@ func (h *Harvester) handleRequestWillBeSent(e *network.EventRequestWillBeSent) {
 	h.requests[e.RequestID] = &requestState{
 		Request:       e.Request,
 		StartTS:       e.WallTime,
+		StartMonoTS:   e.Timestamp, // Capture the monotonic start time.
 		ResponseReady: make(chan struct{}),
 	}
 }
@@ -350,12 +363,10 @@ func (h *Harvester) shouldCaptureBody(response *network.Response) bool {
 func (h *Harvester) fetchBody(requestID network.RequestID) {
 	defer h.bodyFetchWG.Done()
 
-	if h.sessionCtx.Err() != nil {
-		return // The session is dead, no point in trying.
-	}
-
-	// Don't let a body fetch hang forever.
-	ctx, cancel := context.WithTimeout(h.sessionCtx, 15*time.Second)
+	// CRITICAL CORRECTION: Use a detached context (valueOnlyContext) for fetching the body.
+	// This inherits the CDP target info but not the cancellation signal from h.sessionCtx.
+	// Apply a timeout to the detached context.
+	ctx, cancel := context.WithTimeout(valueOnlyContext{h.sessionCtx}, 15*time.Second)
 	defer cancel()
 
 	h.lock.RLock()
@@ -366,30 +377,43 @@ func (h *Harvester) fetchBody(requestID network.RequestID) {
 		return
 	}
 
-	// This is the synchronization magic. We wait here until the response headers have arrived.
+	// Wait until the response headers have arrived.
 	select {
 	case <-state.ResponseReady:
 		// Headers are here, we're good to go.
 	case <-ctx.Done():
 		// Timed out waiting for headers.
+		h.logger.Debug("Timed out waiting for response headers before fetching body.", zap.String("request_id", string(requestID)))
 		return
 	}
 
 	body, err := network.GetResponseBody(requestID).Do(ctx)
 	if err != nil {
-		if ctx.Err() == nil {
-			h.logger.Debug("Failed to fetch response body.", zap.String("request_id", string(requestID)), zap.Error(err))
+		// Handle expected errors gracefully and reduce log noise.
+
+		// Check if the original session context is done. This indicates the session was closed.
+		// Chromedp often returns "invalid context" or "session closed" in this scenario.
+		if h.sessionCtx.Err() != nil {
+			// Suppress logging this as it's expected during normal shutdown/cleanup.
+			return
 		}
+
+		if ctx.Err() != nil {
+			// Timeout occurred during the fetch itself.
+			h.logger.Debug("Response body fetch timed out.", zap.String("request_id", string(requestID)), zap.Error(err))
+			return
+		}
+
+		// Log other unexpected errors.
+		h.logger.Warn("Failed to fetch response body (unexpected error).", zap.String("request_id", string(requestID)), zap.Error(err))
 		return
 	}
 
 	h.lock.Lock()
 	defer h.lock.Unlock()
-	// Re check that the state still exists, as a long timeout in Stop could clear it.
+	// Re check that the state still exists.
 	if state, ok := h.requests[requestID]; ok {
 		state.Body = body
-		// The body is raw bytes. The HAR generation will handle base64 encoding if needed.
-		state.BodyBase64 = false
 	}
 }
 
@@ -431,15 +455,21 @@ func (h *Harvester) generateHAR() *schemas.HAR {
 
 		startTime := state.StartTS.Time()
 		duration := float64(0)
-		if state.EndTS != nil {
-			duration = state.EndTS.Time().Sub(startTime).Seconds() * 1000
+
+		// Calculate duration using monotonic timestamps for accuracy.
+		if state.StartMonoTS != nil && state.EndTS != nil {
+			// HAR time is in milliseconds.
+			duration = state.EndTS.Time().Sub(state.StartMonoTS.Time()).Seconds() * 1000
+			if duration < 0 {
+				duration = 0 // Defensive check.
+			}
 		}
 
 		entry := schemas.Entry{
 			StartedDateTime: startTime,
 			Time:            duration,
 			Request:         h.convertRequest(state.Request),
-			Response:        h.convertResponse(state.Response, state.Body, state.BodyBase64),
+			Response:        h.convertResponse(state.Response, state.Body),
 		}
 		entries = append(entries, entry)
 	}
@@ -467,30 +497,35 @@ func (h *Harvester) convertRequest(req *network.Request) schemas.Request {
 	headers := convertHeaders(req.Headers)
 	queryString := convertQueryString(req.URL)
 
-	bodySize := int64(-1)
 	var postData *schemas.PostData
-	if req.HasPostData && req.PostDataEntries != nil {
-		var postDataText string
-		// In newer CDP versions, post data might be split.
-		if len(req.PostDataEntries) > 0 {
-			var pdBuilder strings.Builder
-			for _, entry := range req.PostDataEntries {
-				pdBuilder.WriteString(entry.Bytes)
+	bodySize := int64(-1)
+
+	// Handle PostDataEntries when available.
+	if req.HasPostData && req.PostDataEntries != nil && len(req.PostDataEntries) > 0 {
+		// PostDataEntries is an array of data chunks. We must concatenate them.
+		var postDataTextBuilder strings.Builder
+		for _, entry := range req.PostDataEntries {
+			// entry.Bytes is a string, as confirmed by the compiler.
+			if entry.Bytes != "" {
+				postDataTextBuilder.WriteString(entry.Bytes)
 			}
-			postDataText = pdBuilder.String()
 		}
 
-		bodySize = int64(len(postDataText))
-		postData = &schemas.PostData{
-			MimeType: getHeader(req.Headers, "Content-Type"),
-			Text:     postDataText,
+		postDataText := postDataTextBuilder.String()
+		if postDataText != "" {
+			bodySize = int64(len(postDataText))
+			postData = &schemas.PostData{
+				MimeType: getHeader(req.Headers, "Content-Type"),
+				Text:     postDataText,
+				// Params field is omitted unless MIME type is application/x-www-form-urlencoded and parsed.
+			}
 		}
 	}
 
 	return schemas.Request{
 		Method:      req.Method,
 		URL:         req.URL,
-		HTTPVersion: "HTTP/1.1", // Default, might be updated from response.
+		HTTPVersion: "HTTP/1.1", // Default assumption.
 		Headers:     headers,
 		QueryString: queryString,
 		PostData:    postData,
@@ -499,9 +534,9 @@ func (h *Harvester) convertRequest(req *network.Request) schemas.Request {
 	}
 }
 
-func (h *Harvester) convertResponse(resp *network.Response, body []byte, isBase64 bool) schemas.Response {
+func (h *Harvester) convertResponse(resp *network.Response, body []byte) schemas.Response {
 	if resp == nil {
-		return schemas.Response{Status: 0, StatusText: "Failed (No Response)", BodySize: -1}
+		return schemas.Response{Status: 0, StatusText: "Failed (No Response)", BodySize: -1, HeadersSize: -1}
 	}
 
 	headers := convertHeaders(resp.Headers)
@@ -511,17 +546,28 @@ func (h *Harvester) convertResponse(resp *network.Response, body []byte, isBase6
 	}
 
 	if len(body) > 0 {
-		if isBase64 {
-			content.Text = string(body) // Should already be base64.
-			content.Encoding = "base64"
+		// If it's text, keep it as is. If it's binary, encode it to base64 for the HAR.
+		if isTextMime(resp.MimeType) {
+			content.Text = string(body)
 		} else {
-			// If it's text, keep it as is. If it's binary, encode it.
-			if isTextMime(resp.MimeType) {
-				content.Text = string(body)
-			} else {
-				content.Text = base64.StdEncoding.EncodeToString(body)
-				content.Encoding = "base64"
-			}
+			content.Text = base64.StdEncoding.EncodeToString(body)
+			content.Encoding = "base64"
+		}
+	}
+
+	// Calculate header size for accurate BodySize calculation.
+	headersSize := calculateHeaderSize(headers)
+
+	// HAR BodySize: Size of the encoded response body.
+	// EncodedDataLength is often the total bytes received (headers + body).
+	calculatedBodySize := int64(resp.EncodedDataLength) - headersSize
+	if calculatedBodySize < 0 {
+		// Fallback if EncodedDataLength is unreliable or doesn't include headers (e.g., redirects, cached responses).
+		// In this case, we use the EncodedDataLength as the BodySize, or the content size if EncodedDataLength is zero.
+		if resp.EncodedDataLength > 0 {
+			calculatedBodySize = int64(resp.EncodedDataLength)
+		} else {
+			calculatedBodySize = content.Size
 		}
 	}
 
@@ -532,8 +578,8 @@ func (h *Harvester) convertResponse(resp *network.Response, body []byte, isBase6
 		Headers:     headers,
 		Content:     content,
 		RedirectURL: getHeader(resp.Headers, "Location"),
-		BodySize:    resp.EncodedDataLength,
-		HeadersSize: calculateHeaderSize(headers),
+		BodySize:    calculatedBodySize,
+		HeadersSize: headersSize,
 	}
 }
 
@@ -550,9 +596,19 @@ func getHeader(headers network.Headers, key string) string {
 	return ""
 }
 
+// convertHeaders converts CDP headers to HAR NVPairs, ensuring deterministic order.
 func convertHeaders(headers network.Headers) []schemas.NVPair {
 	nvps := make([]schemas.NVPair, 0, len(headers))
-	for name, value := range headers {
+
+	// Sort keys for deterministic header order (important for accurate size calculation and testing).
+	keys := make([]string, 0, len(headers))
+	for k := range headers {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	for _, name := range keys {
+		value := headers[name]
 		if valStr, ok := value.(string); ok {
 			// Handle multi value headers like Set-Cookie.
 			for _, v := range strings.Split(valStr, "\n") {
@@ -563,13 +619,24 @@ func convertHeaders(headers network.Headers) []schemas.NVPair {
 	return nvps
 }
 
+// convertQueryString converts the URL query parameters to HAR NVPairs, ensuring deterministic order.
 func convertQueryString(urlStr string) []schemas.NVPair {
 	u, err := url.Parse(urlStr)
 	if err != nil {
 		return nil
 	}
 	nvps := make([]schemas.NVPair, 0)
-	for name, values := range u.Query() {
+	query := u.Query()
+
+	// Sort keys for deterministic order.
+	keys := make([]string, 0, len(query))
+	for k := range query {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	for _, name := range keys {
+		values := query[name]
 		for _, value := range values {
 			nvps = append(nvps, schemas.NVPair{Name: name, Value: value})
 		}
@@ -577,13 +644,18 @@ func convertQueryString(urlStr string) []schemas.NVPair {
 	return nvps
 }
 
-// A rough estimation of header size.
+// A rough estimation of header size based on HTTP/1.1 format.
 func calculateHeaderSize(headers []schemas.NVPair) int64 {
 	size := 0
+	// Estimate the status line (e.g., "HTTP/1.1 200 OK\r\n") - ~20 bytes.
+	// This is a heuristic, as the actual size depends on the protocol version and status code/text.
+	size += 20
 	for _, h := range headers {
 		// Name + ": " + Value + "\r\n"
 		size += len(h.Name) + 2 + len(h.Value) + 2
 	}
+	// Final blank line "\r\n"
+	size += 2
 	return int64(size)
 }
 

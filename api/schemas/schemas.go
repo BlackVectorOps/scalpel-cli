@@ -1,4 +1,4 @@
-// internal/schemas.go
+// api/schemas.go
 package schemas
 
 import (
@@ -591,6 +591,9 @@ type BrowserInteractor interface {
 // SessionContext defines the interface for interacting with a specific browser session (tab).
 // This is used by more advanced analyzers and agents that need fine-grained control.
 type SessionContext interface {
+	// CORRECTION: Added ID() method to the interface to satisfy the architectural contract.
+	// ID returns the unique identifier for the session.
+	ID() string
 	Navigate(ctx context.Context, url string) error
 	Click(selector string) error
 	Type(selector string, text string) error

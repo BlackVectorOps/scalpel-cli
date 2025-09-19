@@ -12,25 +12,39 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
-	"github.com/xkilldash9x/scalpel-cli/internal/store"
 	"github.com/xkilldash9x/scalpel-cli/internal/worker"
 )
+
+// -- Interfaces for Dependency Inversion --
+
+// Worker defines the interface for any component that can process a task.
+// This allows us to easily swap in different worker implementations or mocks.
+type Worker interface {
+	ProcessTask(ctx context.Context, analysisCtx *core.AnalysisContext) error
+}
+
+// Store defines the interface for any component that can persist task results.
+// This decouples the engine from a specific storage implementation.
+type Store interface {
+	PersistData(ctx context.Context, data *schemas.ResultEnvelope) error
+}
 
 // TaskEngine manages the in-process distribution of tasks to a pool of workers.
 type TaskEngine struct {
 	cfg          *config.Config
 	logger       *zap.Logger
-	storeService *store.Store
-	worker       *worker.MonolithicWorker
+	storeService Store
+	worker       Worker
 	wg           sync.WaitGroup
 	globalCtx    *core.GlobalContext
 }
 
 // New creates a new TaskEngine.
+// The function now accepts interfaces for its dependencies, making it much more testable.
 func New(
 	cfg *config.Config,
 	logger *zap.Logger,
-	storeService *store.Store,
+	storeService Store,
 	browserManager schemas.BrowserManager,
 	kg schemas.KnowledgeGraphClient,
 ) (*TaskEngine, error) {
