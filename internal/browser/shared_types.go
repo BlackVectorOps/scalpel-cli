@@ -3,19 +3,34 @@ package browser
 
 import (
 	"context"
-	"time"
 )
 
 // SessionLifecycleObserver defines an interface for components that need to be
-// notified when a session is terminated. This decouples AnalysisContext from the Manager.
+// notified when a session is terminated.
 type SessionLifecycleObserver interface {
 	unregisterSession(ac *AnalysisContext)
 }
 
-// valueOnlyContext is a context that inherits values but not cancellation.
-// This is crucial for cleanup tasks that must run even if the parent context is cancelled.
-type valueOnlyContext struct{ context.Context }
 
-func (valueOnlyContext) Deadline() (time.Time, bool) { return time.Time{}, false }
-func (valueOnlyContext) Done() <-chan struct{}       { return nil }
-func (valueOnlyContext) Err() error                  { return nil }
+// CombineContext creates a new context derived from sessionCtx (inheriting its values,
+// including the chromedp context) but ensures it is cancelled if opCtx is cancelled.
+// This is crucial for allowing callers to control timeouts/cancellation (via opCtx) while still
+// providing chromedp with the necessary session information (via sessionCtx).
+func CombineContext(sessionCtx context.Context, opCtx context.Context) (context.Context, context.CancelFunc) {
+	// Create a new context derived from the session context.
+	combinedCtx, cancel := context.WithCancel(sessionCtx)
+
+	// Monitor the operation context in a goroutine.
+	// This ensures that if the operation context is cancelled, the combined context is also cancelled.
+	go func() {
+		select {
+		case <-opCtx.Done():
+			// Operation context is done (cancelled or timed out). Cancel the combined context.
+			cancel()
+		case <-combinedCtx.Done():
+			// Combined context is done (session closed or operation completed).
+		}
+	}()
+
+	return combinedCtx, cancel
+}

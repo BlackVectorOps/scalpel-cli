@@ -1,17 +1,19 @@
+// internal/browser/analysis_context.go
 package browser
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/chromedp/cdproto/cdp"
 	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/cdproto/page"
 	"github.com/chromedp/cdproto/runtime"
-	"github.com/chromedp/cdproto/storage"
-	"github.com/chromedp/cdproto/target"
 	"github.com/chromedp/chromedp"
 	"go.uber.org/zap"
 
@@ -21,33 +23,27 @@ import (
 )
 
 // AnalysisContext implements the schemas.SessionContext interface.
-// It provides a high level API for interacting with a browser tab,
-// handling stabilization, and collecting artifacts for analysis.
 type AnalysisContext struct {
-	// Core session components
+	// ctx is the browser session context (the tab context), initialized by chromedp.NewContext.
 	ctx        context.Context
 	cancelFunc context.CancelFunc
 	sessionID  string
 	logger     *zap.Logger
 	cfg        *config.Config
 	persona    schemas.Persona
-
-	// Specialized components
 	harvester  *Harvester
 	interactor *Interactor
 	humanoid   *humanoid.Humanoid
+	observer   SessionLifecycleObserver
+	isClosed   bool
+	mu         sync.Mutex
 
-	// Lifecycle management
-	observer SessionLifecycleObserver
-	isClosed bool
-	mu       sync.Mutex
+	// ADDED: A slice to store all findings discovered during the session.
+	findings []schemas.Finding
 }
 
-// Ensure AnalysisContext implements the interface.
 var _ schemas.SessionContext = (*AnalysisContext)(nil)
 
-// NewAnalysisContext creates a new, initialized AnalysisContext. It sets up all necessary
-// subcomponents like the harvester and interactor and kicks off data collection.
 func NewAnalysisContext(
 	ctx context.Context,
 	cancel context.CancelFunc,
@@ -57,9 +53,7 @@ func NewAnalysisContext(
 	observer SessionLifecycleObserver,
 	sessionID string,
 ) *AnalysisContext {
-
 	sessionLogger := logger.Named("session").With(zap.String("session_id", sessionID))
-
 	ac := &AnalysisContext{
 		ctx:        ctx,
 		cancelFunc: cancel,
@@ -69,180 +63,160 @@ func NewAnalysisContext(
 		persona:    persona,
 		observer:   observer,
 	}
-
-	// Set up the harvester to start grabbing network and console events.
 	ac.harvester = NewHarvester(ctx, sessionLogger, cfg.Network.CaptureResponseBodies)
-
-	// Initialize the humanoid for more realistic user interactions.
 	if cfg.Browser.Humanoid.Enabled {
-		browserContextID := chromedp.FromContext(ctx).Browser.BrowserContextID
+		// Handle environments where BrowserContextID is not directly available on the Target.
+		// We must iterate through available targets to find the match.
+		var browserContextID cdp.BrowserContextID
+
+		// Ensure the target is available before accessing it.
+		target := chromedp.FromContext(ctx).Target
+		if target == nil {
+			ac.logger.Warn("Target not available in context. Humanoid features might be limited.")
+		} else {
+			targetID := target.TargetID
+
+			// Use a short timeout for fetching targets to prevent hanging if the browser is unresponsive.
+			targetsCtx, targetsCancel := context.WithTimeout(ctx, 5*time.Second)
+			defer targetsCancel()
+
+			infos, err := chromedp.Targets(targetsCtx)
+			if err != nil {
+				ac.logger.Warn("Failed to retrieve browser targets to determine BrowserContextID. Humanoid features might be degraded.", zap.Error(err))
+			} else {
+				for _, info := range infos {
+					if info.TargetID == targetID {
+						browserContextID = info.BrowserContextID
+						break
+					}
+				}
+			}
+		}
+
+		if browserContextID == "" {
+			ac.logger.Debug("Could not determine BrowserContextID for the current target.")
+		}
+
 		ac.humanoid = humanoid.New(cfg.Browser.Humanoid, sessionLogger, browserContextID)
 	}
-
-	// The interactor needs a way to know when the page is 'settled' before acting.
 	stabilizeFn := func(stabCtx context.Context) error {
-		// A short quiet period is usually enough for interaction stability.
 		return ac.stabilize(stabCtx, 500*time.Millisecond)
 	}
 	ac.interactor = NewInteractor(sessionLogger, ac.humanoid, stabilizeFn)
-
-	// Start the harvester immediately to make sure we don't miss a thing.
 	if err := ac.harvester.Start(); err != nil {
-		ac.logger.Error("Failed to start harvester, data collection may be incomplete", zap.Error(err))
+		ac.logger.Error("Failed to start harvester", zap.Error(err))
 	}
-
 	return ac
 }
 
-// stabilize waits for the application state to settle down. This is a crucial step
-// before interacting with elements to avoid race conditions. It waits for the DOM
-// to be ready and for network activity to go quiet for a specified period.
+// stabilize waits for the DOM to be ready and the network to be idle.
+// It must use the provided context, which should be derived from the session context.
 func (ac *AnalysisContext) stabilize(ctx context.Context, quietPeriod time.Duration) error {
-	// Don't wait forever, enforce a max stabilization time.
+	// Apply a maximum stabilization time limit derived from the incoming context.
 	stabCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 
-	// First, wait for the basic document structure to be ready.
 	if err := chromedp.Run(stabCtx, chromedp.WaitReady("body", chromedp.ByQuery)); err != nil {
-		ac.logger.Debug("Stabilization timed out waiting for DOM readiness.")
-		// We only bubble up an error if the parent context was cancelled.
 		if ctx.Err() != nil {
-			return ctx.Err()
+			return ctx.Err() // Parent operation was cancelled.
 		}
+		ac.logger.Debug("WaitReady failed during stabilization.", zap.Error(err))
 	}
-
-	// Next, wait for the network to chill out.
 	err := ac.harvester.WaitNetworkIdle(stabCtx, quietPeriod)
 	if err != nil {
-		if stabCtx.Err() != nil {
-			ac.logger.Debug("Stabilization timed out waiting for network idle.")
-		}
 		if ctx.Err() != nil {
-			return ctx.Err()
+			return ctx.Err() // Parent operation was cancelled.
 		}
+		ac.logger.Debug("WaitNetworkIdle incomplete.", zap.Error(err))
 	}
 	return nil
 }
 
-// Navigate tells the browser to go to a new URL and waits for the page
-// to become stable before returning.
+// ADDED: This method provides the functionality your analyzer needs.
+// AddFinding safely adds a new finding to the session's results.
+func (ac *AnalysisContext) AddFinding(finding schemas.Finding) {
+	ac.mu.Lock()
+	defer ac.mu.Unlock()
+	ac.findings = append(ac.findings, finding)
+}
+
+// ADDED: A helper method to retrieve all collected findings safely.
+// Findings returns a copy of all findings collected so far.
+func (ac *AnalysisContext) Findings() []schemas.Finding {
+	ac.mu.Lock()
+	defer ac.mu.Unlock()
+	// Return a copy to prevent race conditions if the caller modifies the returned slice.
+	findingsCopy := make([]schemas.Finding, len(ac.findings))
+	copy(findingsCopy, ac.findings)
+	return findingsCopy
+}
+
 func (ac *AnalysisContext) Navigate(ctx context.Context, url string) error {
 	ac.logger.Info("Navigating", zap.String("url", url))
 
-	// A navigation shouldn't take forever.
-	navCtx, cancel := context.WithTimeout(ctx, ac.cfg.Network.NavigationTimeout)
-	defer cancel()
+	// CORRECTION: Combine the session context (ac.ctx) with the operation context (ctx).
+	opCtx, opCancel := CombineContext(ac.ctx, ctx)
+	defer opCancel()
 
-	// This is a robust way to handle timeouts with chromedp. We run the action
-	// on the main session context but watch for our navigation timeout.
-	err := chromedp.Run(ac.ctx, chromedp.ActionFunc(func(actionCtx context.Context) error {
-		// This derived context will cancel if either the chromedp action context
-		// or our navigation timeout context is done.
-		runCtx, cancelRun := context.WithCancel(actionCtx)
-		defer cancelRun()
+	// Apply the navigation timeout to the combined operation context.
+	navCtx, navCancel := context.WithTimeout(opCtx, ac.cfg.Network.NavigationTimeout)
+	defer navCancel()
 
-		go func() {
-			select {
-			case <-navCtx.Done():
-				cancelRun()
-			case <-runCtx.Done():
-			}
-		}()
-
-		// Fire off the navigation. This waits for the 'load' event by default.
-		_, _, _, _, err := page.Navigate(url).Do(runCtx)
-		return err
-	}))
-
-	if err != nil {
+	if err := chromedp.Run(navCtx, chromedp.Navigate(url)); err != nil {
+		// Check if the context error occurred (timeout or external cancellation).
 		if navCtx.Err() != nil {
-			return fmt.Errorf("navigation timed out after %s: %w", ac.cfg.Network.NavigationTimeout, err)
+			// We specifically check for DeadlineExceeded to provide a clearer error message for timeouts.
+			if navCtx.Err() == context.DeadlineExceeded {
+				return fmt.Errorf("navigation timed out: %w", err)
+			}
+			return fmt.Errorf("navigation cancelled or failed: %w", err)
 		}
 		return fmt.Errorf("navigation failed: %w", err)
 	}
 
-	// After the page loads, give it a moment to run startup scripts and fetch initial data.
+	// Stabilization also uses the navigation context.
 	if err := ac.stabilize(navCtx, 1500*time.Millisecond); err != nil {
-		// This isn't a fatal error, just log it.
-		ac.logger.Debug("Post navigation stabilization was incomplete.", zap.Error(err))
+		ac.logger.Debug("Post-navigation stabilization incomplete.", zap.Error(err))
 	}
-
 	return nil
 }
 
-// Interact kicks off the automated recursive interaction logic, attempting to
-// explore the web application like a user would.
 func (ac *AnalysisContext) Interact(ctx context.Context, config schemas.InteractionConfig) error {
 	ac.logger.Info("Starting automated interaction sequence.")
 
-	interactCtx, cancel := context.WithCancel(ctx)
+	// CORRECTION: Combine contexts for the interaction sequence.
+	interactCtx, cancel := CombineContext(ac.ctx, ctx)
 	defer cancel()
 
-	// If the calling context doesn't have a deadline, set a reasonable default.
-	if _, ok := ctx.Deadline(); !ok {
-		var cancelWithTimeout context.CancelFunc
-		interactCtx, cancelWithTimeout = context.WithTimeout(ctx, 5*time.Minute)
-		defer cancelWithTimeout()
-	}
-
-	if err := ac.interactor.RecursiveInteract(interactCtx, config); err != nil {
-		if interactCtx.Err() != nil {
-			// This is an expected outcome if the interaction times out.
-			ac.logger.Warn("Interaction sequence aborted (context done).", zap.Error(err))
-			return nil
-		}
-		return fmt.Errorf("interaction sequence failed: %w", err)
-	}
-
-	ac.logger.Info("Automated interaction sequence completed.")
-	return nil
+	return ac.interactor.RecursiveInteract(interactCtx, config)
 }
 
-// CollectArtifacts gathers all data collected during the session into a single structure.
-// This is typically called at the end of an analysis flow.
 func (ac *AnalysisContext) CollectArtifacts() (*schemas.Artifacts, error) {
-	// Use a background context with its own timeout to ensure collection can finish
-	// even if the original request context has been cancelled.
+	// Use a fresh context for the potentially long-running Stop operation (waiting for bodies).
 	collectCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-
-	// This is a critical synchronization point. Stopping the harvester finalizes
-	// all pending network requests and returns the complete HAR and console logs.
 	har, consoleLogs := ac.harvester.Stop(collectCtx)
 
 	var domContent string
 	storageState := schemas.StorageState{}
 
-	// Now grab a final snapshot of the DOM and storage state.
-	err := chromedp.Run(ac.ctx, chromedp.ActionFunc(func(actionCtx context.Context) error {
-		runCtx, cancelRun := context.WithCancel(actionCtx)
-		defer cancelRun()
+	// Use the session context (ac.ctx) for DOM/Storage capture as it requires an active tab.
+	// Apply a reasonable timeout for these actions.
+	captureCtx, captureCancel := context.WithTimeout(ac.ctx, 10*time.Second)
+	defer captureCancel()
 
-		go func() {
-			select {
-			case <-collectCtx.Done():
-				cancelRun()
-			case <-runCtx.Done():
-			}
-		}()
-
-		// Capture the full outer HTML of the document.
-		if err := chromedp.OuterHTML("html", &domContent, chromedp.ByQuery).Do(runCtx); err != nil {
-			ac.logger.Warn("Failed to capture DOM.", zap.Error(err))
+	err := chromedp.Run(captureCtx,
+		chromedp.OuterHTML("html", &domContent, chromedp.ByQuery),
+		chromedp.ActionFunc(func(ctx context.Context) error {
+			return ac.captureStorage(ctx, &storageState)
+		}),
+	)
+	if err != nil {
+		// Check if the session context is still valid before logging a warning.
+		if ac.ctx.Err() == nil {
+			ac.logger.Warn("Could not fully collect browser artifacts.", zap.Error(err))
 		}
-
-		// Capture cookies, local storage, and session storage.
-		if err := ac.captureStorage(runCtx, &storageState); err != nil {
-			ac.logger.Warn("Failed to capture storage.", zap.Error(err))
-		}
-		return nil
-	}))
-
-	// If the main browser context is dead, we might not get everything.
-	if err != nil && ac.ctx.Err() != nil {
-		ac.logger.Warn("Browser context was unavailable during artifact collection.", zap.Error(err))
 	}
-
 	return &schemas.Artifacts{
 		HAR:         har,
 		DOM:         domContent,
@@ -251,132 +225,81 @@ func (ac *AnalysisContext) CollectArtifacts() (*schemas.Artifacts, error) {
 	}, nil
 }
 
-// captureStorage is a helper to extract various storage data using efficient CDP commands.
 func (ac *AnalysisContext) captureStorage(ctx context.Context, state *schemas.StorageState) error {
-	// Get all cookies for all domains, including HttpOnly ones.
-	var err error
-	state.Cookies, err = storage.GetCookies().Do(ctx)
+	// Use network.GetCookies(). When called without URLs, it fetches cookies accessible to the current browsing context.
+	cookies, err := network.GetCookies().Do(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to get cookies: %w", err)
 	}
+	state.Cookies = cookies
 
-	// This JS snippet is a robust way to dump key/value storage.
 	jsGetStorage := func(storageType string) string {
-		return fmt.Sprintf(`(() => {
-                let items = {};
-                try {
-                    const storage = window.%s;
-                    if (!storage) return items;
-                    for (let i = 0; i < storage.length; i++) {
-                        const key = storage.key(i);
-                        if (key !== null) {
-                            items[key] = storage.getItem(key);
-                        }
-                    }
-                } catch (e) {
-                    // Access can be denied by browser security policies.
-                }
-                return items;
-            })()`, storageType)
+		return fmt.Sprintf(`(() => { let items = {}; try { const s = window.%s; for (let i = 0; i < s.length; i++) { const k = s.key(i); items[k] = s.getItem(k); } } catch (e) {} return items; })()`, storageType)
 	}
-
-	if err := chromedp.Evaluate(jsGetStorage("localStorage"), &state.LocalStorage).Do(ctx); err != nil {
-		ac.logger.Debug("Could not access LocalStorage.", zap.Error(err))
+	if err := chromedp.Run(ctx,
+		chromedp.Evaluate(jsGetStorage("localStorage"), &state.LocalStorage),
+		chromedp.Evaluate(jsGetStorage("sessionStorage"), &state.SessionStorage),
+	); err != nil {
+		ac.logger.Warn("Could not fully capture storage.", zap.Error(err))
 	}
-
-	if err := chromedp.Evaluate(jsGetStorage("sessionStorage"), &state.SessionStorage).Do(ctx); err != nil {
-		ac.logger.Debug("Could not access SessionStorage.", zap.Error(err))
-	}
-
 	return nil
 }
 
-// Close gracefully terminates the browser session, ensuring all resources are cleaned up.
 func (ac *AnalysisContext) Close(ctx context.Context) error {
 	ac.mu.Lock()
 	if ac.isClosed {
 		ac.mu.Unlock()
-		return nil // Already closed.
+		return nil
 	}
 	ac.isClosed = true
 	ac.mu.Unlock()
-
 	ac.logger.Debug("Closing session.")
-
-	// Give the harvester a chance to stop gracefully.
 	ac.harvester.Stop(ctx)
-
-	// Explicitly close the browser target (the tab).
-	err := chromedp.Run(ac.ctx, chromedp.ActionFunc(func(c context.Context) error {
-		if cdptarget := chromedp.FromContext(c).Target; cdptarget != nil {
-			return target.CloseTarget(cdptarget.TargetID).Do(c)
-		}
-		return nil
-	}))
-
-	if err != nil {
-		ac.logger.Debug("Failed to explicitly close target, will rely on context cancellation.", zap.Error(err))
-	}
-
-	// Cancel the underlying ChromeDP context as the final cleanup step.
 	if ac.cancelFunc != nil {
+		// This cancels the session context (ac.ctx), terminating the browser tab.
 		ac.cancelFunc()
 	}
-
-	// Notify the manager that this session is going away.
 	if ac.observer != nil {
 		ac.observer.unregisterSession(ac)
 	}
-
 	return nil
 }
 
-// InitializeTaint is a placeholder for IAST/Taint analysis initialization logic.
 func (ac *AnalysisContext) InitializeTaint(template, config string) error {
 	ac.logger.Info("Taint instrumentation would be initialized here.")
-	// Actual implementation would involve ac.ExposeFunction and ac.InjectScriptPersistently.
 	return nil
 }
 
-// ID returns the unique session identifier.
 func (ac *AnalysisContext) ID() string {
 	return ac.sessionID
 }
 
-// -- Low-Level Interface Implementations --
-
-// GetContext returns the underlying ChromeDP context for this session.
+// GetContext returns the underlying session context.
 func (ac *AnalysisContext) GetContext() context.Context {
 	return ac.ctx
 }
 
-// Click finds an element by selector and clicks it, using humanoid logic if available.
+// The following simple actions use the session context (ac.ctx) directly, as the interface does not accept a context.
+
 func (ac *AnalysisContext) Click(selector string) error {
-	ac.logger.Debug("Clicking", zap.String("selector", selector))
 	if ac.humanoid != nil {
 		return chromedp.Run(ac.ctx, ac.humanoid.IntelligentClick(selector, nil))
 	}
 	return chromedp.Run(ac.ctx, chromedp.Click(selector, chromedp.NodeVisible))
 }
 
-// Type finds an element by selector and types text into it.
 func (ac *AnalysisContext) Type(selector string, text string) error {
-	ac.logger.Debug("Typing", zap.String("selector", selector), zap.Int("length", len(text)))
 	if ac.humanoid != nil {
 		return chromedp.Run(ac.ctx, ac.humanoid.Type(selector, text))
 	}
 	return chromedp.Run(ac.ctx, chromedp.SendKeys(selector, text, chromedp.NodeVisible))
 }
 
-// Submit finds a form element and triggers its submission.
 func (ac *AnalysisContext) Submit(selector string) error {
-	ac.logger.Debug("Submitting form", zap.String("selector", selector))
 	return chromedp.Run(ac.ctx, chromedp.Submit(selector, chromedp.NodeVisible))
 }
 
-// ScrollPage scrolls the page up or down by a fraction of the viewport height.
 func (ac *AnalysisContext) ScrollPage(direction string) error {
-	ac.logger.Debug("Scrolling", zap.String("direction", direction))
 	script := `window.scrollBy(0, window.innerHeight * 0.8);`
 	if strings.ToLower(direction) == "up" {
 		script = `window.scrollBy(0, -window.innerHeight * 0.8);`
@@ -384,52 +307,176 @@ func (ac *AnalysisContext) ScrollPage(direction string) error {
 	return chromedp.Run(ac.ctx, chromedp.Evaluate(script, nil))
 }
 
-// WaitForAsync pauses execution for a specified duration.
 func (ac *AnalysisContext) WaitForAsync(milliseconds int) error {
-	ac.logger.Debug("Waiting for async operations", zap.Int("ms", milliseconds))
 	return chromedp.Run(ac.ctx, chromedp.Sleep(time.Duration(milliseconds)*time.Millisecond))
 }
 
-// ExposeFunction makes a Go function available to be called from JavaScript in the page.
+// ExposeFunction implements robust function binding by handling serialization via an injected wrapper script.
+// The lifetime of the binding is tied to the provided context (ctx).
 func (ac *AnalysisContext) ExposeFunction(ctx context.Context, name string, function interface{}) error {
-	ac.logger.Debug("Exposing function", zap.String("name", name))
-	// This only creates the binding; a listener is needed to handle calls.
-	return chromedp.Run(ac.ctx, runtime.AddBinding(name))
+	// Combine contexts. The binding and listener lifetime are tied to this merged context.
+	bindCtx, bindCancel := CombineContext(ac.ctx, ctx)
+	// We do NOT defer bindCancel() here; the listener goroutine manages the lifecycle.
+
+	// The internal name for the raw CDP binding.
+	internalName := "__scalpel_binding_" + name
+
+	// 1. Add the raw binding to the runtime. This binding expects a single JSON string argument.
+	// Use a short timeout for the setup phase.
+	setupCtx, setupCancel := context.WithTimeout(bindCtx, 5*time.Second)
+	defer setupCancel()
+
+	if err := chromedp.Run(setupCtx, runtime.AddBinding(internalName)); err != nil {
+		bindCancel() // Clean up the combined context if setup fails.
+		return fmt.Errorf("failed to add runtime binding for %s: %w", internalName, err)
+	}
+
+	// 2. Inject the wrapper script that handles serialization.
+	// This defines the public function (e.g., window.myFunc) which serializes its arguments
+	// and calls the internal raw binding (e.g., window.__scalpel_binding_myFunc).
+	wrapperScript := fmt.Sprintf(`
+        (() => {
+            const internalName = '%s';
+            const publicName = '%s';
+            if (window[publicName]) {
+                // Already defined, possibly from a previous persistent injection.
+                return;
+            }
+            window[publicName] = (...args) => {
+                if (window[internalName]) {
+                    // Return a promise to align with modern async expectations, even though Go side doesn't return a value yet.
+                    return Promise.resolve(window[internalName](JSON.stringify(args)));
+                } else {
+                    console.error('Scalpel internal binding "%s" is not available.');
+                    return Promise.reject(new Error('Binding not available'));
+                }
+            };
+        })();
+    `, internalName, name, internalName)
+
+	// We inject this persistently so it's available across navigations during the context lifetime.
+	// InjectScriptPersistently uses CombineContext internally, so we pass the original ctx.
+	if err := ac.InjectScriptPersistently(ctx, wrapperScript); err != nil {
+		// Attempt to remove the binding if injection fails, best effort.
+		ac.cleanupBinding(internalName)
+		bindCancel()
+		return fmt.Errorf("failed to inject wrapper script for %s: %w", name, err)
+	}
+
+	// 3. Set up the event listening mechanism.
+	eventChan := make(chan *runtime.EventBindingCalled, 16)
+
+	// Listen for the event using ListenTarget. The bindCtx controls the listener's lifetime.
+	chromedp.ListenTarget(bindCtx, func(ev interface{}) {
+		if e, ok := ev.(*runtime.EventBindingCalled); ok && e.Name == internalName {
+			select {
+			case eventChan <- e:
+			case <-bindCtx.Done():
+				return
+			default:
+				ac.logger.Warn("Exposed function event channel full, dropping event.", zap.String("name", name))
+			}
+		}
+	})
+
+	// 4. Start the event processing loop.
+	go func() {
+		// Ensure the merged context is canceled when the processing loop finishes.
+		defer bindCancel()
+
+		// Pre-compute reflection data.
+		fnVal := reflect.ValueOf(function)
+		fnType := fnVal.Type()
+		numArgs := fnType.NumIn()
+
+		for {
+			select {
+			case <-bindCtx.Done():
+				// Context cancelled. Clean up the binding.
+				ac.cleanupBinding(internalName)
+				return
+			case e := <-eventChan:
+				// Process the event asynchronously.
+				go ac.handleBindingCall(e.Payload, fnVal, fnType, numArgs)
+			}
+		}
+	}()
+	return nil
 }
 
-// InjectScriptPersistently adds a script that will be executed on all subsequent
-// page loads and navigations within this context.
+// cleanupBinding removes the runtime binding using a detached context.
+func (ac *AnalysisContext) cleanupBinding(internalName string) {
+	// Use a short-lived, detached context for cleanup.
+	cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cleanupCancel()
+
+	// We need the session context values (target info) for cleanup, but not its cancellation.
+	// Use the valueOnlyContext pattern to inherit values from ac.ctx.
+	cleanupExecCtx, mergeCancel := CombineContext(valueOnlyContext{ac.ctx}, cleanupCtx)
+	defer mergeCancel()
+
+	if err := chromedp.Run(cleanupExecCtx, runtime.RemoveBinding(internalName)); err != nil {
+		// Check if the error is because the session context is already invalid (e.g., browser closed).
+		if ac.ctx.Err() == nil {
+			ac.logger.Debug("Failed to remove runtime binding during cleanup.", zap.String("name", internalName), zap.Error(err))
+		}
+	}
+}
+
+// handleBindingCall uses reflection to invoke the Go function with arguments deserialized from the JavaScript payload.
+func (ac *AnalysisContext) handleBindingCall(payload string, fnVal reflect.Value, fnType reflect.Type, numArgs int) {
+	// Use recover to prevent a panic in the bound function from crashing the processor.
+	defer func() {
+		if r := recover(); r != nil {
+			ac.logger.Error("Panic recovered in exposed function call", zap.Any("panic_value", r))
+		}
+	}()
+
+	// The payload is expected to be a JSON array string (serialized by the wrapper script).
+	var rawArgs []json.RawMessage
+	if err := json.Unmarshal([]byte(payload), &rawArgs); err != nil {
+		ac.logger.Error("Failed to unmarshal binding payload (expected JSON array string)", zap.Error(err), zap.String("payload", payload))
+		return
+	}
+
+	if len(rawArgs) != numArgs {
+		ac.logger.Error("Binding argument count mismatch", zap.Int("expected", numArgs), zap.Int("got", len(rawArgs)))
+		return
+	}
+
+	// Unmarshal each argument into the correct type.
+	args := make([]reflect.Value, numArgs)
+	for i := 0; i < numArgs; i++ {
+		// Create a pointer to the expected argument type.
+		argPtr := reflect.New(fnType.In(i))
+		// Unmarshal the JSON into the pointer.
+		if err := json.Unmarshal(rawArgs[i], argPtr.Interface()); err != nil {
+			ac.logger.Error("Failed to unmarshal binding argument", zap.Error(err), zap.Int("arg_index", i))
+			return
+		}
+		// Get the value pointed to (dereference).
+		args[i] = argPtr.Elem()
+	}
+
+	// Call the function.
+	fnVal.Call(args)
+}
+
 func (ac *AnalysisContext) InjectScriptPersistently(ctx context.Context, script string) error {
-	ac.logger.Debug("Injecting persistent script", zap.Int("length", len(script)))
-	return chromedp.Run(ac.ctx, chromedp.ActionFunc(func(actionCtx context.Context) error {
-		runCtx, cancelRun := context.WithCancel(actionCtx)
-		defer cancelRun()
-		go func() {
-			select {
-			case <-ctx.Done():
-				cancelRun()
-			case <-runCtx.Done():
-			}
-		}()
-		_, err := page.AddScriptToEvaluateOnNewDocument(script).Do(runCtx)
+	// Combine contexts for the injection operation.
+	injectCtx, injectCancel := CombineContext(ac.ctx, ctx)
+	defer injectCancel()
+
+	// The raw cdproto action must be wrapped in a chromedp.ActionFunc.
+	return chromedp.Run(injectCtx, chromedp.ActionFunc(func(c context.Context) error {
+		_, err := page.AddScriptToEvaluateOnNewDocument(script).Do(c)
 		return err
 	}))
 }
 
-// ExecuteScript runs a snippet of JavaScript in the current page context.
 func (ac *AnalysisContext) ExecuteScript(ctx context.Context, script string) error {
-	ac.logger.Debug("Executing script", zap.Int("length", len(script)))
-	return chromedp.Run(ac.ctx, chromedp.ActionFunc(func(actionCtx context.Context) error {
-		runCtx, cancelRun := context.WithCancel(actionCtx)
-		defer cancelRun()
-		go func() {
-			select {
-			case <-ctx.Done():
-				cancelRun()
-			case <-runCtx.Done():
-			}
-		}()
-		_, _, err := runtime.Evaluate(script).Do(runCtx)
-		return err
-	}))
+	// Combine contexts for the execution operation.
+	execCtx, execCancel := CombineContext(ac.ctx, ctx)
+	defer execCancel()
+	return chromedp.Run(execCtx, chromedp.Evaluate(script, nil))
 }

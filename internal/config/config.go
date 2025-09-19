@@ -19,16 +19,15 @@ var (
 // Config holds the entire application configuration.
 // It's the one struct to rule them all.
 type Config struct {
-	Logger       LoggerConfig       `mapstructure:"logger" yaml:"logger"`
-	Database     DatabaseConfig     `mapstructure:"database" yaml:"database"`
-	Engine       EngineConfig       `mapstructure:"engine" yaml:"engine"`
-	Browser      BrowserConfig      `mapstructure:"browser" yaml:"browser"`
-	Network      NetworkConfig      `mapstructure:"network" yaml:"network"`
-	IAST         IASTConfig         `mapstructure:"iast" yaml:"iast"`
-	Scanners     ScannersConfig     `mapstructure:"scanners" yaml:"scanners"`
-	Agent        AgentConfig        `mapstructure:"agent" yaml:"agent"`
-	Discovery    DiscoveryConfig    `mapstructure:"discovery" yaml:"discovery"`
-	KnowledgeGraph KnowledgeGraphConfig `mapstructure:"knowledge_graph" yaml:"knowledge_graph"`
+	Logger    LoggerConfig    `mapstructure:"logger" yaml:"logger"`
+	Database  DatabaseConfig  `mapstructure:"database" yaml:"database"`
+	Engine    EngineConfig    `mapstructure:"engine" yaml:"engine"`
+	Browser   BrowserConfig   `mapstructure:"browser" yaml:"browser"`
+	Network   NetworkConfig   `mapstructure:"network" yaml:"network"`
+	IAST      IASTConfig      `mapstructure:"iast" yaml:"iast"`
+	Scanners  ScannersConfig  `mapstructure:"scanners" yaml:"scanners"`
+	Agent     AgentConfig     `mapstructure:"agent" yaml:"agent"`
+	Discovery DiscoveryConfig `mapstructure:"discovery" yaml:"discovery"`
 	// ScanConfig gets its marching orders from CLI flags, not the config file.
 	Scan ScanConfig `mapstructure:"-" yaml:"-"`
 }
@@ -92,12 +91,12 @@ type ProxyConfig struct {
 
 // NetworkConfig tunes the network behavior of the application.
 type NetworkConfig struct {
-	Timeout             time.Duration     `mapstructure:"timeout" yaml:"timeout"`
-	NavigationTimeout   time.Duration     `mapstructure:"navigation_timeout" yaml:"navigation_timeout"`
+	Timeout               time.Duration     `mapstructure:"timeout" yaml:"timeout"`
+	NavigationTimeout     time.Duration     `mapstructure:"navigation_timeout" yaml:"navigation_timeout"`
 	CaptureResponseBodies bool              `mapstructure:"capture_response_bodies" yaml:"capture_response_bodies"`
-	Headers             map[string]string `mapstructure:"headers" yaml:"headers"`
-	PostLoadWait        time.Duration     `mapstructure:"post_load_wait" yaml:"post_load_wait"`
-	Proxy               ProxyConfig       `mapstructure:"proxy" yaml:"proxy"`
+	Headers               map[string]string `mapstructure:"headers" yaml:"headers"`
+	PostLoadWait          time.Duration     `mapstructure:"post_load_wait" yaml:"post_load_wait"`
+	Proxy                 ProxyConfig       `mapstructure:"proxy" yaml:"proxy"`
 }
 
 // IASTConfig holds configuration for the Interactive Application Security Testing module.
@@ -172,16 +171,16 @@ type AuthConfig struct {
 
 // ATOConfig configures the Account Takeover scanner.
 type ATOConfig struct {
-	Enabled              bool     `mapstructure:"enabled" yaml:"enabled"`
-	CredentialFile       string   `mapstructure:"credential_file" yaml:"credential_file"`
-	Concurrency          int      `mapstructure:"concurrency" yaml:"concurrency"`
-	MinRequestDelayMs    int      `mapstructure:"min_request_delay_ms" yaml:"min_request_delay_ms"`
-	RequestDelayJitterMs int      `mapstructure:"request_delay_jitter_ms" yaml:"request_delay_jitter_ms"`
-	SuccessKeywords      []string `mapstructure:"success_keywords" yaml:"success_keywords"`
-	UserFailureKeywords  []string `mapstructure:"user_failure_keywords" yaml:"user_failure_keywords"`
-	PassFailureKeywords  []string `mapstructure:"pass_failure_keywords" yaml:"pass_failure_keywords"`
+	Enabled                bool     `mapstructure:"enabled" yaml:"enabled"`
+	CredentialFile         string   `mapstructure:"credential_file" yaml:"credential_file"`
+	Concurrency            int      `mapstructure:"concurrency" yaml:"concurrency"`
+	MinRequestDelayMs      int      `mapstructure:"min_request_delay_ms" yaml:"min_request_delay_ms"`
+	RequestDelayJitterMs   int      `mapstructure:"request_delay_jitter_ms" yaml:"request_delay_jitter_ms"`
+	SuccessKeywords        []string `mapstructure:"success_keywords" yaml:"success_keywords"`
+	UserFailureKeywords    []string `mapstructure:"user_failure_keywords" yaml:"user_failure_keywords"`
+	PassFailureKeywords    []string `mapstructure:"pass_failure_keywords" yaml:"pass_failure_keywords"`
 	GenericFailureKeywords []string `mapstructure:"generic_failure_keywords" yaml:"generic_failure_keywords"`
-	LockoutKeywords      []string `mapstructure:"lockout_keywords" yaml:"lockout_keywords"`
+	LockoutKeywords        []string `mapstructure:"lockout_keywords" yaml:"lockout_keywords"`
 }
 
 // IDORConfig defines the settings for the Insecure Direct Object Reference scanner.
@@ -311,15 +310,17 @@ func SetDefaults(v *viper.Viper) {
 	v.SetDefault("discovery.passive_concurrency", 10)
 
 	// -- Agent --
-	v.SetDefault("agent.llm.default_fast_model", "gemini-2.5-flash")
-	v.SetDefault("agent.llm.default_powerful_model", "gemini-2.5-pro")
+	v.SetDefault("agent.llm.default_fast_model", "gemini-1.5-flash")
+	v.SetDefault("agent.llm.default_powerful_model", "gemini-1.5-pro")
 	v.SetDefault("agent.knowledge_graph.type", "memory") // 'memory' or 'neo4j'
 }
-
 
 // Validate checks the configuration for required fields and sane values.
 // A little bit of sanity checking goes a long way.
 func (c *Config) Validate() error {
+	if c.Database.URL == "" {
+		return fmt.Errorf("database.url is a required configuration field")
+	}
 	if c.Engine.WorkerConcurrency <= 0 {
 		return fmt.Errorf("engine.worker_concurrency must be a positive integer")
 	}
@@ -336,6 +337,10 @@ func Load(v *viper.Viper) error {
 		var cfg Config
 		if err := v.Unmarshal(&cfg); err != nil {
 			loadErr = fmt.Errorf("error unmarshaling config: %w", err)
+			return
+		}
+		if err := cfg.Validate(); err != nil {
+			loadErr = fmt.Errorf("invalid configuration: %w", err)
 			return
 		}
 		instance = &cfg
