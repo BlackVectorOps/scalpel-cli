@@ -135,7 +135,7 @@ func ExecuteH1Concurrent(ctx context.Context, candidate *RaceCandidate, config *
 			// Generate the composite fingerprint.
 			fingerprint := GenerateFingerprint(resp.StatusCode, resp.Header, body)
 
-			parsedResponse := &network.ParsedResponse{
+			parsedResponse := &ParsedResponse{
 				StatusCode: resp.StatusCode,
 				Headers:    resp.Header,
 				Body:       body,

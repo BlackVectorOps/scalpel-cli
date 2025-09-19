@@ -28,6 +28,7 @@ type LLMMind struct {
     currentMission       Mission
     currentState         AgentState
     mu                   sync.RWMutex
+    wg                   sync.WaitGroup // Added to manage internal goroutines
     stopChan             chan struct{}
     stateReadyChan       chan struct{}
     contextLookbackSteps int
@@ -65,6 +66,8 @@ func NewLLMMind(
 // Start begins the cognitive processing loop (OODA).
 func (m *LLMMind) Start(ctx context.Context) error {
     m.logger.Info("Starting LLMMind cognitive loops.")
+
+    m.wg.Add(1) // Track the observer loop
     go m.runObserverLoop(ctx)
 
     if m.currentState == StateInitializing {
@@ -75,9 +78,11 @@ func (m *LLMMind) Start(ctx context.Context) error {
         select {
         case <-ctx.Done():
             m.logger.Info("Context cancelled, stopping cognitive loop.")
+            m.wg.Wait() // Wait for observer loop to finish before returning
             return ctx.Err()
         case <-m.stopChan:
             m.logger.Info("Stop signal received, stopping cognitive loop.")
+            m.wg.Wait() // Wait for observer loop to finish before returning
             return nil
         case <-m.stateReadyChan:
             m.executeDecisionCycle(ctx)
@@ -87,6 +92,7 @@ func (m *LLMMind) Start(ctx context.Context) error {
 
 // runObserverLoop listens for observations and integrates them into the KG.
 func (m *LLMMind) runObserverLoop(ctx context.Context) {
+    defer m.wg.Done() // Signal completion when this goroutine exits
     m.logger.Info("Observer loop started.")
     // Subscribe specifically to observations.
     obsChan, unsubscribe := m.bus.Subscribe(MessageTypeObservation)

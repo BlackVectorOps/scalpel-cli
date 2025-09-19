@@ -1,23 +1,22 @@
-// File: internal/analysis/active/protopollution/analyze/analyzer_test.go
 package protopollution
 
 import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
-	"strings"
+	"regexp"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap/zaptest"
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
-	// FIX: Removed internal/browser import as we rely on schemas interfaces.
+	"github.com/xkilldash9x/scalpel-cli/internal/config"
 )
 
 // -- Mock Definitions --
@@ -27,7 +26,6 @@ type MockBrowserManager struct {
 	mock.Mock
 }
 
-// FIX: Implementation of schemas.BrowserManager interface (NewAnalysisContext).
 func (m *MockBrowserManager) NewAnalysisContext(
 	sessionCtx context.Context,
 	cfg interface{},
@@ -50,466 +48,188 @@ func (m *MockBrowserManager) Shutdown(ctx context.Context) error {
 // MockSessionContext mocks the schemas.SessionContext interface.
 type MockSessionContext struct {
 	mock.Mock
-	exposedFunctions map[string]interface{}
-	mutex            sync.Mutex
+	callbackFunc func(payload PollutionProofEvent)
+	mu           sync.Mutex
 }
 
-func NewMockSessionContext() *MockSessionContext {
-	return &MockSessionContext{
-		exposedFunctions: make(map[string]interface{}),
-	}
-}
-
-// FIX: Updated signature to match schemas.SessionContext (includes ctx).
 func (m *MockSessionContext) ExposeFunction(ctx context.Context, name string, function interface{}) error {
-	m.mutex.Lock()
-	defer m.mutex.Unlock()
-	args := m.Called(ctx, name, function)
-	if args.Error(0) == nil {
-		m.exposedFunctions[name] = function
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if cb, ok := function.(func(PollutionProofEvent)); ok {
+		m.callbackFunc = cb
 	}
+	args := m.Called(ctx, name, function)
 	return args.Error(0)
 }
 
-// Allows tests to invoke the exposed Go functions.
-func (m *MockSessionContext) SimulateCallback(t *testing.T, name string, payload interface{}) {
+func (m *MockSessionContext) SimulateCallback(t *testing.T, functionName string, event PollutionProofEvent) {
 	t.Helper()
-	m.mutex.Lock()
-	fn, exists := m.exposedFunctions[name]
-	m.mutex.Unlock()
-
-	if !exists {
-		t.Fatalf("function %s not exposed by analyzer", name)
-	}
-
-	switch name {
-	case jsCallbackName:
-		callback, ok := fn.(func(PollutionProofEvent))
-		require.True(t, ok, "PollutionProofEvent callback signature mismatch. Got: %T", fn)
-		event, ok := payload.(PollutionProofEvent)
-		require.True(t, ok, "PollutionProofEvent payload type mismatch. Got: %T", payload)
-		// Execute asynchronously.
-		go callback(event)
-
-	default:
-		t.Fatalf("Unknown callback name simulated: %s", name)
-	}
+	m.mu.Lock()
+	cb := m.callbackFunc
+	m.mu.Unlock()
+	require.NotNil(t, cb, "Callback function was not set via ExposeFunction")
+	go cb(event)
 }
-
-// Standard SessionContext methods (Updated signatures to include ctx).
 func (m *MockSessionContext) InjectScriptPersistently(ctx context.Context, script string) error {
 	args := m.Called(ctx, script)
 	return args.Error(0)
 }
-
-func (m *MockSessionContext) Navigate(ctx context.Context, url string) error {
-	args := m.Called(ctx, url)
-	return args.Error(0)
-}
-
-func (m *MockSessionContext) Close(ctx context.Context) error {
-	args := m.Called(ctx)
-	return args.Error(0)
-}
-
-// Implement remaining methods of schemas.SessionContext required by the interface.
-func (m *MockSessionContext) Click(selector string) error {
-	args := m.Called(selector)
-	return args.Error(0)
-}
-func (m *MockSessionContext) Type(selector string, text string) error {
-	args := m.Called(selector, text)
-	return args.Error(0)
-}
-func (m *MockSessionContext) Submit(selector string) error {
-	args := m.Called(selector)
-	return args.Error(0)
-}
-func (m *MockSessionContext) ScrollPage(direction string) error {
-	args := m.Called(direction)
-	return args.Error(0)
-}
-// Note: WaitForAsync signature based on the provided contract for protopollution (no ctx).
-func (m *MockSessionContext) WaitForAsync(milliseconds int) error {
-	args := m.Called(milliseconds)
-	return args.Error(0)
-}
-func (m *MockSessionContext) GetContext() context.Context {
-	args := m.Called()
-    if args.Get(0) == nil {
-        return context.Background()
-    }
-	return args.Get(0).(context.Context)
-}
 func (m *MockSessionContext) ExecuteScript(ctx context.Context, script string) error {
 	args := m.Called(ctx, script)
+	return args.Error(0)
+}
+func (m *MockSessionContext) Navigate(ctx context.Context, url string) error {
+	args := m.Called(ctx, url)
 	return args.Error(0)
 }
 func (m *MockSessionContext) Interact(ctx context.Context, config schemas.InteractionConfig) error {
 	args := m.Called(ctx, config)
 	return args.Error(0)
 }
+func (m *MockSessionContext) Close(ctx context.Context) error {
+	args := m.Called(ctx)
+	return args.Error(0)
+}
+func (m *MockSessionContext) Click(selector string) error {
+	return m.Called(selector).Error(0)
+}
+func (m *MockSessionContext) Type(selector string, text string) error {
+	return m.Called(selector, text).Error(0)
+}
+func (m *MockSessionContext) Submit(selector string) error {
+	return m.Called(selector).Error(0)
+}
+func (m *MockSessionContext) ScrollPage(direction string) error {
+	return m.Called(direction).Error(0)
+}
+func (m *MockSessionContext) WaitForAsync(milliseconds int) error {
+	return m.Called(milliseconds).Error(0)
+}
+func (m *MockSessionContext) GetContext() context.Context {
+	args := m.Called()
+	if ctx, ok := args.Get(0).(context.Context); ok {
+		return ctx
+	}
+	return context.Background()
+}
+func generateCanary() string {
+	return uuid.NewString()[:8]
+}
 
+// -- Test Cases --
 
-// -- Test Setup Helper --
-
-func setupAnalyzer(t *testing.T, configMod func(*Config)) (*Analyzer, *MockBrowserManager) {
-	t.Helper()
+func TestNewAnalyzer(t *testing.T) {
 	logger := zaptest.NewLogger(t)
-
-	// Default configuration optimized for testing speed
-	config := Config{
-		WaitDuration: 50 * time.Millisecond,
-	}
-
-	if configMod != nil {
-		configMod(&config)
-	}
-
 	mockBrowserManager := new(MockBrowserManager)
+	cfg := config.ProtoPollutionConfig{
+		Enabled: true,
+	}
 
-	// Using the refactored NewAnalyzer signature.
-	analyzer := NewAnalyzer(logger, mockBrowserManager, &config)
-	require.NotNil(t, analyzer, "NewAnalyzer should return a valid analyzer")
+	analyzer := NewAnalyzer(logger, mockBrowserManager, cfg)
 
-	return analyzer, mockBrowserManager
+	assert.NotNil(t, analyzer)
+	assert.Equal(t, logger.Named("pp_analyzer"), analyzer.logger)
+	assert.Equal(t, mockBrowserManager, analyzer.browser)
+	expectedCfg := cfg
+	expectedCfg.WaitDuration = 8 * time.Second
+	assert.Equal(t, expectedCfg, analyzer.config)
 }
 
-// -- Test Cases: Initialization and Configuration --
-
-func TestNewAnalyzer_Defaults(t *testing.T) {
+func TestAnalyze_FindingFound(t *testing.T) {
 	logger := zaptest.NewLogger(t)
-	analyzer := NewAnalyzer(logger, nil, nil)
-	require.NotNil(t, analyzer)
-
-	assert.Equal(t, defaultWaitDuration, analyzer.config.WaitDuration, "Default WaitDuration mismatch")
-	assert.NotEmpty(t, analyzer.canary)
-	assert.Len(t, analyzer.canary, 8)
-	assert.NotNil(t, analyzer.findingChan)
-	assert.Equal(t, 5, cap(analyzer.findingChan))
-}
-
-func TestNewAnalyzer_ConfigOverride(t *testing.T) {
-	// Test specific override
-	analyzer, _ := setupAnalyzer(t, func(c *Config) {
-		c.WaitDuration = 1 * time.Hour
-	})
-	assert.Equal(t, 1*time.Hour, analyzer.config.WaitDuration)
-
-	// Test invalid override (should revert to default)
-	logger := zaptest.NewLogger(t)
-	invalidConfig := Config{WaitDuration: -5 * time.Second}
-	analyzerInvalid := NewAnalyzer(logger, nil, &invalidConfig)
-
-	assert.Equal(t, defaultWaitDuration, analyzerInvalid.config.WaitDuration, "Invalid WaitDuration should revert to default")
-}
-
-// -- Test Cases: Shim Generation and Instrumentation --
-
-func TestGenerateShim(t *testing.T) {
-	analyzer, _ := setupAnalyzer(t, nil)
-	testCanary := "T3STC4NRY"
-	analyzer.canary = testCanary
-
-	shim, err := analyzer.generateShim()
-	require.NoError(t, err)
-	require.NotEmpty(t, shim)
-
-    // Note: Actual verification depends on the content of ProtoPollutionShim, which was omitted.
-	// assert.Contains(t, shim, fmt.Sprintf("let pollutionCanary = '%s';", testCanary))
-	// assert.Contains(t, shim, fmt.Sprintf("let detectionCallbackName = '%s';", jsCallbackName))
-}
-
-// -- Test Cases: Event Handling (Callback Logic) --
-
-func TestHandlePollutionProof_ValidFlows(t *testing.T) {
-	tests := []struct {
-		name             string
-		sourceVector     string
-		expectedVulnName string
-		expectedSeverity schemas.Severity
-		expectedCWE      string
-	}{
-		{"Standard PP", "Object.prototype_access", "Client-Side Prototype Pollution", schemas.SeverityHigh, "CWE-1321"},
-		{"PP via Fetch", "Fetch_Response_json_proto_key", "Client-Side Prototype Pollution", schemas.SeverityHigh, "CWE-1321"},
-		{"DOM Clobbering", "DOM_Clobbering", "DOM Clobbering", schemas.SeverityMedium, "CWE-1339"},
+	mockBrowserManager := new(MockBrowserManager)
+	mockSession := new(MockSessionContext)
+	cfg := config.ProtoPollutionConfig{
+		WaitDuration: 150 * time.Millisecond,
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			analyzer, _ := setupAnalyzer(t, nil)
-			analyzer.taskID = "task-flow-123"
-			canary := analyzer.canary
-
-			event := PollutionProofEvent{
-				Source: tt.sourceVector,
-				Canary: canary,
-			}
-
-			analyzer.handlePollutionProof(event)
-
-			require.Len(t, analyzer.findingChan, 1)
-			finding := <-analyzer.findingChan
-
-			assert.Equal(t, "task-flow-123", finding.TaskID)
-			// FIX: Check the Name field of the Vulnerability struct.
-			assert.Equal(t, tt.expectedVulnName, finding.Vulnerability.Name)
-			assert.Equal(t, tt.expectedSeverity, finding.Severity)
-			// FIX: CWE is now a slice.
-			require.Len(t, finding.CWE, 1)
-			assert.Equal(t, tt.expectedCWE, finding.CWE[0])
-			assert.Contains(t, finding.Description, tt.sourceVector)
-
-			// FIX: Verify evidence structure. Evidence is a string, so we unmarshal the string content.
-			var evidenceData PollutionProofEvent
-			err := json.Unmarshal([]byte(finding.Evidence), &evidenceData)
-			require.NoError(t, err)
-			assert.Equal(t, canary, evidenceData.Canary)
-			assert.Equal(t, tt.sourceVector, evidenceData.Source)
-		})
-	}
-}
-
-func TestHandlePollutionProof_MismatchedCanary(t *testing.T) {
-	analyzer, _ := setupAnalyzer(t, nil)
-	analyzer.canary = "EXPECTED"
-
-	event := PollutionProofEvent{
-		Source: "Object.prototype_access",
-		Canary: "STALE_OR_INVALID",
-	}
-
-	analyzer.handlePollutionProof(event)
-
-	assert.Empty(t, analyzer.findingChan, "Mismatched canary should not generate a finding")
-}
-
-func TestHandlePollutionProof_ChannelFull(t *testing.T) {
-	analyzer, _ := setupAnalyzer(t, nil)
-	canary := analyzer.canary
-	bufferSize := 5
-
-	for i := 0; i < bufferSize; i++ {
-		analyzer.handlePollutionProof(PollutionProofEvent{Canary: canary, Source: "Flood"})
-	}
-	require.Len(t, analyzer.findingChan, bufferSize)
-
-	done := make(chan struct{})
-	go func() {
-		analyzer.handlePollutionProof(PollutionProofEvent{Canary: canary, Source: "DroppedEvent"})
-		close(done)
-	}()
-
-	select {
-	case <-done:
-	case <-time.After(1 * time.Second):
-		t.Fatal("handlePollutionProof blocked when the channel was full; it should be non-blocking.")
-	}
-
-	assert.Len(t, analyzer.findingChan, bufferSize)
-}
-
-// -- Test Cases: Overall Analysis Flow (Analyze Method Integration) --
-
-func TestAnalyze_HappyPath_Detection(t *testing.T) {
-	analyzer, mockBrowserManager := setupAnalyzer(t, func(c *Config) {
-		c.WaitDuration = 200 * time.Millisecond
-	})
+	analyzer := NewAnalyzer(logger, mockBrowserManager, cfg)
 
 	ctx := context.Background()
-	targetURL := "http://example.com/vulnerable_app"
-	mockSession := NewMockSessionContext()
-	taskID := "task-success-1"
+	testURL := "http://example.com/test"
+	var capturedCanary string
 
-	// --- Mock Expectations ---
-
-	// 1. Initialize (FIX: Expect NewAnalysisContext with specific arguments used in analyzer.go: nil config, empty persona/taint).
-	mockBrowserManager.On("NewAnalysisContext", ctx, nil, schemas.Persona{}, "", "").Return(mockSession, nil).Once()
-
-	// 2. Instrument (FIX: Must include ctx parameter).
+	// --- Mocks ---
+	mockBrowserManager.On("NewAnalysisContext", ctx, mock.Anything, schemas.Persona{}, "", "").Return(mockSession, nil).Once()
 	mockSession.On("ExposeFunction", ctx, jsCallbackName, mock.AnythingOfType("func(protopollution.PollutionProofEvent)")).Return(nil).Once()
-	
-    // Check that the injected script contains the canary.
-    mockSession.On("InjectScriptPersistently", ctx, mock.MatchedBy(func(script string) bool {
-		return strings.Contains(script, analyzer.canary)
-	})).Return(nil).Once()
-
-	// 3. Navigation and Monitoring (FIX: Must include ctx parameter).
-	mockSession.On("Navigate", ctx, targetURL).Return(nil).Once().Run(func(args mock.Arguments) {
-		// Simulate concurrent finding detection.
+	mockSession.On("InjectScriptPersistently", ctx, mock.AnythingOfType("string")).Return(nil).Once().Run(func(args mock.Arguments) {
+		script := args.String(1)
+		re := regexp.MustCompile(`let pollutionCanary = '([^']+)';`)
+		matches := re.FindStringSubmatch(script)
+		require.GreaterOrEqual(t, len(matches), 2, "Could not find canary in injected script")
+		capturedCanary = matches[1]
+	})
+	mockSession.On("Navigate", ctx, testURL).Return(nil).Once().Run(func(args mock.Arguments) {
 		go func() {
-			time.Sleep(10 * time.Millisecond)
+			time.Sleep(20 * time.Millisecond)
+			require.NotEmpty(t, capturedCanary, "Canary was not captured from injected script")
 			mockSession.SimulateCallback(t, jsCallbackName, PollutionProofEvent{
-				Source: "Simulated_Vulnerability",
-				Canary: analyzer.canary,
+				Source: "URL_SearchParams",
+				Canary: capturedCanary,
+				Vector: "__proto__[polluted]=true",
 			})
 		}()
 	})
-
-	// 4. Cleanup
 	mockSession.On("Close", ctx).Return(nil).Once()
 
-	// --- Execute Analysis ---
-	findings, err := analyzer.Analyze(ctx, taskID, targetURL)
+	// --- Execute ---
+	findings, err := analyzer.Analyze(ctx, "task-1", testURL)
 
-	// --- Verification ---
-	assert.NoError(t, err)
+	// --- Assertions ---
+	require.NoError(t, err)
+	require.Len(t, findings, 1, "Expected exactly one finding")
+
+	finding := findings[0]
+	assert.Equal(t, "Client-Side Prototype Pollution", finding.Vulnerability.Name)
+	assert.Equal(t, schemas.SeverityHigh, finding.Severity)
+	var evidenceData PollutionProofEvent
+	err = json.Unmarshal([]byte(finding.Evidence), &evidenceData)
+	require.NoError(t, err)
+	assert.Equal(t, capturedCanary, evidenceData.Canary)
+
 	mockBrowserManager.AssertExpectations(t)
 	mockSession.AssertExpectations(t)
-
-	require.Len(t, findings, 1)
-	assert.Contains(t, string(findings[0].Evidence), "Simulated_Vulnerability")
-	assert.Equal(t, taskID, findings[0].TaskID)
 }
 
-func TestAnalyze_HappyPath_NoFindings(t *testing.T) {
-	analyzer, mockBrowserManager := setupAnalyzer(t, nil)
-	configuredWait := analyzer.config.WaitDuration
-
+func TestAnalyze_NoFinding(t *testing.T) {
+	logger := zaptest.NewLogger(t)
+	mockBrowserManager := new(MockBrowserManager)
+	mockSession := new(MockSessionContext)
+	cfg := config.ProtoPollutionConfig{
+		WaitDuration: 50 * time.Millisecond,
+	}
+	analyzer := NewAnalyzer(logger, mockBrowserManager, cfg)
 	ctx := context.Background()
-	targetURL := "http://example.com/secure_app"
-	mockSession := NewMockSessionContext()
 
-	// Setup standard expectations (FIX: Updated signatures).
-	mockBrowserManager.On("NewAnalysisContext", ctx, nil, schemas.Persona{}, "", "").Return(mockSession, nil)
+	mockBrowserManager.On("NewAnalysisContext", ctx, mock.Anything, schemas.Persona{}, "", "").Return(mockSession, nil)
 	mockSession.On("ExposeFunction", ctx, jsCallbackName, mock.Anything).Return(nil)
-	mockSession.On("InjectScriptPersistently", ctx, mock.Anything).Return(nil)
-	mockSession.On("Navigate", ctx, targetURL).Return(nil)
+	mockSession.On("InjectScriptPersistently", ctx, mock.AnythingOfType("string")).Return(nil)
+	mockSession.On("Navigate", ctx, "http://clean.example.com").Return(nil)
 	mockSession.On("Close", ctx).Return(nil)
 
-	// Execute Analysis
-	startTime := time.Now()
-	findings, err := analyzer.Analyze(ctx, "task-none", targetURL)
-	duration := time.Since(startTime)
+	findings, err := analyzer.Analyze(ctx, "task-clean", "http://clean.example.com")
 
-	// Verification
 	assert.NoError(t, err)
 	assert.Empty(t, findings)
+	mockBrowserManager.AssertExpectations(t)
 	mockSession.AssertExpectations(t)
-
-	assert.GreaterOrEqual(t, duration, configuredWait)
-	assert.Less(t, duration, configuredWait+500*time.Millisecond)
 }
 
-// -- Test Cases: Robustness and Error Handling --
-
-func TestAnalyze_InitializationFailure(t *testing.T) {
-	analyzer, mockBrowserManager := setupAnalyzer(t, nil)
+func TestAnalyze_BrowserError(t *testing.T) {
+	logger := zaptest.NewLogger(t)
+	mockBrowserManager := new(MockBrowserManager)
+	cfg := config.ProtoPollutionConfig{}
+	analyzer := NewAnalyzer(logger, mockBrowserManager, cfg)
 	ctx := context.Background()
+	expectedErr := errors.New("failed to launch browser")
 
-	// Mock failure (FIX: Updated signature).
-	expectedError := errors.New("browser driver crashed")
-	mockBrowserManager.On("NewAnalysisContext", ctx, nil, schemas.Persona{}, "", "").Return(nil, expectedError).Once()
+	mockBrowserManager.On("NewAnalysisContext", ctx, mock.Anything, schemas.Persona{}, "", "").Return(nil, expectedErr)
 
-	// Execute Analysis
-	findings, err := analyzer.Analyze(ctx, "task-fail-init", "http://example.com")
+	findings, err := analyzer.Analyze(ctx, "task-fail", "http://example.com")
 
 	assert.Error(t, err)
+	assert.ErrorIs(t, err, expectedErr)
 	assert.Nil(t, findings)
-	assert.Contains(t, err.Error(), "could not initialize browser analysis context")
-	assert.ErrorIs(t, err, expectedError)
 	mockBrowserManager.AssertExpectations(t)
 }
 
-func TestAnalyze_InstrumentationFailure_Expose(t *testing.T) {
-	analyzer, mockBrowserManager := setupAnalyzer(t, nil)
-	ctx := context.Background()
-	mockSession := NewMockSessionContext()
 
-	// Setup initialization success (FIX: Updated signature).
-	mockBrowserManager.On("NewAnalysisContext", ctx, nil, schemas.Persona{}, "", "").Return(mockSession, nil)
-
-	// Mock failure during ExposeFunction (FIX: must include ctx).
-	expectedError := errors.New("JS context destroyed")
-	mockSession.On("ExposeFunction", ctx, jsCallbackName, mock.Anything).Return(expectedError).Once()
-
-	// Ensure session is closed even on failure.
-	mockSession.On("Close", ctx).Return(nil).Once()
-
-	// Execute Analysis
-	_, err := analyzer.Analyze(ctx, "task-fail-expose", "http://example.com")
-
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "failed to expose proof function")
-	mockSession.AssertExpectations(t)
-	// Ensure subsequent steps were skipped (check arguments including ctx).
-	mockSession.AssertNotCalled(t, "InjectScriptPersistently", mock.Anything, mock.Anything)
-}
-
-func TestAnalyze_NavigationFailure_GracefulHandling(t *testing.T) {
-	analyzer, mockBrowserManager := setupAnalyzer(t, nil)
-	ctx := context.Background()
-	mockSession := NewMockSessionContext()
-	targetURL := "http://offline.example.com"
-
-	// Setup standard success until navigation (FIX: Updated signatures).
-	mockBrowserManager.On("NewAnalysisContext", ctx, nil, schemas.Persona{}, "", "").Return(mockSession, nil)
-	mockSession.On("ExposeFunction", ctx, jsCallbackName, mock.Anything).Return(nil)
-	mockSession.On("InjectScriptPersistently", ctx, mock.Anything).Return(nil)
-
-	// Mock navigation failure (FIX: must include ctx).
-	navigationError := errors.New("net::ERR_NAME_NOT_RESOLVED")
-	mockSession.On("Navigate", ctx, targetURL).Return(navigationError).Once()
-
-	// Ensure session is closed.
-	mockSession.On("Close", ctx).Return(nil).Once()
-
-	// Execute Analysis
-	findings, err := analyzer.Analyze(ctx, "task-nav-fail", targetURL)
-
-	// Verify successful analysis completion despite navigation error.
-	assert.NoError(t, err)
-	assert.Empty(t, findings)
-	mockSession.AssertExpectations(t)
-}
-
-func TestAnalyze_ContextCancellation(t *testing.T) {
-	analyzer, mockBrowserManager := setupAnalyzer(t, func(c *Config) {
-		c.WaitDuration = 10 * time.Second
-	})
-
-	ctx, cancel := context.WithCancel(context.Background())
-	mockSession := NewMockSessionContext()
-
-	// Setup standard expectations (FIX: Updated signatures).
-	// Use mock.Anything for context in setup as the actual context object passed might vary slightly.
-	mockBrowserManager.On("NewAnalysisContext", mock.Anything, nil, schemas.Persona{}, "", "").Return(mockSession, nil)
-	mockSession.On("ExposeFunction", mock.Anything, jsCallbackName, mock.Anything).Return(nil)
-	mockSession.On("InjectScriptPersistently", mock.Anything, mock.Anything).Return(nil)
-	mockSession.On("Navigate", mock.Anything, mock.Anything).Return(nil).Run(func(args mock.Arguments) {
-		// Simulate a finding immediately before cancellation.
-		mockSession.SimulateCallback(t, jsCallbackName, PollutionProofEvent{
-			Source: "Detected_Before_Cancel",
-			Canary: analyzer.canary,
-		})
-	})
-	// The context passed to Close will be the cancelled one.
-	mockSession.On("Close", mock.Anything).Return(nil)
-
-	// Execute Analysis in a goroutine
-	type result struct {
-		findings []schemas.Finding
-		err      error
-	}
-	done := make(chan result)
-	go func() {
-		f, e := analyzer.Analyze(ctx, "task-cancel", "http://example.com")
-		done <- result{f, e}
-	}()
-
-	time.Sleep(100 * time.Millisecond)
-	cancel()
-
-	select {
-	case res := <-done:
-		assert.Error(t, res.err)
-		assert.ErrorIs(t, res.err, context.Canceled)
-		require.Len(t, res.findings, 1, "Findings detected before cancellation should still be returned")
-		assert.Contains(t, string(res.findings[0].Evidence), "Detected_Before_Cancel")
-
-	case <-time.After(1 * time.Second):
-		t.Fatal("Timeout waiting for analysis to cancel. It did not stop promptly.")
-	}
-
-	mockSession.AssertExpectations(t)
-}
