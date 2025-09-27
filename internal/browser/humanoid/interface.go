@@ -11,7 +11,7 @@ import (
 
 // Controller defines the high-level interface for human-like interactions.
 
-type Controller interface {
+type Executor interface {
 	MoveTo(ctx context.Context, selector string, field *PotentialField) error
 	// IntelligentClick includes movement and clicking behavior.
 	IntelligentClick(ctx context.Context, selector string, field *PotentialField) error
@@ -21,7 +21,6 @@ type Controller interface {
 	CognitivePause(ctx context.Context, meanMs, stdDevMs float64) error
 }
 
-// Executor defines the interface for interacting with the browser automation layer (e.g., CDP, Playwright).
 // This interface is designed to be agnostic of the underlying technology.
 type Executor interface {
 	// Sleep pauses execution, respecting context cancellation.

@@ -97,6 +97,8 @@ type NetworkConfig struct {
 	Headers               map[string]string `mapstructure:"headers" yaml:"headers"`
 	PostLoadWait          time.Duration     `mapstructure:"post_load_wait" yaml:"post_load_wait"`
 	Proxy                 ProxyConfig       `mapstructure:"proxy" yaml:"proxy"`
+	// FIX: Added missing field to resolve compilation error in session.go.
+	IgnoreTLSErrors       bool              `mapstructure:"ignore_tls_errors" yaml:"ignore_tls_errors"`
 }
 
 // IASTConfig holds configuration for the Interactive Application Security Testing module.

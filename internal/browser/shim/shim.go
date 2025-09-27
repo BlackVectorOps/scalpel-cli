@@ -30,3 +30,4 @@ func BuildTaintShim(template, configJSON string) (string, error) {
 	script := strings.Replace(template, ConfigPlaceholder, configJSON, 1)
 	return script, nil
 }
+

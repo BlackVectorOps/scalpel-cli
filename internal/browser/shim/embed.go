@@ -17,3 +17,4 @@ func GetTaintShimTemplate() (string, error) {
 	}
 	return taintShimTemplate, nil
 }
+

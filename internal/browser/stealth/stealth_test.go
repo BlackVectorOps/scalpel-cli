@@ -34,7 +34,8 @@ func SetupPlaywrightTest(t *testing.T) (*playwright.Playwright, playwright.Brows
 	installDone := make(chan error, 1)
 	go func() {
 		// Install specific browser for consistency.
-		installDone <- playwright.Install(&playwright.RunOptions{Browsers: []string{"chromium"}})
+		// API Compliance: Install now requires context.
+		installDone <- playwright.Install(installCtx, &playwright.RunOptions{Browsers: []string{"chromium"}})
 	}()
 
 	select {
@@ -44,10 +45,16 @@ func SetupPlaywrightTest(t *testing.T) (*playwright.Playwright, playwright.Brows
 		t.Fatal("Timeout waiting for Playwright installation")
 	}
 
-	pw, err := playwright.Run()
+	// Use a context for the initialization phase.
+	initCtx, initCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer initCancel()
+
+	// API Compliance: Run now requires context.
+	pw, err := playwright.Run(initCtx)
 	require.NoError(t, err, "Failed to start Playwright driver")
 
-	browser, err := pw.Chromium.Launch(playwright.BrowserTypeLaunchOptions{
+	// API Compliance: Launch now requires context.
+	browser, err := pw.Chromium.Launch(initCtx, playwright.BrowserTypeLaunchOptions{
 		Headless: playwright.Bool(true),
 	})
 	require.NoError(t, err, "Failed to launch browser")
@@ -56,7 +63,8 @@ func SetupPlaywrightTest(t *testing.T) (*playwright.Playwright, playwright.Brows
 		// Use a background context for cleanup.
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cleanupCancel()
-		browser.Close(cleanupCtx)
+		// API Compliance: Close and Stop now require context.
+		browser.Close(cleanupCtx, playwright.BrowserCloseOptions{})
 		pw.Stop(cleanupCtx)
 	})
 
@@ -84,9 +92,11 @@ func TestApplyEvasions(t *testing.T) {
 		UserAgent: playwright.String(testPersona.UserAgent),
 		Locale:    playwright.String(testPersona.Languages[0]),
 	}
+	// API Compliance: NewContext now requires context.
 	pwContext, err := browser.NewContext(ctx, contextOptions)
 	require.NoError(t, err, "Failed to create browser context")
-	defer pwContext.Close(context.Background())
+	// API Compliance: Close now requires context.
+	defer pwContext.Close(context.Background(), playwright.BrowserContextCloseOptions{})
 
 	// 3. Apply the stealth evasions (This is what we are testing).
 	// We pass the context 'ctx' to ApplyEvasions.
@@ -97,29 +107,32 @@ func TestApplyEvasions(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Serve a script that captures the fingerprint after the evasions have run.
 		fmt.Fprint(w, `
-            <html><body>
-            <script>
-                window.fingerprint = {
-                    userAgent: navigator.userAgent,
-                    platform: navigator.platform,
-                    webdriver: navigator.webdriver,
-                    languages: navigator.languages,
-					hasChrome: window.chrome !== undefined,
-                };
-            </script>
-            </body></html>
-        `)
+	            <html><body>
+	            <script>
+	                window.fingerprint = {
+	                    userAgent: navigator.userAgent,
+	                    platform: navigator.platform,
+	                    webdriver: navigator.webdriver,
+	                    languages: navigator.languages,
+						hasChrome: window.chrome !== undefined,
+	                };
+	            </script>
+	            </body></html>
+	        `)
 	}))
 	defer server.Close()
 
 	// 5. Navigate and evaluate the results.
+	// API Compliance: NewPage now requires context.
 	page, err := pwContext.NewPage(ctx)
 	require.NoError(t, err, "Failed to create page")
 
+	// API Compliance: Goto now requires context.
 	_, err = page.Goto(ctx, server.URL, playwright.PageGotoOptions{WaitUntil: playwright.WaitUntilLoad})
 	require.NoError(t, err, "Navigation failed")
 
 	// Evaluate the captured fingerprint.
+	// API Compliance: Evaluate now requires context.
 	result, err := page.Evaluate(ctx, "window.fingerprint")
 	require.NoError(t, err, "Evaluation failed")
 
@@ -148,3 +161,4 @@ func TestApplyEvasions(t *testing.T) {
 	// Check for window.chrome presence.
 	assert.True(t, fingerprint["hasChrome"].(bool), "window.chrome should be defined")
 }
+
