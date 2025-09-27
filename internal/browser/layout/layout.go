@@ -10,8 +10,8 @@ import (
 	"github.com/antchfx/htmlquery"
 	"golang.org/x/net/html"
 
-	"github.com/xkilldash9x/scalpel-cli/internal/browser/parser"
 	"github.com/xkilldash9x/scalpel-cli/internal/browser/humanoid"
+	"github.com/xkilldash9x/scalpel-cli/internal/browser/parser"
 )
 
 // --- Core Structures: Box Model and Dimensions ---
@@ -103,16 +103,16 @@ func (sn *StyledNode) Display() DisplayType {
 		return DisplayInline
 	}
 
-    if display, ok := sn.Value("display"); ok {
-        switch display {
-        case "block", "flex", "grid", "table": // Treat major layout models as block initially.
-            return DisplayBlock
-        case "none":
-            return DisplayNone
-        case "inline", "inline-block":
-            return DisplayInline
-        }
-    }
+	if display, ok := sn.Value("display"); ok {
+		switch display {
+		case "block", "flex", "grid", "table": // Treat major layout models as block initially.
+			return DisplayBlock
+		case "none":
+			return DisplayNone
+		case "inline", "inline-block":
+			return DisplayInline
+		}
+	}
 	// Default depends on the element type (User Agent stylesheet).
 	return getDefaultDisplay(sn.Node)
 }
@@ -130,14 +130,13 @@ func (sn *StyledNode) IsVisible() bool {
 	if sn.Display() == DisplayNone {
 		return false
 	}
-    if visibility, ok := sn.Value("visibility"); ok {
-	    if visibility == "hidden" || visibility == "collapse" {
-		    return false
-	    }
-    }
+	if visibility, ok := sn.Value("visibility"); ok {
+		if visibility == "hidden" || visibility == "collapse" {
+			return false
+		}
+	}
 	return true
 }
-
 
 // getDefaultDisplay provides a very basic User Agent stylesheet equivalent.
 func getDefaultDisplay(node *html.Node) DisplayType {
@@ -173,10 +172,10 @@ func (e *Engine) Render(root *html.Node, viewportWidth, viewportHeight float64) 
 	styleTree := e.BuildStyleTree(root)
 	layoutTree := e.BuildLayoutTree(styleTree)
 
-    if layoutTree == nil {
-        // Root element is display: none.
-        return nil
-    }
+	if layoutTree == nil {
+		// Root element is display: none.
+		return nil
+	}
 
 	// The initial containing block matches the viewport dimensions.
 	initialContainingBlock := Dimensions{
@@ -207,8 +206,8 @@ func (e *Engine) BuildStyleTree(node *html.Node) *StyledNode {
 
 	// Recursively style children.
 	for c := node.FirstChild; c != nil; c = c.NextSibling {
-		// Skip comments and processing instructions.
-		if c.Type == html.CommentNode || c.Type == html.ProcessingInstructionNode {
+		// Skip comments.
+		if c.Type == html.CommentNode {
 			continue
 		}
 		// Skip <head> and its children for layout purposes.
@@ -412,34 +411,33 @@ func (b *LayoutBox) layoutBlock(containingBlock Dimensions) {
 
 // layoutInline implements basic inline layout (simplified, no line breaking).
 func (b *LayoutBox) layoutInline(containingBlock Dimensions) {
-    // 1. Calculate edges.
-    b.calculateInlineEdges(containingBlock)
+	// 1. Calculate edges.
+	b.calculateInlineEdges(containingBlock)
 
-    // 2. Position the box. X/Y are determined by the flow (handled in parent's layoutChildren).
-    d := &b.Dimensions
-    d.Content.X = containingBlock.Content.X + d.Margin.Left + d.Border.Left + d.Padding.Left
-    d.Content.Y = containingBlock.Content.Y + d.Margin.Top + d.Border.Top + d.Padding.Top
+	// 2. Position the box. X/Y are determined by the flow (handled in parent's layoutChildren).
+	d := &b.Dimensions
+	d.Content.X = containingBlock.Content.X + d.Margin.Left + d.Border.Left + d.Padding.Left
+	d.Content.Y = containingBlock.Content.Y + d.Margin.Top + d.Border.Top + d.Padding.Top
 
-    // 3. Layout children (estimates width and height).
-    b.layoutChildren()
+	// 3. Layout children (estimates width and height).
+	b.layoutChildren()
 
-    // 4. Calculate dimensions based on children extent (shrink-to-fit).
-    b.calculateInlineDimensions(containingBlock)
+	// 4. Calculate dimensions based on children extent (shrink-to-fit).
+	b.calculateInlineDimensions(containingBlock)
 }
 
 // layoutAnonymous handles the layout of anonymous block boxes wrapping inline content.
 func (b *LayoutBox) layoutAnonymous(containingBlock Dimensions) {
-    // Anonymous boxes inherit dimensions from their containing block initially.
-    b.Dimensions.Content.X = containingBlock.Content.X
-    b.Dimensions.Content.Y = containingBlock.Content.Y
-    b.Dimensions.Content.Width = containingBlock.Content.Width
+	// Anonymous boxes inherit dimensions from their containing block initially.
+	b.Dimensions.Content.X = containingBlock.Content.X
+	b.Dimensions.Content.Y = containingBlock.Content.Y
+	b.Dimensions.Content.Width = containingBlock.Content.Width
 
-    // They contain inline children.
-    b.layoutChildren()
-    // Their height is determined by their content.
-    b.calculateBlockHeight()
+	// They contain inline children.
+	b.layoutChildren()
+	// Their height is determined by their content.
+	b.calculateBlockHeight()
 }
-
 
 // calculateBlockWidth computes the width of a block-level box.
 func (b *LayoutBox) calculateBlockWidth(containingBlock Dimensions) {
@@ -471,33 +469,39 @@ func (b *LayoutBox) calculateBlockWidth(containingBlock Dimensions) {
 
 	// If width is auto, it takes the remaining space.
 	if width == "auto" {
-		if marginLeft == "auto" { mlVal = 0 }
-		if marginRight == "auto" { mrVal = 0 }
+		if marginLeft == "auto" {
+			mlVal = 0
+		}
+		if marginRight == "auto" {
+			mrVal = 0
+		}
 
 		wVal = containingBlock.Content.Width - mlVal - mrVal - plVal - prVal - blVal - brVal
-		if wVal < 0 { wVal = 0 }
+		if wVal < 0 {
+			wVal = 0
+		}
 	}
 
 	// Handle auto margins (centering).
 	if width != "auto" {
-        remainingSpace := containingBlock.Content.Width - wVal - plVal - prVal - blVal - brVal
+		remainingSpace := containingBlock.Content.Width - wVal - plVal - prVal - blVal - brVal
 
-        if marginLeft == "auto" && marginRight == "auto" {
-            if remainingSpace > 0 {
-                mlVal = remainingSpace / 2
-                mrVal = remainingSpace / 2
-            } else {
-                mlVal = 0
-                mrVal = 0
-            }
-        } else if marginLeft == "auto" {
-             mlVal = max(0, remainingSpace)
-             mrVal = parseLength(marginRight, containingBlock.Content.Width) // Ensure non-auto margin is calculated
-        } else if marginRight == "auto" {
-             mrVal = max(0, remainingSpace)
-             mlVal = parseLength(marginLeft, containingBlock.Content.Width) // Ensure non-auto margin is calculated
-        }
-    }
+		if marginLeft == "auto" && marginRight == "auto" {
+			if remainingSpace > 0 {
+				mlVal = remainingSpace / 2
+				mrVal = remainingSpace / 2
+			} else {
+				mlVal = 0
+				mrVal = 0
+			}
+		} else if marginLeft == "auto" {
+			mlVal = max(0, remainingSpace)
+			mrVal = parseLength(marginRight, containingBlock.Content.Width) // Ensure non-auto margin is calculated
+		} else if marginRight == "auto" {
+			mrVal = max(0, remainingSpace)
+			mlVal = parseLength(marginLeft, containingBlock.Content.Width) // Ensure non-auto margin is calculated
+		}
+	}
 
 	d.Content.Width = wVal
 	d.Margin.Left = mlVal
@@ -533,180 +537,178 @@ func (b *LayoutBox) calculateBlockPosition(containingBlock Dimensions) {
 
 // calculateInlineEdges computes the edges for inline elements.
 func (b *LayoutBox) calculateInlineEdges(containingBlock Dimensions) {
-    if b.StyledNode == nil {
-        return
-    }
-    styles := b.StyledNode.ComputedStyles
-    d := &b.Dimensions
+	if b.StyledNode == nil {
+		return
+	}
+	styles := b.StyledNode.ComputedStyles
+	d := &b.Dimensions
 
-    // Calculate horizontal edges based on the containing block width.
-    d.Margin.Left = parseLength(lookupStyle(styles, "margin-left", "0"), containingBlock.Content.Width)
-    d.Margin.Right = parseLength(lookupStyle(styles, "margin-right", "0"), containingBlock.Content.Width)
-    d.Padding.Left = parseLength(lookupStyle(styles, "padding-left", "0"), containingBlock.Content.Width)
-    d.Padding.Right = parseLength(lookupStyle(styles, "padding-right", "0"), containingBlock.Content.Width)
-    d.Border.Left = parseLength(lookupStyle(styles, "border-left-width", "0"), 0)
-    d.Border.Right = parseLength(lookupStyle(styles, "border-right-width", "0"), 0)
+	// Calculate horizontal edges based on the containing block width.
+	d.Margin.Left = parseLength(lookupStyle(styles, "margin-left", "0"), containingBlock.Content.Width)
+	d.Margin.Right = parseLength(lookupStyle(styles, "margin-right", "0"), containingBlock.Content.Width)
+	d.Padding.Left = parseLength(lookupStyle(styles, "padding-left", "0"), containingBlock.Content.Width)
+	d.Padding.Right = parseLength(lookupStyle(styles, "padding-right", "0"), containingBlock.Content.Width)
+	d.Border.Left = parseLength(lookupStyle(styles, "border-left-width", "0"), 0)
+	d.Border.Right = parseLength(lookupStyle(styles, "border-right-width", "0"), 0)
 
-    // Vertical edges (simplified for inline).
-    d.Margin.Top = parseLength(lookupStyle(styles, "margin-top", "0"), containingBlock.Content.Width)
-    d.Margin.Bottom = parseLength(lookupStyle(styles, "margin-bottom", "0"), containingBlock.Content.Width)
-    d.Padding.Top = parseLength(lookupStyle(styles, "padding-top", "0"), containingBlock.Content.Width)
-    d.Padding.Bottom = parseLength(lookupStyle(styles, "padding-bottom", "0"), containingBlock.Content.Width)
-    d.Border.Top = parseLength(lookupStyle(styles, "border-top-width", "0"), 0)
-    d.Border.Bottom = parseLength(lookupStyle(styles, "border-bottom-width", "0"), 0)
+	// Vertical edges (simplified for inline).
+	d.Margin.Top = parseLength(lookupStyle(styles, "margin-top", "0"), containingBlock.Content.Width)
+	d.Margin.Bottom = parseLength(lookupStyle(styles, "margin-bottom", "0"), containingBlock.Content.Width)
+	d.Padding.Top = parseLength(lookupStyle(styles, "padding-top", "0"), containingBlock.Content.Width)
+	d.Padding.Bottom = parseLength(lookupStyle(styles, "padding-bottom", "0"), containingBlock.Content.Width)
+	d.Border.Top = parseLength(lookupStyle(styles, "border-top-width", "0"), 0)
+	d.Border.Bottom = parseLength(lookupStyle(styles, "border-bottom-width", "0"), 0)
 }
 
 // layoutChildren iterates over children and lays them out based on the current flow context.
 func (b *LayoutBox) layoutChildren() {
 	currentYOffset := 0.0
-    currentXOffset := 0.0
+	currentXOffset := 0.0
 
-    // The containing block for children is the parent's content area.
-    container := b.Dimensions
+	// The containing block for children is the parent's content area.
+	container := b.Dimensions
 
 	for _, child := range b.Children {
 
-        // Determine flow context. BlockBox establishes a new block formatting context.
-        // AnonymousBlockBox and InlineBox handle inline formatting context.
+		// Determine flow context. BlockBox establishes a new block formatting context.
+		// AnonymousBlockBox and InlineBox handle inline formatting context.
 
-        if b.BoxType == BlockBox {
-            // Block Formatting Context
-            if child.BoxType == BlockBox || child.BoxType == AnonymousBlockBox {
-                childContainingBlock := Dimensions{
-                    Content: Rect{
-                        X:      container.Content.X,
-                        Y:      container.Content.Y + currentYOffset,
-                        Width:  container.Content.Width,
-                        Height: 0, // Height is dynamic.
-                    },
-                }
-                child.Layout(childContainingBlock)
+		if b.BoxType == BlockBox {
+			// Block Formatting Context
+			if child.BoxType == BlockBox || child.BoxType == AnonymousBlockBox {
+				childContainingBlock := Dimensions{
+					Content: Rect{
+						X:      container.Content.X,
+						Y:      container.Content.Y + currentYOffset,
+						Width:  container.Content.Width,
+						Height: 0, // Height is dynamic.
+					},
+				}
+				child.Layout(childContainingBlock)
 
-                // Accumulate height (FUTURE IMPROVEMENT: Margin collapsing).
-                currentYOffset += child.Dimensions.Margin.Top + child.Dimensions.Border.Top + child.Dimensions.Padding.Top +
-                    child.Dimensions.Content.Height +
-                    child.Dimensions.Padding.Bottom + child.Dimensions.Border.Bottom + child.Dimensions.Margin.Bottom
-            }
-            // Inline children inside a BlockBox should have been wrapped in AnonymousBlockBox by BuildLayoutTree.
+				// Accumulate height (FUTURE IMPROVEMENT: Margin collapsing).
+				currentYOffset += child.Dimensions.Margin.Top + child.Dimensions.Border.Top + child.Dimensions.Padding.Top +
+					child.Dimensions.Content.Height +
+					child.Dimensions.Padding.Bottom + child.Dimensions.Border.Bottom + child.Dimensions.Margin.Bottom
+			}
+			// Inline children inside a BlockBox should have been wrapped in AnonymousBlockBox by BuildLayoutTree.
 
-        } else if b.BoxType == AnonymousBlockBox || b.BoxType == InlineBox {
-             // Inline Formatting Context (simplified: horizontal flow)
-             // (FUTURE IMPROVEMENT: Implement line breaking).
-             childContainingBlock := Dimensions{
-                Content: Rect{
-                    X:      container.Content.X + currentXOffset,
-                    Y:      container.Content.Y + currentYOffset, // Assumes single line for now.
-                    Width:  container.Content.Width - currentXOffset, // Remaining width
-                    Height: 0,
-                },
-            }
-            child.Layout(childContainingBlock)
+		} else if b.BoxType == AnonymousBlockBox || b.BoxType == InlineBox {
+			// Inline Formatting Context (simplified: horizontal flow)
+			// (FUTURE IMPROVEMENT: Implement line breaking).
+			childContainingBlock := Dimensions{
+				Content: Rect{
+					X:      container.Content.X + currentXOffset,
+					Y:      container.Content.Y + currentYOffset, // Assumes single line for now.
+					Width:  container.Content.Width - currentXOffset, // Remaining width
+					Height: 0,
+				},
+			}
+			child.Layout(childContainingBlock)
 
-            // Accumulate width for the next sibling.
-            currentXOffset += child.Dimensions.Margin.Left + child.Dimensions.Border.Left + child.Dimensions.Padding.Left +
-                child.Dimensions.Content.Width +
-                child.Dimensions.Padding.Right + child.Dimensions.Border.Right + child.Dimensions.Margin.Right
-        }
+			// Accumulate width for the next sibling.
+			currentXOffset += child.Dimensions.Margin.Left + child.Dimensions.Border.Left + child.Dimensions.Padding.Left +
+				child.Dimensions.Content.Width +
+				child.Dimensions.Padding.Right + child.Dimensions.Border.Right + child.Dimensions.Margin.Right
+		}
 	}
 }
 
 // calculateBlockHeight adjusts the height if it was set to 'auto'.
 func (b *LayoutBox) calculateBlockHeight() {
-    // If StyledNode is nil (e.g., AnonymousBlockBox), height is purely based on children.
+	// If StyledNode is nil (e.g., AnonymousBlockBox), height is purely based on children.
 	if b.StyledNode != nil {
-        // If height is explicitly set, use that value.
-        height := lookupStyle(b.StyledNode.ComputedStyles, "height", "auto")
-        if height != "auto" {
-            // We use 0 as the reference dimension for explicit height if it's not a percentage (complex dependency loop otherwise).
-            b.Dimensions.Content.Height = parseLength(height, 0)
-            return
-        }
-    }
+		// If height is explicitly set, use that value.
+		height := lookupStyle(b.StyledNode.ComputedStyles, "height", "auto")
+		if height != "auto" {
+			// We use 0 as the reference dimension for explicit height if it's not a percentage (complex dependency loop otherwise).
+			b.Dimensions.Content.Height = parseLength(height, 0)
+			return
+		}
+	}
 
 	// If height is auto, it's determined by the extent of its children.
 	maxYExtent := 0.0
 	for _, child := range b.Children {
-        // Calculate the bottom edge of the child's margin box.
+		// Calculate the bottom edge of the child's margin box.
 		childExtent := child.Dimensions.Content.Y + child.Dimensions.Content.Height +
 			child.Dimensions.Padding.Bottom + child.Dimensions.Border.Bottom + child.Dimensions.Margin.Bottom
 
-        // We need the extent relative to the parent's content box start.
-        relativeExtent := childExtent - b.Dimensions.Content.Y
+		// We need the extent relative to the parent's content box start.
+		relativeExtent := childExtent - b.Dimensions.Content.Y
 		if relativeExtent > maxYExtent {
 			maxYExtent = relativeExtent
 		}
 	}
 
-    b.Dimensions.Content.Height = maxYExtent
+	b.Dimensions.Content.Height = maxYExtent
 }
 
 // calculateInlineDimensions adjusts width and height for inline elements (shrink-to-fit).
 func (b *LayoutBox) calculateInlineDimensions(containingBlock Dimensions) {
 
-    isInlineBlock := false
-    if b.StyledNode != nil {
-        if display, ok := b.StyledNode.Value("display"); ok && display == "inline-block" {
-            isInlineBlock = true
-        }
+	isInlineBlock := false
+	if b.StyledNode != nil {
+		if display, ok := b.StyledNode.Value("display"); ok && display == "inline-block" {
+			isInlineBlock = true
+		}
 
-        // Handle explicit width/height for inline-block.
-        if isInlineBlock {
-            width := lookupStyle(b.StyledNode.ComputedStyles, "width", "auto")
-            height := lookupStyle(b.StyledNode.ComputedStyles, "height", "auto")
+		// Handle explicit width/height for inline-block.
+		if isInlineBlock {
+			width := lookupStyle(b.StyledNode.ComputedStyles, "width", "auto")
+			height := lookupStyle(b.StyledNode.ComputedStyles, "height", "auto")
 
-            if width != "auto" {
-                b.Dimensions.Content.Width = parseLength(width, containingBlock.Content.Width)
-            }
-            if height != "auto" {
-                b.Dimensions.Content.Height = parseLength(height, 0) // Simplified height calculation
-            }
+			if width != "auto" {
+				b.Dimensions.Content.Width = parseLength(width, containingBlock.Content.Width)
+			}
+			if height != "auto" {
+				b.Dimensions.Content.Height = parseLength(height, 0) // Simplified height calculation
+			}
 
-            if width != "auto" && height != "auto" {
-                return
-            }
-        }
-    }
+			if width != "auto" && height != "auto" {
+				return
+			}
+		}
+	}
 
+	// Calculate width and height based on the extent of children (shrink-to-fit).
+	maxXExtent := 0.0
+	maxYExtent := 0.0
 
-    // Calculate width and height based on the extent of children (shrink-to-fit).
-    maxXExtent := 0.0
-    maxYExtent := 0.0
+	// If it's a text node, we must estimate its size.
+	if b.StyledNode != nil && b.StyledNode.Node.Type == html.TextNode {
+		// Text rendering estimation heuristic: assume average character width and line height.
+		// Rough estimate: 8px per character, 16px line height.
+		text := b.StyledNode.Node.Data
+		maxXExtent = float64(len(strings.TrimSpace(text))) * 8.0
+		maxYExtent = 16.0
+	} else {
+		// If it contains other elements.
+		for _, child := range b.Children {
+			childWidthExtent := child.Dimensions.Content.X + child.Dimensions.Content.Width +
+				child.Dimensions.Padding.Right + child.Dimensions.Border.Right + child.Dimensions.Margin.Right
+			relativeWidthExtent := childWidthExtent - b.Dimensions.Content.X
 
-    // If it's a text node, we must estimate its size.
-    if b.StyledNode != nil && b.StyledNode.Node.Type == html.TextNode {
-        // Text rendering estimation heuristic: assume average character width and line height.
-        // Rough estimate: 8px per character, 16px line height.
-        text := b.StyledNode.Node.Data
-        maxXExtent = float64(len(strings.TrimSpace(text))) * 8.0
-        maxYExtent = 16.0
-    } else {
-        // If it contains other elements.
-        for _, child := range b.Children {
-            childWidthExtent := child.Dimensions.Content.X + child.Dimensions.Content.Width +
-                child.Dimensions.Padding.Right + child.Dimensions.Border.Right + child.Dimensions.Margin.Right
-            relativeWidthExtent := childWidthExtent - b.Dimensions.Content.X
+			childHeightExtent := child.Dimensions.Content.Y + child.Dimensions.Content.Height +
+				child.Dimensions.Padding.Bottom + child.Dimensions.Border.Bottom + child.Dimensions.Margin.Bottom
+			relativeHeightExtent := childHeightExtent - b.Dimensions.Content.Y
 
-            childHeightExtent := child.Dimensions.Content.Y + child.Dimensions.Content.Height +
-                child.Dimensions.Padding.Bottom + child.Dimensions.Border.Bottom + child.Dimensions.Margin.Bottom
-            relativeHeightExtent := childHeightExtent - b.Dimensions.Content.Y
+			if relativeWidthExtent > maxXExtent {
+				maxXExtent = relativeWidthExtent
+			}
+			if relativeHeightExtent > maxYExtent {
+				maxYExtent = relativeHeightExtent
+			}
+		}
+	}
 
-            if relativeWidthExtent > maxXExtent {
-                maxXExtent = relativeWidthExtent
-            }
-            if relativeHeightExtent > maxYExtent {
-                maxYExtent = relativeHeightExtent
-            }
-        }
-    }
-
-    if !isInlineBlock || lookupStyle(b.StyledNode.ComputedStyles, "width", "auto") == "auto" {
-        b.Dimensions.Content.Width = maxXExtent
-    }
-    if !isInlineBlock || lookupStyle(b.StyledNode.ComputedStyles, "height", "auto") == "auto" {
-        b.Dimensions.Content.Height = maxYExtent
-    }
+	if !isInlineBlock || lookupStyle(b.StyledNode.ComputedStyles, "width", "auto") == "auto" {
+		b.Dimensions.Content.Width = maxXExtent
+	}
+	if !isInlineBlock || lookupStyle(b.StyledNode.ComputedStyles, "height", "auto") == "auto" {
+		b.Dimensions.Content.Height = maxYExtent
+	}
 }
-
 
 // --- Helpers for Style Lookup and Parsing ---
 
@@ -741,14 +743,14 @@ func parseLength(value string, referenceDimension float64) float64 {
 		}
 	}
 
-    // Handle em/rem (simplified: assume base font size of 16px).
-    if strings.HasSuffix(value, "em") || strings.HasSuffix(value, "rem") {
-        valStr := strings.TrimSuffix(strings.TrimSuffix(value, "em"), "rem")
-        val, err := parseFloat(valStr)
-        if err == nil {
-            return val * 16.0
-        }
-    }
+	// Handle em/rem (simplified: assume base font size of 16px).
+	if strings.HasSuffix(value, "em") || strings.HasSuffix(value, "rem") {
+		valStr := strings.TrimSuffix(strings.TrimSuffix(value, "em"), "rem")
+		val, err := parseFloat(valStr)
+		if err == nil {
+			return val * 16.0
+		}
+	}
 
 	// Attempt to parse unitless numbers (treat as pixels or specific values).
 	if val, err := parseFloat(value); err == nil {
@@ -795,20 +797,19 @@ func parseFloat(s string) (float64, error) {
 		}
 	}
 
-    if result == 0 && sign == -1 {
-        return 0, nil
-    }
+	if result == 0 && sign == -1 {
+		return 0, nil
+	}
 
 	return result * sign, nil
 }
 
 func max(a, b float64) float64 {
-    if a > b {
-        return a
-    }
-    return b
+	if a > b {
+		return a
+	}
+	return b
 }
-
 
 // --- Public Interface for Geometry Retrieval ---
 
@@ -839,15 +840,14 @@ func (e *Engine) GetElementGeometry(layoutRoot *LayoutBox, selector string) (*hu
 		return nil, fmt.Errorf("element '%s' found in DOM but not rendered in Layout Tree (e.g., display: none)", selector)
 	}
 
-    // 3. Check visibility: hidden.
-    if box.StyledNode != nil && !box.StyledNode.IsVisible() {
-        return nil, fmt.Errorf("element '%s' is hidden (visibility: hidden/collapse)", selector)
-    }
+	// 3. Check visibility: hidden.
+	if box.StyledNode != nil && !box.StyledNode.IsVisible() {
+		return nil, fmt.Errorf("element '%s' is hidden (visibility: hidden/collapse)", selector)
+	}
 
 	// 4. Convert LayoutBox Dimensions to humanoid.ElementGeometry.
 	return box.ToElementGeometry(), nil
 }
-
 
 // ToElementGeometry converts the LayoutBox dimensions (the padding box) into the standard geometry format.
 func (b *LayoutBox) ToElementGeometry() *humanoid.ElementGeometry {
@@ -879,14 +879,14 @@ func findDOMRoot(box *LayoutBox) *html.Node {
 		return nil
 	}
 
-    // Typically the root layout box corresponds to the root element (<html> or <body>).
+	// Typically the root layout box corresponds to the root element (<html> or <body>).
 	if box.StyledNode != nil && box.StyledNode.Node != nil {
-        rootNode := box.StyledNode.Node
-        // Traverse up to ensure we get the absolute document root.
-        for rootNode.Parent != nil {
-            rootNode = rootNode.Parent
-        }
-        return rootNode
+		rootNode := box.StyledNode.Node
+		// Traverse up to ensure we get the absolute document root.
+		for rootNode.Parent != nil {
+			rootNode = rootNode.Parent
+		}
+		return rootNode
 	}
 
 	// Fallback for unusual structures.

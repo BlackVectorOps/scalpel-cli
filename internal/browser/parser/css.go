@@ -17,7 +17,7 @@ type Value string
 type Declaration struct {
 	Property Property
 	Value    Value
-    // Future: Add !important flag
+	// Future: Add !important flag
 }
 
 // RuleSet represents a set of declarations applied by a selector.
@@ -41,10 +41,10 @@ const (
 // Selector represents a CSS selector (e.g., "div.container").
 // This implementation focuses on simple selectors (no combinators or pseudo-elements).
 type Selector struct {
-	Type      SelectorType
-	TagName   string
-	ID        string
-	Classes   []string
+	Type    SelectorType
+	TagName string
+	ID      string
+	Classes []string
 }
 
 // CalculateSpecificity calculates the specificity of the selector (IDs, Classes, Elements).
@@ -66,9 +66,8 @@ func (s Selector) CalculateSpecificity() (int, int, int) {
 
 // IsValid checks if the selector has at least one component.
 func (s Selector) IsValid() bool {
-    return s.TagName != "" || s.ID != "" || len(s.Classes) > 0
+	return s.TagName != "" || s.ID != "" || len(s.Classes) > 0
 }
-
 
 // Parser holds the state of the CSS parser.
 type Parser struct {
@@ -98,9 +97,9 @@ func (p *Parser) Parse() StyleSheet {
 		if err != nil || len(selectors) == 0 {
 			// If selector parsing fails or yields nothing, recover by skipping the associated block.
 			p.skipTo('{')
-            if !p.eof() && p.currentChar() == '{' {
-			    p.skipBlock('{', '}')
-            }
+			if !p.eof() && p.currentChar() == '{' {
+				p.skipBlock('{', '}')
+			}
 			continue
 		}
 
@@ -123,32 +122,32 @@ func (p *Parser) parseSelectors() ([]Selector, error) {
 
 	for {
 		p.consumeWhitespace()
-        if p.eof() || p.currentChar() == '{' {
-            break
-        }
+		if p.eof() || p.currentChar() == '{' {
+			break
+		}
 
 		selector, err := p.parseSimpleSelector()
 		if err != nil {
 			// Attempt recovery: skip this specific selector until the next comma or opening brace.
-            p.skipTo(',', '{')
+			p.skipTo(',', '{')
 		} else if selector.IsValid() {
-		    selectors = append(selectors, selector)
-        }
+			selectors = append(selectors, selector)
+		}
 
-        p.consumeWhitespace()
-        if p.eof() || p.currentChar() == '{' {
-            break
-        }
+		p.consumeWhitespace()
+		if p.eof() || p.currentChar() == '{' {
+			break
+		}
 
 		if p.currentChar() == ',' {
 			p.consumeChar()
 			continue
 		}
 
-        // Handle unsupported features (like combinators ' ', '>', '+').
-        // If we encounter them, we stop parsing selectors for this rule block.
-        // This allows basic parsing of complex stylesheets by ignoring rules we don't understand.
-        break
+		// Handle unsupported features (like combinators ' ', '>', '+').
+		// If we encounter them, we stop parsing selectors for this rule block.
+		// This allows basic parsing of complex stylesheets by ignoring rules we don't understand.
+		break
 	}
 
 	return selectors, nil
@@ -160,16 +159,16 @@ func (p *Parser) parseSimpleSelector() (Selector, error) {
 	// Do not consume whitespace here, it might be a combinator handled by parseSelectors.
 
 	// Parse Tag Name or Universal selector
-    if !p.eof() {
-	    ch := p.currentChar()
-        if ch != '#' && ch != '.' {
-		    if ch == '*' {
-			    p.consumeChar()
-			    selector.TagName = "*"
-		    } else if isValidIdentifierStart(ch) {
-			    selector.TagName = strings.ToLower(p.parseIdentifier())
-		    }
-        }
+	if !p.eof() {
+		ch := p.currentChar()
+		if ch != '#' && ch != '.' {
+			if ch == '*' {
+				p.consumeChar()
+				selector.TagName = "*"
+			} else if isValidIdentifierStart(ch) {
+				selector.TagName = strings.ToLower(p.parseIdentifier())
+			}
+		}
 	}
 
 	// Parse IDs and Classes
@@ -194,7 +193,7 @@ done:
 
 // parseDeclarations parses the content within { ... }.
 func (p *Parser) parseDeclarations() ([]Declaration, error) {
-    p.consumeWhitespace()
+	p.consumeWhitespace()
 	if p.eof() || p.currentChar() != '{' {
 		return nil, fmt.Errorf("expected '{' at start of declarations")
 	}
@@ -213,19 +212,19 @@ func (p *Parser) parseDeclarations() ([]Declaration, error) {
 			continue
 		}
 
-        // Parse Property
-        if !isValidIdentifierStart(p.currentChar()) {
-            // Invalid property start, skip to next delimiter
-            p.skipTo(';', '}')
-            if !p.eof() && p.currentChar() == ';' {
-                p.consumeChar()
-            }
-            continue
-        }
+		// Parse Property
+		if !isValidIdentifierStart(p.currentChar()) {
+			// Invalid property start, skip to next delimiter
+			p.skipTo(';', '}')
+			if !p.eof() && p.currentChar() == ';' {
+				p.consumeChar()
+			}
+			continue
+		}
 		property := strings.ToLower(p.parseIdentifier())
 		p.consumeWhitespace()
 
-        // Parse Colon
+		// Parse Colon
 		if p.eof() || p.currentChar() != ':' {
 			// Handle recovery
 			p.skipTo(';', '}')
@@ -237,7 +236,7 @@ func (p *Parser) parseDeclarations() ([]Declaration, error) {
 		p.consumeChar() // Consume ':'
 		p.consumeWhitespace()
 
-        // Parse Value
+		// Parse Value
 		value := p.parseValue()
 		p.consumeWhitespace()
 
@@ -245,17 +244,17 @@ func (p *Parser) parseDeclarations() ([]Declaration, error) {
 		if p.startsWith("!important") {
 			p.consumeN(10)
 			p.consumeWhitespace()
-            // Future: Set importance flag on declaration
+			// Future: Set importance flag on declaration
 		}
 
 		if property != "" && value != "" {
 			declarations = append(declarations, Declaration{Property: Property(property), Value: Value(value)})
 		}
 
-        // Parse Delimiter
-        if p.eof() {
-             break
-        }
+		// Parse Delimiter
+		if p.eof() {
+			break
+		}
 		if p.currentChar() == ';' {
 			p.consumeChar()
 		} else if p.currentChar() == '}' {
@@ -293,7 +292,7 @@ func (p *Parser) parseValue() string {
 			break
 		}
 		// Basic handling for quotes.
-		if ch == '"' || ch == ''' {
+		if ch == '"' || ch == '\'' {
 			p.consumeChar()
 			p.skipTo(ch)
 			if !p.eof() {
@@ -301,24 +300,27 @@ func (p *Parser) parseValue() string {
 			}
 			continue
 		}
-        // Handle function calls like url().
-        if ch == '(' {
-            p.consumeChar()
-            p.skipTo(')')
-            if !p.eof() {
-                p.consumeChar()
-            }
-            continue
-        }
+		// Handle function calls like url().
+		if ch == '(' {
+			p.consumeChar()
+			p.skipTo(')')
+			if !p.eof() {
+				p.consumeChar()
+			}
+			continue
+		}
 
 		// Handle !important detection
-        if p.startsWith("!important") {
-            // Check if the remaining string starts with !important followed by a delimiter or whitespace
-            remaining := p.input[p.pos+10:]
-            if len(remaining) == 0 || strings.HasPrefix(remaining, ";") || strings.HasPrefix(remaining, "}") || (len(remaining) > 0 && isWhitespace(remaining[0])) {
-			    break
-            }
-        }
+		if p.startsWith("!important") {
+			// Check if the remaining string starts with !important followed by a delimiter or whitespace
+			if p.pos+10 >= len(p.input) {
+				break
+			}
+			remaining := p.input[p.pos+10:]
+			if len(remaining) == 0 || strings.HasPrefix(remaining, ";") || strings.HasPrefix(remaining, "}") || (len(remaining) > 0 && isWhitespace(remaining[0])) {
+				break
+			}
+		}
 
 		p.pos++
 	}
@@ -394,37 +396,37 @@ func (p *Parser) skipTo(targets ...byte) {
 
 // skipBlock skips content between matching delimiters (e.g., { ... }).
 func (p *Parser) skipBlock(open, close byte) {
-    if p.eof() { return }
+	if p.eof() {
+		return
+	}
 
-    // Assumes we are currently at the opening delimiter.
-    if p.currentChar() != open {
-        return
-    }
-    p.consumeChar()
+	// Assumes we are currently at the opening delimiter.
+	if p.currentChar() != open {
+		return
+	}
+	p.consumeChar()
 
-    depth := 1
-    for !p.eof() {
-        c := p.consumeChar()
-        if c == open {
-            depth++
-        } else if c == close {
-            depth--
-            if depth == 0 {
-                return
-            }
-        }
-    }
+	depth := 1
+	for !p.eof() {
+		c := p.consumeChar()
+		if c == open {
+			depth++
+		} else if c == close {
+			depth--
+			if depth == 0 {
+				return
+			}
+		}
+	}
 }
 
 func isWhitespace(ch byte) bool {
-	return ch == ' ' || ch == '	' || ch == '
-' || ch == '
-'
+	return ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r'
 }
 
 func isValidIdentifierStart(ch byte) bool {
-    // CSS identifiers can start with a letter, underscore, or hyphen.
-    return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || ch == '_' || ch == '-'
+	// CSS identifiers can start with a letter, underscore, or hyphen.
+	return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || ch == '_' || ch == '-'
 }
 
 func isValidIdentifierChar(ch byte) bool {

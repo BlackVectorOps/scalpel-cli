@@ -6,10 +6,26 @@ import (
 	"crypto/tls"
 	"net"
 	"net/http"
-    "net/http/cookiejar"
+	"net/http/cookiejar"
 	"net/url"
 	"time"
 )
+
+// Logger defines a simple interface for logging.
+type Logger interface {
+	Warn(msg string, args ...interface{})
+	Info(msg string, args ...interface{})
+	Debug(msg string, args ...interface{})
+	Error(msg string, args ...interface{})
+}
+
+// NopLogger is a default logger that does nothing.
+type NopLogger struct{}
+
+func (n *NopLogger) Warn(msg string, args ...interface{})  {}
+func (n *NopLogger) Info(msg string, args ...interface{})   {}
+func (n *NopLogger) Debug(msg string, args ...interface{}) {}
+func (n *NopLogger) Error(msg string, args ...interface{}) {}
 
 // Constants optimized for browser behavior.
 const (
@@ -35,7 +51,7 @@ type ClientConfig struct {
 	TLSConfig          *tls.Config
 
 	// Timeouts
-	RequestTimeout        time.Duration
+	RequestTimeout time.Duration
 
 	// Dialer configuration (TCP Layer)
 	DialerConfig *DialerConfig
@@ -49,7 +65,7 @@ type ClientConfig struct {
 	// Proxy
 	ProxyURL *url.URL
 
-    // State Management
+	// State Management
 	CookieJar http.CookieJar
 
 	// Logger
@@ -62,8 +78,8 @@ func NewBrowserClientConfig() *ClientConfig {
 	dialerCfg.Timeout = DefaultDialTimeout
 	dialerCfg.KeepAlive = DefaultKeepAliveInterval
 
-    // Initialize a default in-memory cookie jar.
-    // For a production browser, this should be replaced with a persistent implementation.
+	// Initialize a default in-memory cookie jar.
+	// For a production browser, this should be replaced with a persistent implementation.
 	jar, _ := cookiejar.New(nil) // cookiejar.New only errors if options are invalid (we pass nil).
 
 	return &ClientConfig{
@@ -74,7 +90,7 @@ func NewBrowserClientConfig() *ClientConfig {
 		MaxIdleConnsPerHost:   DefaultMaxIdleConnsPerHost,
 		MaxConnsPerHost:       DefaultMaxConnsPerHost,
 		IdleConnTimeout:       DefaultIdleConnTimeout,
-        CookieJar:             jar,
+		CookieJar:             jar,
 		Logger:                &NopLogger{},
 	}
 }
@@ -84,7 +100,7 @@ func NewHTTPTransport(config *ClientConfig) *http.Transport {
 	if config == nil {
 		config = NewBrowserClientConfig()
 	}
-    // Ensure defaults are set if components are missing
+	// Ensure defaults are set if components are missing
 	if config.Logger == nil {
 		config.Logger = &NopLogger{}
 	}
@@ -94,13 +110,13 @@ func NewHTTPTransport(config *ClientConfig) *http.Transport {
 
 	tlsConfig := configureTLS(config)
 
-    // Prepare the dialer config for the transport's DialContext.
+	// Prepare the dialer config for the transport's DialContext.
 	// We must set TLSConfig to nil here, as http.Transport manages the TLS handshake separately using TLSClientConfig.
 	transportDialerConfig := *config.DialerConfig
 	transportDialerConfig.TLSConfig = nil
 
 	transport := &http.Transport{
-        // Use our custom low-level TCP dialer.
+		// Use our custom low-level TCP dialer.
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			return DialTCPContext(ctx, network, addr, &transportDialerConfig)
 		},
@@ -112,9 +128,9 @@ func NewHTTPTransport(config *ClientConfig) *http.Transport {
 		IdleConnTimeout:       config.IdleConnTimeout,
 		ResponseHeaderTimeout: DefaultResponseHeaderTimeout,
 		// CRITICAL: We must disable the transport's built-in Gzip handling
-        // because our CompressionMiddleware handles Gzip, Deflate, and Brotli.
-		DisableCompression:    true,
-		ForceAttemptHTTP2:     true, // Always prefer H2
+		// because our CompressionMiddleware handles Gzip, Deflate, and Brotli.
+		DisableCompression: true,
+		ForceAttemptHTTP2:  true, // Always prefer H2
 	}
 
 	if config.ProxyURL != nil {
@@ -137,8 +153,8 @@ func NewClient(config *ClientConfig) *http.Client {
 	client := &http.Client{
 		Transport: wrappedTransport,
 		Timeout:   config.RequestTimeout,
-        Jar:       config.CookieJar,
-        // For an automation browser, it's crucial to handle redirects manually
+		Jar:       config.CookieJar,
+		// For an automation browser, it's crucial to handle redirects manually
 		// to track navigation events, history, and state precisely.
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse
@@ -156,8 +172,8 @@ func configureTLS(config *ClientConfig) *tls.Config {
 	if config.TLSConfig != nil {
 		tlsConfig = config.TLSConfig.Clone()
 	} else if config.DialerConfig != nil && config.DialerConfig.TLSConfig != nil {
-        tlsConfig = config.DialerConfig.TLSConfig.Clone()
-    } else {
+		tlsConfig = config.DialerConfig.TLSConfig.Clone()
+	} else {
 		tlsConfig = NewDialerConfig().TLSConfig.Clone()
 	}
 
