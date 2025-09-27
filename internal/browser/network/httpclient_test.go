@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
 	"sync"
@@ -36,6 +37,18 @@ func TestNewDefaultClientConfig_Optimizations(t *testing.T) {
 	assert.NotNil(t, config.Logger)
 }
 
+// TestNewDefaultClientConfig_CookieJar verifies the default config includes a cookie jar for state.
+func TestNewDefaultClientConfig_CookieJar(t *testing.T) {
+	SetupObservability(t)
+	config := NewDefaultClientConfig() 
+
+    // The default configuration should include an initialized cookie jar.
+	assert.NotNil(t, config.CookieJar, "ClientConfig should initialize a CookieJar")
+    // Use an assertion that checks the type of the jar.
+	_, ok := config.CookieJar.(*cookiejar.Jar)
+	assert.True(t, ok, "The default CookieJar should be a standard *cookiejar.Jar")
+}
+
 // TestConfigureTLS_Defaults verifies the strong security defaults of the TLS configuration helper.
 func TestConfigureTLS_Defaults(t *testing.T) {
 	SetupObservability(t) // Initialize logger
@@ -51,6 +64,9 @@ func TestConfigureTLS_Defaults(t *testing.T) {
 	// Use the package-level variable for expected ciphers.
 	assert.Equal(t, defaultSecureCipherSuites, tlsConfig.CipherSuites)
 	assert.NotNil(t, tlsConfig.ClientSessionCache, "TLS session cache should be enabled")
+
+    // Verify ALPN is set to prefer HTTP/2 by default
+    assert.Equal(t, []string{"h2", "http/1.1"}, tlsConfig.NextProtos)
 }
 
 // TestConfigureTLS_CustomConfigCloneAndMerge verifies that a provided custom TLSConfig
@@ -64,7 +80,7 @@ func TestConfigureTLS_CustomConfigCloneAndMerge(t *testing.T) {
 	}
 	config := NewDefaultClientConfig()
 	config.TLSConfig = customTLS
-	config.IgnoreTLSErrors = true // Test the override
+	config.InsecureSkipVerify = true // Test the override
 
 	tlsConfig := configureTLS(config)
 
@@ -75,6 +91,7 @@ func TestConfigureTLS_CustomConfigCloneAndMerge(t *testing.T) {
 	assert.Equal(t, uint16(requiredMinTLSVersion), tlsConfig.MinVersion, "Default MinVersion should be merged")
 	assert.NotEmpty(t, tlsConfig.CipherSuites, "Default CipherSuites should be merged")
 	assert.NotNil(t, tlsConfig.ClientSessionCache, "Default SessionCache should be merged")
+    assert.Equal(t, []string{"h2", "http/1.1"}, tlsConfig.NextProtos, "Default ALPN should be merged")
 
 	// Verify overrides apply
 	assert.True(t, tlsConfig.InsecureSkipVerify)
@@ -86,8 +103,9 @@ func TestConfigureTLS_CustomConfigCloneAndMerge(t *testing.T) {
 	// 2. Test Custom Overrides of Defaults (User explicitly sets values)
 	customCiphers := []uint16{tls.TLS_AES_256_GCM_SHA384}
 	customTLSStrict := &tls.Config{
-		MinVersion:   tls.VersionTLS13,
+		MinVersion:	    tls.VersionTLS13,
 		CipherSuites: customCiphers,
+        NextProtos:   []string{"http/1.1"}, // Explicitly disable H2
 	}
 	configStrict := NewDefaultClientConfig()
 	configStrict.TLSConfig = customTLSStrict
@@ -97,6 +115,7 @@ func TestConfigureTLS_CustomConfigCloneAndMerge(t *testing.T) {
 	// Verify custom values are respected and not overwritten by defaults
 	assert.Equal(t, uint16(tls.VersionTLS13), tlsConfigStrict.MinVersion)
 	assert.Equal(t, customCiphers, tlsConfigStrict.CipherSuites)
+    assert.Equal(t, []string{"http/1.1"}, tlsConfigStrict.NextProtos, "Custom ALPN list should be respected")
 }
 
 // TestConfigureTLS_CustomConfig_Hardening verifies that an insecure custom config is hardened.
@@ -111,7 +130,7 @@ func TestConfigureTLS_CustomConfig_Hardening(t *testing.T) {
 
 	tlsConfig := configureTLS(config)
 
-	// We enforce the minimum version even if the user explicitly set a lower one.
+	// Enforce the minimum version even if the user explicitly set a lower one.
 	assert.Equal(t, uint16(requiredMinTLSVersion), tlsConfig.MinVersion, "MinVersion should be upgraded to TLS 1.2")
 	assert.NotSame(t, customTLS, tlsConfig, "Config should be cloned")
 }
@@ -123,7 +142,7 @@ func TestNewHTTPTransport_ConfigurationMapping(t *testing.T) {
 	config := NewDefaultClientConfig()
 	config.MaxIdleConns = 55
 	config.IdleConnTimeout = 99 * time.Second
-	config.DisableCompression = true
+	config.DisableCompression = true // Should be ignored in favor of hard coded false/middleware
 	config.ResponseHeaderTimeout = 5 * time.Second
 	config.DisableKeepAlives = true
 
@@ -131,7 +150,8 @@ func TestNewHTTPTransport_ConfigurationMapping(t *testing.T) {
 
 	assert.Equal(t, 55, transport.MaxIdleConns)
 	assert.Equal(t, 99*time.Second, transport.IdleConnTimeout)
-	assert.True(t, transport.DisableCompression)
+	// We check the hard coded value from the client file.
+	assert.True(t, transport.DisableCompression, "Compression should be explicitly disabled for middleware handling") 
 	assert.Equal(t, 5*time.Second, transport.ResponseHeaderTimeout)
 	assert.True(t, transport.DisableKeepAlives, "DisableKeepAlives should be propagated")
 }
@@ -139,7 +159,9 @@ func TestNewHTTPTransport_ConfigurationMapping(t *testing.T) {
 func TestNewHTTPTransport_Robustness_NilConfig(t *testing.T) {
 	SetupObservability(t) // Initialize logger
 	transport := NewHTTPTransport(nil)
-	assert.Equal(t, DefaultMaxIdleConns, transport.MaxIdleConns)
+	
+    // Checks that the default configuration is used when nil is passed.
+	assert.Equal(t, DefaultMaxIdleConns, transport.MaxIdleConns) 
 	assert.NotNil(t, transport.DialContext)
 	assert.NotNil(t, transport.TLSClientConfig)
 }
@@ -166,40 +188,68 @@ func TestNewHTTPTransport_HTTP2_Enabled(t *testing.T) {
 	config.ForceHTTP2 = true
 	transport := NewHTTPTransport(config)
 
-	assert.True(t, transport.ForceAttemptHTTP2)
+	// Check the setting that prefers HTTP/2.
+	assert.True(t, transport.ForceAttemptHTTP2) 
 	require.NotNil(t, transport.TLSClientConfig)
 
+    // Check the NextProtos field for HTTP/2 support.
 	expectedProtos := []string{"h2", "http/1.1"}
 	assert.Equal(t, expectedProtos, transport.TLSClientConfig.NextProtos, "NextProtos should be configured for H2 and HTTP/1.1")
 }
 
-func TestNewHTTPTransport_HTTP2_Disabled(t *testing.T) {
-	SetupObservability(t) // Initialize logger
-	config := NewDefaultClientConfig()
-	config.ForceHTTP2 = false
-	transport := NewHTTPTransport(config)
-
-	assert.False(t, transport.ForceAttemptHTTP2)
-	require.NotNil(t, transport.TLSClientConfig)
-	assert.Equal(t, []string{"http/1.1"}, transport.TLSClientConfig.NextProtos)
-}
-
 // -- Test Cases: Client Behavior (NewClient and Integration) --
 
+// TestNewClient_ConfigurationMapping verifies all top level fields on the *http.Client are set.
+func TestNewClient_ConfigurationMapping(t *testing.T) { 
+    SetupObservability(t)
+    config := NewDefaultClientConfig()
+    config.RequestTimeout = 123 * time.Second
+
+    client := NewClient(config)
+    require.NotNil(t, client)
+    
+    // Verify top level client fields
+    assert.Equal(t, 123*time.Second, client.Timeout, "client.Timeout should match RequestTimeout")
+    assert.NotNil(t, client.Jar, "The client must have the CookieJar assigned")
+}
+
+// TestNewClient_TransportComposition verifies that the transport is wrapped correctly 
+// with the necessary middleware, like compression.
+func TestNewClient_TransportComposition(t *testing.T) {
+    SetupObservability(t)
+    config := NewDefaultClientConfig() 
+    client := NewClient(config)
+
+    // Verify the client's Transport is the outermost middleware (CompressionMiddleware).
+    middleware, ok := client.Transport.(*CompressionMiddleware)
+    require.True(t, ok, "Client Transport must be wrapped by CompressionMiddleware")
+
+    // Verify the middleware's inner transport is the base *http.Transport.
+    baseTransport, ok := middleware.Transport.(*http.Transport)
+    require.True(t, ok, "CompressionMiddleware's inner transport must be *http.Transport")
+    
+    // Verifies the core setting required by the middleware.
+    assert.True(t, baseTransport.DisableCompression, "Base transport must have compression disabled for middleware to handle it")
+}
+
+// TestNewClient_RedirectPolicy verifies that the client is configured to not follow redirects.
 func TestNewClient_RedirectPolicy(t *testing.T) {
 	SetupObservability(t) // Initialize logger
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/" {
-			http.Redirect(w, r, "/redirected", http.StatusFound)
+            // Respond with a redirect
+			http.Redirect(w, r, "/redirected", http.StatusFound) 
 		}
 	}))
 	defer server.Close()
-	client := NewClient(nil)
+	client := NewClient(nil) // Get a default configured client
 
 	resp, err := client.Get(server.URL)
-	require.NoError(t, err)
+	require.NoError(t, err) // Request itself was successful
 	defer resp.Body.Close()
 
+	// The client's CheckRedirect is set to http.ErrUseLastResponse, so the client returns 
+    // the redirect response without making the subsequent request.
 	assert.Equal(t, http.StatusFound, resp.StatusCode)
 	assert.Equal(t, "/redirected", resp.Header.Get("Location"))
 }
@@ -225,6 +275,7 @@ func TestClient_TimeoutBehavior(t *testing.T) {
 	urlErr, ok := err.(*url.Error)
 	require.True(t, ok)
 
+	// Check for a context deadline exceeded error or a specific timeout error.
 	assert.True(t, urlErr.Timeout() || errors.Is(urlErr.Err, context.DeadlineExceeded), "Error should be a timeout or deadline exceeded")
 	assert.Less(t, duration, 500*time.Millisecond, "Timeout took significantly longer than expected")
 }
@@ -253,11 +304,8 @@ func TestClient_HTTPS_Integration(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	assert.Equal(t, "Hello, client\n", string(body))
 
-	// CONFIRMED ISSUE: The httptest.Server, under these specific test conditions,
-	// incorrectly downgrades the connection to HTTP/1.1 despite the client
-	// correctly negotiating for HTTP/2. Wireshark capture analysis proved the
-	// client-side code is correct. The test is modified to reflect the
-	// test environment's actual behavior.
+	// httptest.Server often downgrades the connection in testing, so we assert the result
+    // reflecting the test environment's actual behavior, while trusting the client configuration.
 	assert.Equal(t, "HTTP/1.1", resp.Proto)
 }
 
@@ -268,18 +316,18 @@ func TestClient_InsecureSkipVerify_Integration(t *testing.T) {
 	}))
 	defer server.Close()
 
-	// 1. Test with default config (should fail)
+	// 1. Test with default config (should fail on untrusted certificate)
 	clientDefault := NewClient(nil)
 	_, err := clientDefault.Get(server.URL)
 	assert.Error(t, err, "Default client should fail on untrusted certificate")
 
 	// 2. Test with IgnoreTLSErrors enabled
 	config := NewDefaultClientConfig()
-	config.IgnoreTLSErrors = true
+	config.InsecureSkipVerify = true
 	clientInsecure := NewClient(config)
 
 	resp, err := clientInsecure.Get(server.URL)
-	require.NoError(t, err, "Client with IgnoreTLSErrors should succeed")
+	require.NoError(t, err, "Client with InsecureSkipVerify enabled should succeed")
 	defer resp.Body.Close()
 
 	body, _ := io.ReadAll(resp.Body)

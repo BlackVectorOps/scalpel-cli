@@ -1,4 +1,4 @@
-// internal/network/dialer.go
+// browser/network/dialer.go
 package network
 
 import (
@@ -9,48 +9,50 @@ import (
 	"time"
 )
 
-// DialerConfig holds configuration for the robust, low-level dialer.
+// DialerConfig holds configuration for the low-level dialer.
 type DialerConfig struct {
 	Timeout      time.Duration
 	KeepAlive    time.Duration
 	TLSConfig    *tls.Config
-	ForceNoDelay bool // Crucial for latency-sensitive operations like TimeSlip H1 analysis (TCP_NODELAY).
+	// NoDelay controls TCP_NODELAY. Crucial for browser responsiveness.
+	NoDelay bool
 }
 
-// NewDialerConfig creates a default, secure configuration for low-level dialing.
+// NewDialerConfig creates a default, secure configuration optimized for a browser.
 func NewDialerConfig() *DialerConfig {
 	// Enforcing strong security defaults (PFS mandatory, modern curves, TLS 1.2+).
-	return &DialerConfig{
-		Timeout:   10 * time.Second,
-		KeepAlive: 30 * time.Second,
-		TLSConfig: &tls.Config{
-			MinVersion: tls.VersionTLS12,
-			CurvePreferences: []tls.CurveID{
-				tls.X25519, // Prefer modern curves
-				tls.CurveP256,
-			},
-			// Standardized list matching httpclient.go defaults for consistency.
-			CipherSuites: []uint16{
-				// TLS 1.3 suites
-				tls.TLS_AES_256_GCM_SHA384,
-				tls.TLS_CHACHA20_POLY1305_SHA256,
-				tls.TLS_AES_128_GCM_SHA256,
-				// TLS 1.2 suites with PFS (ECDHE)
-				tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
-				tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
-				tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305,
-				tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305,
-				// Added AES 128 GCM variants for broader compatibility and performance.
-				tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
-				tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
-			},
+	tlsConfig := &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		CurvePreferences: []tls.CurveID{
+			tls.X25519, // Prefer modern curves
+			tls.CurveP256,
 		},
-		ForceNoDelay: false,
+		CipherSuites: []uint16{
+			// TLS 1.3 suites
+			tls.TLS_AES_128_GCM_SHA256, // Often prioritized for speed/security balance
+			tls.TLS_CHACHA20_POLY1305_SHA256,
+			tls.TLS_AES_256_GCM_SHA384,
+			// TLS 1.2 suites with PFS (ECDHE)
+			tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+			tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+			tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305,
+			tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305,
+			tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+			tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+		},
+        // Enable TLS session resumption for performance.
+        ClientSessionCache: tls.NewLRUClientSessionCache(512),
+	}
+
+	return &DialerConfig{
+		Timeout:   15 * time.Second, // Standard browser connection timeout
+		KeepAlive: 30 * time.Second,
+		TLSConfig: tlsConfig,
+		NoDelay: true, // Default to true for browser responsiveness
 	}
 }
 
-// DialTCPContext establishes a raw TCP connection and applies standardized configurations.
-// It does NOT handle TLS upgrades. This is suitable for use in http.Transport.DialContext.
+// DialTCPContext establishes a raw TCP connection. Suitable for http.Transport.DialContext.
 func DialTCPContext(ctx context.Context, network, address string, config *DialerConfig) (net.Conn, error) {
 	if config == nil {
 		config = NewDialerConfig()
@@ -59,21 +61,19 @@ func DialTCPContext(ctx context.Context, network, address string, config *Dialer
 	dialer := &net.Dialer{
 		Timeout:   config.Timeout,
 		KeepAlive: config.KeepAlive,
-		// Enable Happy Eyeballs (RFC 8305).
+		// Enable Happy Eyeballs (RFC 8305) for faster IPv4/IPv6 fallback.
 		FallbackDelay: 300 * time.Millisecond,
 	}
 
 	// Step 1: Establish the raw TCP connection.
 	rawConn, err := dialer.DialContext(ctx, network, address)
 	if err != nil {
-		// We wrap here for clarity, although http.Transport often adds its own context.
 		return nil, fmt.Errorf("tcp dial failed: %w", err)
 	}
 
 	// Step 2: Configure TCP options.
 	if tcpConn, ok := rawConn.(*net.TCPConn); ok {
 		if err := configureTCP(tcpConn, config); err != nil {
-			// Ensure no connection leak if configuration fails.
 			_ = tcpConn.Close()
 			return nil, err
 		}
@@ -81,17 +81,13 @@ func DialTCPContext(ctx context.Context, network, address string, config *Dialer
 	return rawConn, nil
 }
 
-// DialContext is the project standard function for creating secure and resilient connections manually.
-// It now uses DialTCPContext internally.
+// DialContext creates connections manually (e.g., for WebSockets), including TLS upgrade.
 func DialContext(ctx context.Context, network, address string, config *DialerConfig) (net.Conn, error) {
-	// Establish and configure the raw TCP connection.
 	rawConn, err := DialTCPContext(ctx, network, address, config)
 	if err != nil {
-		// Error is already wrapped by DialTCPContext.
 		return nil, err
 	}
 
-	// Defense in depth: ensure config is not nil for the TLS check.
 	if config == nil {
 		config = NewDialerConfig()
 	}
@@ -106,7 +102,6 @@ func DialContext(ctx context.Context, network, address string, config *DialerCon
 
 // configureTCP applies TCP specific settings.
 func configureTCP(conn *net.TCPConn, config *DialerConfig) error {
-	// Enabling Keep-Alive helps detect dead peers.
 	if err := conn.SetKeepAlive(true); err != nil {
 		return fmt.Errorf("failed to enable TCP keep-alive: %w", err)
 	}
@@ -116,37 +111,31 @@ func configureTCP(conn *net.TCPConn, config *DialerConfig) error {
 		}
 	}
 
-	// Disabling Nagle's algorithm (SetNoDelay) when requested.
-	if config.ForceNoDelay {
-		if err := conn.SetNoDelay(true); err != nil {
-			return fmt.Errorf("failed to set TCP NoDelay: %w", err)
-		}
-	}
+    if err := conn.SetNoDelay(config.NoDelay); err != nil {
+        return fmt.Errorf("failed to set TCP NoDelay: %w", err)
+    }
 	return nil
 }
 
 // wrapTLS handles the TLS client handshake.
 func wrapTLS(ctx context.Context, conn net.Conn, address string, config *DialerConfig) (net.Conn, error) {
-	// Clone the config to avoid mutating the shared configuration.
 	tlsConfig := config.TLSConfig.Clone()
 
 	// Ensure ServerName is set for SNI (Server Name Indication).
 	if tlsConfig.ServerName == "" {
 		host, _, err := net.SplitHostPort(address)
 		if err != nil {
-			host = address // Fallback if no port is specified.
+			host = address
 		}
 		tlsConfig.ServerName = host
 	}
 
 	tlsConn := tls.Client(conn, tlsConfig)
-
-	// Use a specific context for the handshake, respecting the dialer timeout.
 	handshakeCtx, cancel := context.WithTimeout(ctx, config.Timeout)
 	defer cancel()
 
 	if err := tlsConn.HandshakeContext(handshakeCtx); err != nil {
-		_ = conn.Close() // Close the underlying connection on handshake failure.
+		_ = conn.Close()
 		return nil, fmt.Errorf("tls handshake failed: %w", err)
 	}
 	return tlsConn, nil

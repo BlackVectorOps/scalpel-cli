@@ -1,3 +1,4 @@
+// internal/browser/manager.go
 package browser
 
 import (
@@ -5,126 +6,58 @@ import (
 	"fmt"
 	"sync"
 	"time"
+    "net/url"
+    "io"
 
-	"github.com/playwright-community/playwright-go"
+	// Removed "github.com/playwright-community/playwright-go"
 	"go.uber.org/zap"
+    "github.com/antchfx/htmlquery" // Added for NavigateAndExtract helper
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
+    // Adjusted imports
+    "github.com/xkilldash9x/scalpel-cli/internal/browser/session"
+    "github.com/xkilldash9x/scalpel-cli/internal/browser/jsexec"
+    "github.com/xkilldash9x/scalpel-cli/internal/browser/dom"
 )
 
-// Manager handles the browser process lifecycle and session creation using Playwright.
+// Manager handles the browser session lifecycle using the Pure Go implementation.
 type Manager struct {
-	pw      *playwright.Playwright
-	browser playwright.Browser
 	logger  *zap.Logger
 	cfg     *config.Config
+    jsRuntime *jsexec.Runtime // Shared JS runtime (Goja).
 
-	sessions map[string]*Session
+	sessions map[string]*session.Session // Updated type
 	mu      sync.RWMutex
-	wg      sync.WaitGroup // WaitGroup to ensure all sessions are closed before shutting down the browser.
+	wg      sync.WaitGroup // WaitGroup to ensure all sessions are closed before shutting down.
 
 	// Initialization state management
 	initOnce sync.Once
 	initErr  error
 }
 
-const playwrightInstallTimeout = 5 * time.Minute
 const shutdownGracePeriod = 15 * time.Second
 
-// NewManager creates a new browser manager. Initialization is deferred until the first session is requested.
+// NewManager creates a new browser manager.
 func NewManager(ctx context.Context, cfg *config.Config, logger *zap.Logger) (*Manager, error) {
 	m := &Manager{
-		logger:  logger.Named("browser_manager"),
+		logger:  logger.Named("browser_manager_purego"),
 		cfg:     cfg,
-		sessions: make(map[string]*Session),
+		sessions: make(map[string]*session.Session),
+        // Initialize the shared JavaScript runtime (Goja).
+        jsRuntime: jsexec.NewRuntime(),
 	}
-	m.logger.Info("Browser manager created (initialization deferred).")
+	m.logger.Info("Browser manager created (Pure Go implementation).")
 	return m, nil
 }
 
-// initialize starts the Playwright driver and launches the browser instance.
+// initialize prepares the engine components.
 func (m *Manager) initialize(ctx context.Context) error {
 	m.initOnce.Do(func() {
-		m.logger.Info("Initializing Playwright and launching browser...")
-
-		// 1. Ensure Playwright browsers are installed (Production Readiness).
-		if err := m.ensureInstallation(ctx); err != nil {
-			m.initErr = err
-			return
-		}
-
-		// 2. Start the Playwright driver.
-		// API Compliance: playwright.Run() does not take context.
-		pw, err := playwright.Run()
-		if err != nil {
-			m.initErr = fmt.Errorf("failed to start playwright driver: %w", err)
-			return
-		}
-		m.pw = pw
-
-		// 3. Launch the browser instance (Chromium).
-		launchOptions := m.prepareLaunchOptions()
-		// API Compliance: Launch does not take context.
-		browser, err := pw.Chromium.Launch(launchOptions)
-		if err != nil {
-			pw.Stop() // Clean up the driver if browser launch fails.
-			m.initErr = fmt.Errorf("failed to launch browser instance: %w", err)
-			return
-		}
-		m.browser = browser
-
-		m.logger.Info("Browser manager initialized successfully.", zap.String("browser_version", browser.Version()))
+		m.logger.Info("Browser manager initialized.")
+        // In Pure Go mode, there are no external browser processes or drivers to install/start.
 	})
 	return m.initErr
-}
-
-func (m *Manager) ensureInstallation(ctx context.Context) error {
-	m.logger.Info("Verifying Playwright browser installation...")
-	installCtx, installCancel := context.WithTimeout(ctx, playwrightInstallTimeout)
-	defer installCancel()
-
-	// Run the install command in a goroutine as it blocks.
-	installErrChan := make(chan error, 1)
-	go func() {
-		// We specifically install chromium for consistency.
-		options := &playwright.RunOptions{
-			Browsers: []string{"chromium"},
-		}
-		// Install Playwright dependencies.
-		if err := playwright.Install(options); err != nil {
-			installErrChan <- fmt.Errorf("failed to install playwright browsers: %w", err)
-		} else {
-			installErrChan <- nil
-		}
-	}()
-
-	select {
-	case err := <-installErrChan:
-		return err
-	case <-installCtx.Done():
-		return fmt.Errorf("timeout waiting for Playwright installation: %w", installCtx.Err())
-	}
-}
-
-func (m *Manager) prepareLaunchOptions() playwright.BrowserTypeLaunchOptions {
-	launchOptions := playwright.BrowserTypeLaunchOptions{
-		Headless: playwright.Bool(m.cfg.Browser.Headless),
-		Args:     m.cfg.Browser.Args,
-		Timeout:  playwright.Float(60000), // 60 seconds launch timeout.
-	}
-
-	// Add default arguments often necessary for stability, especially in containers.
-	defaultArgs := []string{
-		"--disable-gpu",
-		"--no-sandbox",
-		"--disable-dev-shm-usage",
-		"--enable-automation", // Explicitly enabling automation features.
-	}
-
-	// Merge default args with user provided args (simple merge, duplicates are okay for browser args).
-	launchOptions.Args = append(defaultArgs, launchOptions.Args...)
-	return launchOptions
 }
 
 // NewAnalysisContext creates a new isolated browser context (session) for analysis.
@@ -132,6 +65,7 @@ func (m *Manager) NewAnalysisContext(
 	sessionCtx context.Context,
 	cfg interface{},
 	persona schemas.Persona,
+    // Taint parameters are generally ignored in Pure Go mode due to lack of JS instrumentation capabilities.
 	taintTemplate string,
 	taintConfig string,
 	findingsChan chan<- schemas.Finding,
@@ -147,8 +81,12 @@ func (m *Manager) NewAnalysisContext(
 		return nil, fmt.Errorf("invalid config type passed to NewAnalysisContext")
 	}
 
-	// Create the session object.
-	session, err := NewSession(sessionCtx, config, persona, m.logger, findingsChan)
+    if taintTemplate != "" || taintConfig != "" {
+        m.logger.Warn("Taint analysis (IAST) parameters provided but are not supported in Pure Go browser mode.")
+    }
+
+	// Create the session object using the internal session package.
+	sess, err := session.NewSession(sessionCtx, config, persona, m.logger, m.jsRuntime, findingsChan)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create new session structure: %w", err)
 	}
@@ -156,35 +94,40 @@ func (m *Manager) NewAnalysisContext(
 	m.wg.Add(1) // Increment WG before registering the session.
 
 	// Define the onClose callback for cleanup and WG management.
-	session.onClose = func() {
+    sessionID := sess.ID()
+	onCloseCallback := func() {
 		m.mu.Lock()
 		defer m.mu.Unlock()
-		delete(m.sessions, session.ID())
+		delete(m.sessions, sessionID)
 		m.wg.Done()
-		m.logger.Debug("Session removed from manager.", zap.String("session_id", session.ID()))
+		m.logger.Debug("Session removed from manager.", zap.String("session_id", sessionID))
 	}
 
-	// Initialize the session (creates BrowserContext, Page, applies stealth, starts harvesting).
-	if err := session.Initialize(sessionCtx, m.browser, taintTemplate, taintConfig); err != nil {
-		// If initialization fails, close the session immediately to release resources and decrement WG.
-		// Use a background context for cleanup as sessionCtx might be the cause of failure.
+    // Set the callback on the session.
+    sess.SetOnClose(onCloseCallback)
+
+	// Initialize the session (performs final checks).
+    // The parameters (nil, "", "") are placeholders as required by the interface (previously used for Playwright Browser instance and taint scripts)
+    // but ignored by the Pure Go implementation.
+	if err := sess.Initialize(sessionCtx, nil, "", ""); err != nil {
+		// If initialization fails, close the session immediately.
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		session.Close(cleanupCtx)
+		sess.Close(cleanupCtx)
 		return nil, fmt.Errorf("failed to initialize session: %w", err)
 	}
 
 	m.mu.Lock()
-	m.sessions[session.ID()] = session
+	m.sessions[sessionID] = sess
 	m.mu.Unlock()
 
-	m.logger.Info("New session created.", zap.String("session_id", session.ID()))
-	return session, nil
+	m.logger.Info("New session created.", zap.String("session_id", sessionID))
+	return sess, nil
 }
 
 // NavigateAndExtract is a convenience method that creates a temporary session
 // to navigate to a URL and extract all link hrefs from the page.
-func (m *Manager) NavigateAndExtract(ctx context.Context, url string) ([]string, error) {
+func (m *Manager) NavigateAndExtract(ctx context.Context, targetURL string) ([]string, error) {
 	findingsChan := make(chan schemas.Finding, 1)
 	defer close(findingsChan)
 
@@ -201,46 +144,82 @@ func (m *Manager) NavigateAndExtract(ctx context.Context, url string) ([]string,
 	}()
 
 	// Navigate to the provided URL.
-	if err := sessionCtx.Navigate(ctx, url); err != nil {
-		return nil, fmt.Errorf("failed to navigate to %s: %w", url, err)
+	if err := sessionCtx.Navigate(ctx, targetURL); err != nil {
+		return nil, fmt.Errorf("failed to navigate to %s: %w", targetURL, err)
 	}
 
-	var hrefs []string
-	// JavaScript script to extract all absolute links.
-	script := `
-		() => {
-			const links = [];
-			// Select only anchors with an href attribute.
-			document.querySelectorAll('a[href]').forEach(a => {
-				// Accessing 'a.href' returns the absolute URL.
-				if (a.href) {
-					links.push(a.href);
-				}
-			});
-			return links;
-		}
-	`
-	// Execute the script on the page.
-	if err := sessionCtx.ExecuteScript(ctx, script, &hrefs); err != nil {
-		return nil, fmt.Errorf("failed to extract links: %w", err)
-	}
+    // In the Pure Go implementation, JS execution (Goja) is sandboxed and lacks DOM access.
+    // We must use the session's internal DOM parser (htmlquery) to extract links.
+
+    // The sessionCtx must implement dom.CorePagePrimitives to access the DOM state.
+    primitives, ok := sessionCtx.(dom.CorePagePrimitives)
+    if !ok {
+         return nil, fmt.Errorf("internal error: session context does not implement CorePagePrimitives")
+    }
+
+    // 1. Get the DOM snapshot.
+    reader, err := primitives.GetDOMSnapshot(ctx)
+    if err != nil {
+        return nil, fmt.Errorf("failed to get DOM snapshot: %w", err)
+    }
+    if closer, ok := reader.(io.Closer); ok {
+        defer closer.Close()
+    }
+
+    // 2. Parse the HTML.
+    doc, err := htmlquery.Parse(reader)
+    if err != nil {
+        return nil, fmt.Errorf("failed to parse HTML: %w", err)
+    }
+
+    // 3. Extract links using XPath.
+    var hrefs []string
+    links := htmlquery.Find(doc, "//a[@href]")
+
+    // Get the base URL for resolving relative links.
+    currentURLStr := primitives.GetCurrentURL()
+    baseURL, err := url.Parse(currentURLStr)
+    if err != nil {
+        m.logger.Warn("Failed to parse current URL for link resolution", zap.Error(err), zap.String("url", currentURLStr))
+        // Continue extraction but links might remain relative if parsing fails.
+    }
+
+    for _, link := range links {
+        href := htmlquery.SelectAttr(link, "href")
+        if href == "" {
+            continue
+        }
+
+        // Resolve relative URLs to absolute URLs.
+        if baseURL != nil {
+            parsedHref, err := url.Parse(href)
+            if err == nil {
+                absoluteURL := baseURL.ResolveReference(parsedHref)
+                hrefs = append(hrefs, absoluteURL.String())
+            } else {
+                hrefs = append(hrefs, href) // Append original if parsing fails
+            }
+        } else {
+            hrefs = append(hrefs, href)
+        }
+    }
 
 	return hrefs, nil
 }
 
-// Shutdown gracefully closes all sessions and the browser process.
+// Shutdown gracefully closes all sessions.
 func (m *Manager) Shutdown(ctx context.Context) error {
 	m.logger.Info("Shutting down browser manager.")
 
-	// If initialization never succeeded, ensure cleanup happens if necessary.
-	if m.pw == nil {
-		m.logger.Info("Manager not fully initialized, skipping full shutdown sequence.")
-		return nil
-	}
+    // If initialization never fully completed, exit early.
+    if m.jsRuntime == nil {
+        m.logger.Info("Manager not fully initialized, skipping full shutdown sequence.")
+        return nil
+    }
 
 	// 1. Close all active sessions.
 	m.mu.RLock()
-	sessionsToClose := make([]*Session, 0, len(m.sessions))
+	sessionsToClose := make([]*session.Session, 0, len(m.sessions))
 	for _, s := range m.sessions {
 		sessionsToClose = append(sessionsToClose, s)
 	}
@@ -248,8 +227,8 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 
 	// Initiate close concurrently.
 	for _, s := range sessionsToClose {
-		go func(s *Session) {
-			// Use the provided context for closing, allowing timeout control for the Go logic.
+		go func(s *session.Session) {
+			// Use the provided context for closing.
 			if err := s.Close(ctx); err != nil {
 				m.logger.Warn("Error during session close in shutdown.", zap.String("session_id", s.ID()), zap.Error(err))
 			}
@@ -268,33 +247,11 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 	case <-done:
 		m.logger.Info("All sessions closed gracefully.")
 	case <-ctx.Done():
-		m.logger.Warn("Timeout waiting for sessions to close. Proceeding with forceful shutdown.", zap.Error(ctx.Err()))
+		m.logger.Warn("Timeout waiting for sessions to close. Proceeding with shutdown.", zap.Error(ctx.Err()))
 	}
 
-	// 3. Close the browser instance and driver.
-	var shutdownErr error
-
-	if m.browser != nil {
-		// Modernization: Provide a 'Reason' for closure.
-		// API Compliance: Close does not take context.
-		closeOptions := playwright.BrowserCloseOptions{
-			Reason: playwright.String("Application shutdown initiated."),
-		}
-		if err := m.browser.Close(closeOptions); err != nil {
-			m.logger.Error("Failed to close browser instance.", zap.Error(err))
-			shutdownErr = fmt.Errorf("failed to close browser: %w", err)
-		}
-	}
-
-	// API Compliance: Stop does not take context.
-	if err := m.pw.Stop(); err != nil {
-		m.logger.Error("Failed to stop Playwright driver.", zap.Error(err))
-		if shutdownErr == nil {
-			shutdownErr = fmt.Errorf("failed to stop playwright driver: %w", err)
-		}
-	}
+    // No external browser processes to stop.
 
 	m.logger.Info("Browser manager shutdown complete.")
-	return shutdownErr
+	return nil
 }
-
