@@ -56,10 +56,10 @@ func NewInterceptionProxy(caCert, caKey []byte, clientConfig *ClientConfig, logg
 	// Create a defensive copy of the client config to prevent external mutation after initialization.
 	var cfgCopy ClientConfig
 	if clientConfig == nil {
-		cfgCopy = *NewDefaultClientConfig()
+		cfgCopy = *NewBrowserClientConfig()
 		// Default behavior for proxy upstream connections should often be permissive.
-		cfgCopy.IgnoreTLSErrors = true
-		log.Info("Using default client config with IgnoreTLSErrors enabled for upstream connections.")
+		cfgCopy.InsecureSkipVerify = true
+		log.Info("Using default client config with InsecureSkipVerify enabled for upstream connections.")
 	} else {
 		cfgCopy = *clientConfig
 	}

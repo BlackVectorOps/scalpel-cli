@@ -3,6 +3,7 @@ module github.com/xkilldash9x/scalpel-cli
 go 1.25.1
 
 require (
+	github.com/PuerkitoBio/goquery v1.10.3
 	github.com/andybalholm/brotli v1.2.0
 	github.com/antchfx/htmlquery v1.3.4
 	github.com/aquilax/go-perlin v1.1.0
@@ -10,6 +11,7 @@ require (
 	github.com/chromedp/cdproto v0.0.0-20250803210736-d308e07a266d
 	github.com/chromedp/chromedp v0.14.1
 	github.com/dop251/goja v0.0.0-20250630131328-58d95d85e994
+	github.com/dop251/goja_nodejs v0.0.0-20250409162600-f7acab6894b0
 	github.com/elazarl/goproxy v1.7.2
 	github.com/golang-jwt/jwt/v5 v5.3.0
 	github.com/google/uuid v1.6.0
@@ -27,6 +29,7 @@ require (
 )
 
 require (
+	github.com/andybalholm/cascadia v1.3.3 // indirect
 	github.com/antchfx/xpath v1.3.5 // indirect
 	github.com/chromedp/sysutil v1.1.0 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect

@@ -16,7 +16,6 @@ import (
 
 	"github.com/antchfx/htmlquery"
 	"golang.org/x/net/html"
-	"github.com/xkilldash9x/scalpel-cli/internal/browser/humanoid"
 )
 
 // -- Structs and Types --
@@ -110,7 +109,7 @@ func (i *Interactor) interactDepth(
 		return err
 	}
 	if depth >= config.MaxDepth {
-        i.logger.Debug(fmt.Sprintf("Reached max depth (%d).", depth))
+		i.logger.Debug(fmt.Sprintf("Reached max depth (%d).", depth))
 		return nil
 	}
 
@@ -151,19 +150,19 @@ func (i *Interactor) interactDepth(
 		}
 
 		// Execute the interaction.
-        i.logger.Debug(fmt.Sprintf("Attempting interaction: %s", element.Description))
+		i.logger.Debug(fmt.Sprintf("Attempting interaction: %s", element.Description))
 		actionCtx, cancelAction := context.WithTimeout(ctx, 60*time.Second) // Generous timeout for the action itself.
 		err := i.executeInteraction(actionCtx, element)
 		cancelAction()
 
-        // Mark as interacted to avoid retrying the same element fingerprint.
+		// Mark as interacted to avoid retrying the same element fingerprint.
 		interactedElements[element.Fingerprint] = true
 
 		if err != nil {
 			// Log failnure but continue exploration with other elements.
-            if actionCtx.Err() == nil {
-			    i.logger.Debug(fmt.Sprintf("Interaction failed: %v", err))
-            }
+			if actionCtx.Err() == nil {
+				i.logger.Debug(fmt.Sprintf("Interaction failed: %v", err))
+			}
 			continue
 		}
 
@@ -177,8 +176,8 @@ func (i *Interactor) interactDepth(
 		}
 
 		// Strategy: Assume any successful interaction might cause a significant DOM change or navigation.
-        // Therefore, we break the loop and proceed to stabilization and re-discovery at the next depth.
-        i.logger.Debug("Interaction successful. Proceeding to stabilization and next depth.")
+		// Therefore, we break the loop and proceed to stabilization and re-discovery at the next depth.
+		i.logger.Debug("Interaction successful. Proceeding to stabilization and next depth.")
 		break
 	}
 
@@ -223,10 +222,10 @@ func (i *Interactor) discoverElements(ctx context.Context, interacted map[string
 	if err != nil {
 		return nil, fmt.Errorf("failed to get DOM snapshot: %w", err)
 	}
-    // Ensure the reader is closed if applicable.
-    if closer, ok := domReader.(io.Closer); ok {
-        defer closer.Close()
-    }
+	// Ensure the reader is closed if applicable.
+	if closer, ok := domReader.(io.Closer); ok {
+		defer closer.Close()
+	}
 
 	// 2. Parse the HTML body.
 	root, err := htmlquery.Parse(domReader)
@@ -268,14 +267,14 @@ func extractElementData(node *html.Node) ElementData {
 	}
 
 	data := ElementData{
-		NodeName:      strings.ToUpper(node.Data),
-		Attributes:    attrs,
-		TextContent:   textContent,
+		NodeName:    strings.ToUpper(node.Data),
+		Attributes:  attrs,
+		TextContent: textContent,
 	}
 
 	// Extract select options if applicable.
 	if strings.EqualFold(node.Data, "select") {
-        data.SelectOptions = extractSelectOptions(node)
+		data.SelectOptions = extractSelectOptions(node)
 	}
 
 	return data
@@ -284,7 +283,7 @@ func extractElementData(node *html.Node) ElementData {
 // extractSelectOptions parses the children of a <select> node, handling <optgroup> and disabled states.
 func extractSelectOptions(selectNode *html.Node) []SelectOptionData {
 	var options []SelectOptionData
-    // Find all descendant option tags.
+	// Find all descendant option tags.
 	optionNodes := htmlquery.Find(selectNode, ".//option")
 
 	for _, node := range optionNodes {
@@ -355,31 +354,31 @@ func (i *Interactor) filterAndFingerprint(results []discoveryResult, interacted 
 func (i *Interactor) executeInteraction(ctx context.Context, element interactiveElement) error {
 	var err error
 
-    data := element.InputData
-    nodeName := data.NodeName
+	data := element.InputData
+	nodeName := data.NodeName
 
-    // Determine timing parameters based on configuration.
-    keyHold := 0.0
-    clickMin, clickMax := 0, 0
-    if i.humanoidCfg.Enabled {
-        keyHold = i.humanoidCfg.KeyHoldMeanMs
-        clickMin = i.humanoidCfg.ClickHoldMinMs
-        clickMax = i.humanoidCfg.ClickHoldMaxMs
-    }
+	// Determine timing parameters based on configuration.
+	keyHold := 0.0
+	clickMin, clickMax := 0, 0
+	if i.humanoidCfg.Enabled {
+		keyHold = i.humanoidCfg.KeyHoldMeanMs
+		clickMin = i.humanoidCfg.ClickHoldMinMs
+		clickMax = i.humanoidCfg.ClickHoldMaxMs
+	}
 
-    // Determine the correct interaction type based on element semantics.
-    if nodeName == "SELECT" {
-        err = i.handleSelectInteraction(ctx, element.Selector, data)
-    } else if isTextInputElement(data) {
-        // Handle text inputs, textareas, contenteditable.
-        payload := i.generateInputPayload(data)
-        i.logger.Debug(fmt.Sprintf("Typing '%s' into %s", payload, element.Description))
-        err = i.page.ExecuteType(ctx, element.Selector, payload, keyHold)
-    } else {
-        // Handle links, buttons, summary, checkboxes, radios, submit inputs, ARIA roles, etc.
-        i.logger.Debug(fmt.Sprintf("Clicking %s", element.Description))
-        err = i.page.ExecuteClick(ctx, element.Selector, clickMin, clickMax)
-    }
+	// Determine the correct interaction type based on element semantics.
+	if nodeName == "SELECT" {
+		err = i.handleSelectInteraction(ctx, element.Selector, data)
+	} else if isTextInputElement(data) {
+		// Handle text inputs, textareas, contenteditable.
+		payload := i.generateInputPayload(data)
+		i.logger.Debug(fmt.Sprintf("Typing '%s' into %s", payload, element.Description))
+		err = i.page.ExecuteType(ctx, element.Selector, payload, keyHold)
+	} else {
+		// Handle links, buttons, summary, checkboxes, radios, submit inputs, ARIA roles, etc.
+		i.logger.Debug(fmt.Sprintf("Clicking %s", element.Description))
+		err = i.page.ExecuteClick(ctx, element.Selector, clickMin, clickMax)
+	}
 
 	if err != nil {
 		return fmt.Errorf("interaction dispatch failed: %w", err)
@@ -398,23 +397,23 @@ func (i *Interactor) handleSelectInteraction(ctx context.Context, selector strin
 		}
 	}
 
-    // Heuristic: If there are multiple options, we often want to avoid the first one, 
-    // as it's frequently a placeholder (e.g., "--Select One--").
+	// Heuristic: If there are multiple options, we often want to avoid the first one,
+	// as it's frequently a placeholder (e.g., "--Select One--").
 	if len(options) > 1 {
 		// Randomly select one option starting from the second one.
 		selectedIndex := i.rng.Intn(len(options)-1) + 1
 		selectedValue := options[selectedIndex]
-        i.logger.Debug(fmt.Sprintf("Selecting value '%s' (index %d) in %s", selectedValue, selectedIndex, selector))
+		i.logger.Debug(fmt.Sprintf("Selecting value '%s' (index %d) in %s", selectedValue, selectedIndex, selector))
 		return i.page.ExecuteSelect(ctx, selector, selectedValue)
 	} else if len(options) == 1 {
-        // If only one option exists, select it.
-        i.logger.Debug(fmt.Sprintf("Selecting only available value '%s' in %s", options[0], selector))
-        return i.page.ExecuteSelect(ctx, selector, options[0])
-    }
+		// If only one option exists, select it.
+		i.logger.Debug(fmt.Sprintf("Selecting only available value '%s' in %s", options[0], selector))
+		return i.page.ExecuteSelect(ctx, selector, options[0])
+	}
 
-    // No valid options found.
-    i.logger.Debug(fmt.Sprintf("No valid options to select in %s", selector))
-    return nil
+	// No valid options found.
+	i.logger.Debug(fmt.Sprintf("No valid options to select in %s", selector))
+	return nil
 }
 
 // generateInputPayload creates realistic dummy data based on the input element's context.
@@ -433,21 +432,21 @@ func (i *Interactor) generateInputPayload(data ElementData) string {
 	if inputType == "tel" || strings.Contains(contextString, "phone") || strings.Contains(contextString, "mobile") {
 		return "555-0199"
 	}
-    if inputType == "url" || strings.Contains(contextString, "website") || strings.Contains(contextString, "url") {
-        return "https://example.com/test"
-    }
+	if inputType == "url" || strings.Contains(contextString, "website") || strings.Contains(contextString, "url") {
+		return "https://example.com/test"
+	}
 	if inputType == "search" || strings.Contains(contextString, "search") || strings.Contains(contextString, "query") {
 		return "test query"
 	}
-    if inputType == "number" || inputType == "range" {
-        return strconv.Itoa(i.rng.Intn(100) + 1)
-    }
+	if inputType == "number" || inputType == "range" {
+		return strconv.Itoa(i.rng.Intn(100) + 1)
+	}
 	if strings.Contains(contextString, "name") || strings.Contains(contextString, "user") || strings.Contains(contextString, "login") {
 		return "Test User"
 	}
-    if data.NodeName == "TEXTAREA" {
-         return "This is a test message generated by the automation browser."
-    }
+	if data.NodeName == "TEXTAREA" {
+		return "This is a test message generated by the automation browser."
+	}
 	// Default fallback text.
 	return "automation test input"
 }
@@ -455,9 +454,9 @@ func (i *Interactor) generateInputPayload(data ElementData) string {
 // -- Humanoid Helpers --
 
 func (i *Interactor) cognitivePause(ctx context.Context, baseMs, varianceMs int) error {
-    if varianceMs <= 0 {
-        varianceMs = 1
-    }
+	if varianceMs <= 0 {
+		varianceMs = 1
+	}
 	duration := time.Duration(baseMs+i.rng.Intn(varianceMs)) * time.Millisecond
 	return i.hesitate(ctx, duration)
 }
@@ -482,30 +481,30 @@ func generateNodeFingerprint(data ElementData) (string, string) {
 	var sb strings.Builder
 	tagNameLower := strings.ToLower(data.NodeName)
 	sb.WriteString(tagNameLower)
-    attrs := data.Attributes
+	attrs := data.Attributes
 
 	// Include ID for specificity.
 	if id, ok := attrs["id"]; ok && id != "" {
 		sb.WriteString("#" + id)
 	}
 
-    // Include Classes, filtering potentially dynamic ones.
+	// Include Classes, filtering potentially dynamic ones.
 	if cls, ok := attrs["class"]; ok && cls != "" {
 		classes := strings.Fields(cls)
 		sort.Strings(classes) // Ensure consistent ordering.
-        
-        var stableClasses []string
-        for _, c := range classes {
-            // Heuristic: avoid classes that look like generated CSS-in-JS hashes (e.g., short, containing numbers)
-            if len(c) > 5 || !strings.ContainsAny(c, "0123456789") {
-                 stableClasses = append(stableClasses, c)
-            }
-        }
 
-        // Limit the number of classes to avoid issues with highly dynamic CSS frameworks.
-        if len(stableClasses) > 0 && len(stableClasses) < 5 {
-		    sb.WriteString("." + strings.Join(stableClasses, "."))
-        }
+		var stableClasses []string
+		for _, c := range classes {
+			// Heuristic: avoid classes that look like generated CSS-in-JS hashes (e.g., short, containing numbers)
+			if len(c) > 5 || !strings.ContainsAny(c, "0123456789") {
+				stableClasses = append(stableClasses, c)
+			}
+		}
+
+		// Limit the number of classes to avoid issues with highly dynamic CSS frameworks.
+		if len(stableClasses) > 0 && len(stableClasses) < 5 {
+			sb.WriteString("." + strings.Join(stableClasses, "."))
+		}
 	}
 
 	// Include relevant attributes that define the element's behavior or identity.
@@ -518,14 +517,14 @@ func generateNodeFingerprint(data ElementData) (string, string) {
 			if len(val) > 128 {
 				val = val[:128]
 			}
-            val = strings.ReplaceAll(val, `"`, "'") // Basic escaping
+			val = strings.ReplaceAll(val, `"`, "'") // Basic escaping
 			sb.WriteString(fmt.Sprintf(`[%s="%s"]`, attr, val))
 		}
 	}
 
 	// Include truncated text content for elements where text is descriptive (buttons, links).
 	if data.TextContent != "" {
-        text := strings.ReplaceAll(data.TextContent, `"`, "'")
+		text := strings.ReplaceAll(data.TextContent, `"`, "'")
 		sb.WriteString(fmt.Sprintf(`[text="%s"]`, text))
 	}
 
@@ -567,14 +566,14 @@ func isTextInputElement(data ElementData) bool {
 	if name == "TEXTAREA" {
 		return true
 	}
-    
-    // SELECT is handled separately (Select action).
+
+	// SELECT is handled separately (Select action).
 
 	// Supports rich text editing areas.
-    // contenteditable can be "true", "false", or "" (empty string often implies true).
-    if val, ok := attrs["contenteditable"]; ok {
-        val = strings.TrimSpace(strings.ToLower(val))
-        return val == "true" || val == ""
-    }
-    return false
+	// contenteditable can be "true", "false", or "" (empty string often implies true).
+	if val, ok := attrs["contenteditable"]; ok {
+		val = strings.TrimSpace(strings.ToLower(val))
+		return val == "true" || val == ""
+	}
+	return false
 }
