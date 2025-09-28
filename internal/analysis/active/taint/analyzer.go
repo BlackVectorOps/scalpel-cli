@@ -13,13 +13,13 @@ import (
 	"text/template"
 	"time"
 
-	"github.com/chromedp/chromedp" // Added import for executing Humanoid actions
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/browser/humanoid" // Added import
 )
+
 
 //go:embed taint_shim.js
 var taintShimFS embed.FS
@@ -333,14 +333,16 @@ func (a *Analyzer) executePause(ctx context.Context, browserCtx context.Context,
 		return browserCtx.Err()
 	}
 
-	// Execute the action using the session's browser context.
-	// Errors (including context cancellation) will be returned.
-	if err := chromedp.Run(browserCtx, h.CognitivePause(meanMs, stdDevMs)); err != nil {
+	//  The humanoid.CognitivePause function signature was changed. It now takes a context
+	// and returns an error directly, instead of returning a chromedp.Action.
+	// We no longer need to wrap it in a chromedp.Run call.
+	if err := h.CognitivePause(browserCtx, meanMs, stdDevMs); err != nil {
 		a.logger.Debug("Error during Humanoid pause execution.", zap.Error(err))
 		return err
 	}
 	return nil
 }
+
 
 // executeProbes orchestrates the various probing strategies against the target.
 // MODIFICATION: Updated signature to accept Humanoid and BrowserContext. Integrated pauses.

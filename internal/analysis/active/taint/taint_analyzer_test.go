@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	// "regexp" // Removed unused import
 	"strings"
 	"sync"
 	"testing"
@@ -22,8 +21,6 @@ import (
 
 // Mock Definitions
 
-// MockBrowserInteractor is removed as it's no longer used in these tests.
-
 // MockSessionContext mocks the SessionContext interface (must match schemas.SessionContext).
 type MockSessionContext struct {
 	mock.Mock
@@ -37,7 +34,6 @@ func NewMockSessionContext() *MockSessionContext {
 	}
 }
 
-// FIX: Added the missing ID method to satisfy the SessionContext interface.
 func (m *MockSessionContext) ID() string {
 	args := m.Called()
 	return args.String(0)
@@ -95,9 +91,8 @@ func (m *MockSessionContext) SimulateCallback(t *testing.T, name string, payload
 	}
 }
 
-// FIX: Signature updated to match the interface, which now includes an 'options' parameter.
-func (m *MockSessionContext) ExecuteScript(ctx context.Context, script string, options interface{}) error {
-	args := m.Called(ctx, script, options)
+func (m *MockSessionContext) ExecuteScript(ctx context.Context, script string, res interface{}) error {
+	args := m.Called(ctx, script, res)
 	return args.Error(0)
 }
 
@@ -106,68 +101,65 @@ func (m *MockSessionContext) Navigate(ctx context.Context, url string) error {
 	return args.Error(0)
 }
 
-// FIX: Signature updated to match the interface (removed context.Context).
-func (m *MockSessionContext) WaitForAsync(milliseconds int) error {
-	args := m.Called(milliseconds)
-	return args.Error(0)
-}
-
 func (m *MockSessionContext) Interact(ctx context.Context, config schemas.InteractionConfig) error {
 	args := m.Called(ctx, config)
 	return args.Error(0)
 }
 
-// FIX: Signature updated to match schemas.SessionContext (Close(context.Context) error).
 func (m *MockSessionContext) Close(ctx context.Context) error {
 	args := m.Called(ctx)
 	return args.Error(0)
 }
 
-// FIX: Implement all missing methods required by schemas.SessionContext.
-func (m *MockSessionContext) Click(selector string) error {
-	args := m.Called(selector)
+// FIX: ALL interaction methods now correctly include context.Context to satisfy the interface.
+func (m *MockSessionContext) Click(ctx context.Context, selector string) error {
+	args := m.Called(ctx, selector)
 	return args.Error(0)
 }
 
-func (m *MockSessionContext) Type(selector string, text string) error {
-	args := m.Called(selector, text)
+func (m *MockSessionContext) Type(ctx context.Context, selector string, text string) error {
+	args := m.Called(ctx, selector, text)
 	return args.Error(0)
 }
 
-func (m *MockSessionContext) Submit(selector string) error {
-	args := m.Called(selector)
+func (m *MockSessionContext) Submit(ctx context.Context, selector string) error {
+	args := m.Called(ctx, selector)
 	return args.Error(0)
 }
 
-func (m *MockSessionContext) ScrollPage(direction string) error {
-	args := m.Called(direction)
+func (m *MockSessionContext) ScrollPage(ctx context.Context, direction string) error {
+	args := m.Called(ctx, direction)
+	return args.Error(0)
+}
+
+func (m *MockSessionContext) WaitForAsync(ctx context.Context, milliseconds int) error {
+	args := m.Called(ctx, milliseconds)
 	return args.Error(0)
 }
 
 func (m *MockSessionContext) GetContext() context.Context {
 	args := m.Called()
 	if args.Get(0) == nil {
-		return nil // Return nil if not mocked, to avoid panicking on type assertion
+		return context.Background() // Return a non-nil context to avoid panics.
 	}
 	return args.Get(0).(context.Context)
 }
 
-
-// FIX: Updated the AddFinding signature to return an error, matching the interface.
 func (m *MockSessionContext) AddFinding(finding schemas.Finding) error {
 	args := m.Called(finding)
 	return args.Error(0)
 }
 
-// FIX: Corrected the signature to match the interface: no arguments, returns a pointer.
-func (m *MockSessionContext) CollectArtifacts() (*schemas.Artifacts, error) {
-	args := m.Called()
+// FIX: This is the single, correct implementation of CollectArtifacts with context.Context.
+func (m *MockSessionContext) CollectArtifacts(ctx context.Context) (*schemas.Artifacts, error) {
+	args := m.Called(ctx)
 	var artifacts *schemas.Artifacts
 	if args.Get(0) != nil {
 		artifacts = args.Get(0).(*schemas.Artifacts)
 	}
 	return artifacts, args.Error(1)
 }
+
 
 
 // MockResultsReporter mocks the ResultsReporter interface.
