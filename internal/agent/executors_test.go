@@ -1,179 +1,169 @@
-// File: internal/agent/executors_test.go
 package agent
 
 import (
 	"context"
 	"errors"
-	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
-	"go.uber.org/zap/zaptest"
+	"go.uber.org/zap"
 
-	// Using schemas to get the canonical interfaces.
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 )
 
-// NOTE: MockSessionContext definition is now centralized in internal/agent/mocks_test.go.
+// -- BrowserExecutor Tests --
 
-// Test Setup Helper
-
-// Creates a BrowserExecutor instance for testing.
-func setupBrowserExecutor(t *testing.T, provideSession bool) (*BrowserExecutor, *MockSessionContext) {
-	t.Helper()
-	logger := zaptest.NewLogger(t)
-
-	var mockSession *MockSessionContext
-	// SessionProvider is defined as: type SessionProvider func() schemas.SessionContext
-	var provider SessionProvider
-
-	if provideSession {
-		// MockSessionContext is defined in mocks_test.go and implements schemas.SessionContext.
-		mockSession = new(MockSessionContext)
-		// Provider function must return schemas.SessionContext.
-		provider = func() schemas.SessionContext {
-			return mockSession
-		}
-	} else {
-		provider = func() schemas.SessionContext {
-			return nil
-		}
-	}
-
+func TestBrowserExecutor_HandleNavigate(t *testing.T) {
+	logger := zap.NewNop()
+	mockSession := new(MockSessionContext)
+	provider := func() schemas.SessionContext { return mockSession }
 	executor := NewBrowserExecutor(logger, provider)
-	return executor, mockSession
-}
 
-// Test Cases: Initialization and Dispatch Logic
-
-// Verifies all expected handlers are registered (white box).
-func TestNewBrowserExecutor_Registration(t *testing.T) {
-	executor, _ := setupBrowserExecutor(t, true)
-
-	// Verify expected handlers (using internal ActionType).
-	expectedHandlers := []ActionType{
-		ActionNavigate,
-		ActionClick,
-		ActionInputText,
-		ActionSubmitForm,
-		ActionScroll,
-		ActionWaitForAsync,
-	}
-
-	assert.Len(t, executor.handlers, len(expectedHandlers))
-	for _, actionType := range expectedHandlers {
-		_, exists := executor.handlers[actionType]
-		assert.True(t, exists, fmt.Sprintf("Handler for %s should be registered", actionType))
-	}
-}
-
-// Verifies error handling when the session provider returns nil.
-func TestExecute_NoActiveSession(t *testing.T) {
-	executor, _ := setupBrowserExecutor(t, false)
-	ctx := context.Background()
-
-	action := Action{Type: ActionClick, Selector: "#btn"}
-
-	result, err := executor.Execute(ctx, action)
-
-	assert.Error(t, err)
-	assert.Nil(t, result)
-	assert.Contains(t, err.Error(), "no active browser session")
-}
-
-// Test Cases: Execution Flow
-
-// Verifies the structure of the result on successful execution.
-func TestExecute_Success(t *testing.T) {
-	executor, mockSession := setupBrowserExecutor(t, true)
-	ctx := context.Background()
-
-	action := Action{Type: ActionNavigate, Value: "http://test.com"}
-
-	// The implementation (executors.go) explicitly passes context.Background() to session.Navigate.
-	// We use mock.Anything to match this behavior reliably, as the test's 'ctx' won't match the implementation's context.Background().
-	mockSession.On("Navigate", mock.Anything, "http://test.com").Return(nil).Once()
-
-	result, err := executor.Execute(ctx, action)
-
+	// Test successful navigation
+	action := Action{Type: ActionNavigate, Value: "https://example.com"}
+	mockSession.On("Navigate", mock.Anything, "https://example.com").Return(nil).Once()
+	err := executor.handleNavigate(context.Background(), mockSession, action)
 	assert.NoError(t, err)
-	require.NotNil(t, result)
+
+	// Test navigation failure
+	expectedErr := errors.New("navigation failed")
+	mockSession.On("Navigate", mock.Anything, "https://example.com").Return(expectedErr).Once()
+	err = executor.handleNavigate(context.Background(), mockSession, action)
+	assert.Equal(t, expectedErr, err)
+
+	// Test missing URL
+	action.Value = ""
+	err = executor.handleNavigate(context.Background(), mockSession, action)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "requires a 'value'")
+}
+
+func TestBrowserExecutor_HandleSubmitForm(t *testing.T) {
+	logger := zap.NewNop()
+	mockSession := new(MockSessionContext)
+	provider := func() schemas.SessionContext { return mockSession }
+	executor := NewBrowserExecutor(logger, provider)
+
+	action := Action{Type: ActionSubmitForm, Selector: "#form"}
+	mockSession.On("Submit", mock.Anything, "#form").Return(nil).Once()
+	err := executor.handleSubmitForm(context.Background(), mockSession, action)
+	assert.NoError(t, err)
+
+	action.Selector = ""
+	err = executor.handleSubmitForm(context.Background(), mockSession, action)
+	assert.Error(t, err)
+}
+
+func TestBrowserExecutor_HandleScroll(t *testing.T) {
+	logger := zap.NewNop()
+	mockSession := new(MockSessionContext)
+	provider := func() schemas.SessionContext { return mockSession }
+	executor := NewBrowserExecutor(logger, provider)
+
+	action := Action{Type: ActionScroll, Value: "down"}
+	mockSession.On("ScrollPage", mock.Anything, "down").Return(nil).Once()
+	err := executor.handleScroll(context.Background(), mockSession, action)
+	assert.NoError(t, err)
+
+	action.Value = "up"
+	mockSession.On("ScrollPage", mock.Anything, "up").Return(nil).Once()
+	err = executor.handleScroll(context.Background(), mockSession, action)
+	assert.NoError(t, err)
+
+	action.Value = "" // Default to down
+	mockSession.On("ScrollPage", mock.Anything, "down").Return(nil).Once()
+	err = executor.handleScroll(context.Background(), mockSession, action)
+	assert.NoError(t, err)
+}
+
+func TestBrowserExecutor_HandleWaitForAsync(t *testing.T) {
+	logger := zap.NewNop()
+	mockSession := new(MockSessionContext)
+	provider := func() schemas.SessionContext { return mockSession }
+	executor := NewBrowserExecutor(logger, provider)
+
+	// Test with default duration
+	action := Action{Type: ActionWaitForAsync}
+	mockSession.On("WaitForAsync", mock.Anything, 1000).Return(nil).Once()
+	err := executor.handleWaitForAsync(context.Background(), mockSession, action)
+	assert.NoError(t, err)
+
+	// Test with specified duration
+	action.Metadata = map[string]interface{}{"duration_ms": 2500.0}
+	mockSession.On("WaitForAsync", mock.Anything, 2500).Return(nil).Once()
+	err = executor.handleWaitForAsync(context.Background(), mockSession, action)
+	assert.NoError(t, err)
+
+	// Test with invalid type (should use default)
+	action.Metadata = map[string]interface{}{"duration_ms": "not-a-number"}
+	mockSession.On("WaitForAsync", mock.Anything, 1000).Return(nil).Once()
+	err = executor.handleWaitForAsync(context.Background(), mockSession, action)
+	assert.NoError(t, err)
+}
+
+func TestExecutorRegistry_Execute(t *testing.T) {
+	logger := zap.NewNop()
+	mockSession := new(MockSessionContext)
+	provider := func() schemas.SessionContext { return mockSession }
+	registry := NewExecutorRegistry(logger, ".")
+	registry.UpdateSessionProvider(provider)
+
+	// Test a valid browser action
+	navAction := Action{Type: ActionNavigate, Value: "https://example.com"}
+	mockSession.On("Navigate", mock.Anything, "https://example.com").Return(nil).Once()
+	result, err := registry.Execute(context.Background(), navAction)
+	require.NoError(t, err)
 	assert.Equal(t, "success", result.Status)
-	assert.Empty(t, result.Error)
 	assert.Equal(t, ObservedDOMChange, result.ObservationType)
-	mockSession.AssertExpectations(t)
-}
 
-// Verifies the structure of the result when the action itself fails.
-func TestExecute_ActionFailure(t *testing.T) {
-	executor, mockSession := setupBrowserExecutor(t, true)
-	ctx := context.Background()
+	// Test an action handled by a different executor (codebase)
+	// We expect an error here because we can't actually do this in a unit test without a file system.
+	// But we can check that it dispatches correctly.
+	codeAction := Action{Type: ActionGatherCodebaseContext, Metadata: map[string]interface{}{"module_path": "."}}
+	_, err = registry.Execute(context.Background(), codeAction)
+	assert.Error(t, err) // Expecting an error from the filesystem part of the executor.
 
-	action := Action{Type: ActionClick, Selector: "#missing"}
-	expectedError := errors.New("element not found")
-
-	// Update the mock expectation to account for the new context argument.
-	// We use mock.Anything since the exact context instance doesn't matter for this test.
-	mockSession.On("Click", mock.Anything, "#missing").Return(expectedError).Once()
-
-	result, err := executor.Execute(ctx, action)
-
-	// The executor successfully attempted the action (so 'err' is nil).
-	assert.NoError(t, err)
-	require.NotNil(t, result)
-	assert.Equal(t, "failed", result.Status)
-	assert.Equal(t, expectedError.Error(), result.Error)
-	mockSession.AssertExpectations(t)
-}
-
-// Test Cases: Specific Action Logic (Unit Tests)
-
-// Verifies validation within handlers (e.g., missing selector).
-func TestHandler_InputText_Validation(t *testing.T) {
-	executor, mockSession := setupBrowserExecutor(t, true)
-
-	action := Action{Type: ActionInputText, Value: "test"}
-
-	// Execute the unexported handler directly (white box).
-	// We pass the mockSession which implements schemas.SessionContext.
-	err := executor.handleInputText(mockSession, action)
-
+	// Test an unregistered action
+	unknownAction := Action{Type: "UNKNOWN_ACTION"}
+	_, err = registry.Execute(context.Background(), unknownAction)
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "requires a 'selector'")
-	// Update the mock assertion to include the new context argument.
-	mockSession.AssertNotCalled(t, "Type", mock.Anything, mock.Anything, mock.Anything)
+	assert.Contains(t, err.Error(), "no executor registered")
+
+	// Test a humanoid-handled action (should fail fast)
+	clickAction := Action{Type: ActionClick}
+	_, err = registry.Execute(context.Background(), clickAction)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "should be handled by the Agent")
 }
 
-// Verifies the robust parsing of the duration_ms metadata.
-func TestHandler_WaitForAsync_MetadataParsing(t *testing.T) {
-	tests := []struct {
-		name             string
-		metadata         map[string]interface{}
-		expectedDuration int
-	}{
-		{"Default (No Metadata)", nil, 1000},
-		{"Valid Int", map[string]interface{}{"duration_ms": 500}, 500},
-		{"Valid Float64", map[string]interface{}{"duration_ms": 250.5}, 250},
-		{"Valid Int64", map[string]interface{}{"duration_ms": int64(750)}, 750},
-		{"Invalid Type (String)", map[string]interface{}{"duration_ms": "invalid"}, 1000},
-	}
+func TestParseBrowserError(t *testing.T) {
+	// Test Element Not Found
+	err := errors.New("cdp: no element found for selector")
+	action := Action{Selector: "#id"}
+	code, details := ParseBrowserError(err, action)
+	assert.Equal(t, ErrCodeElementNotFound, code)
+	assert.Equal(t, "#id", details["selector"])
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			executor, mockSession := setupBrowserExecutor(t, true)
+	// Test Timeout Error
+	err = errors.New("context deadline exceeded: waiting for element timed out")
+	code, details = ParseBrowserError(err, action)
+	assert.Equal(t, ErrCodeTimeoutError, code)
 
-			action := Action{Type: ActionWaitForAsync, Metadata: tt.metadata}
+	// Test Navigation Error
+	err = errors.New("could not navigate: net::ERR_CONNECTION_REFUSED")
+	code, details = ParseBrowserError(err, action)
+	assert.Equal(t, ErrCodeNavigationError, code)
 
-			// Update mock expectation to include the context argument.
-			mockSession.On("WaitForAsync", mock.Anything, tt.expectedDuration).Return(nil).Once()
+	// Test Geometry Error
+	err = errors.New("element is not interactable (zero size)")
+	code, details = ParseBrowserError(err, action)
+	assert.Equal(t, ErrCodeHumanoidGeometryInvalid, code)
 
-			// We pass the mockSession which implements schemas.SessionContext.
-			err := executor.handleWaitForAsync(mockSession, action)
-
-			require.NoError(t, err)
-			mockSession.AssertExpectations(t)
-		})
-	}
+	// Test Generic Failure
+	err = errors.New("some other random cdp error")
+	code, _ = ParseBrowserError(err, action)
+	assert.Equal(t, ErrCodeExecutionFailure, code)
 }
+

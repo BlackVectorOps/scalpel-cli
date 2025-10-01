@@ -11,16 +11,6 @@ import (
 	"go.uber.org/zap"
 )
 
-// -- UPGRADE NOTE: Defined Constants --
-// Adding standardized error codes for consistent error reporting back to the Mind.
-// These are now used by the exported ParseBrowserError function.
-const (
-	ErrCodeElementNotFound         = "ELEMENT_NOT_FOUND"
-	ErrCodeHumanoidGeometryInvalid = "HUMANOID_GEOMETRY_INVALID"
-	ErrCodeTimeoutError            = "TIMEOUT_ERROR"
-	ErrCodeNavigationError         = "NAVIGATION_ERROR"
-)
-
 // SessionProvider is a function type that retrieves the currently active session.
 type SessionProvider func() schemas.SessionContext
 

@@ -112,8 +112,18 @@ func (r *Runtime) ExecuteScript(ctx context.Context, script string, args []inter
 
 	if err != nil {
 		// Check if the error was due to the interruption.
-		if intErr, ok := err.(*goja.InterruptedError); ok {
-			return nil, fmt.Errorf("javascript execution interrupted: %s", intErr.Error())
+		if _, ok := err.(*goja.InterruptedError); ok {
+			// Check if the context associated with this specific execution was canceled.
+			// This handles the race condition where a session-wide interrupt (like "session closing"
+			// triggered by the deferred Close() call in the caller) might race with the specific
+			// context cancellation interrupt (e.g., timeout). If the context was canceled, that
+			// is the definitive reason for the interruption.
+			if ctx.Err() != nil {
+				return nil, fmt.Errorf("javascript execution interrupted by context: %w", ctx.Err())
+			}
+			// If the context is fine, report the actual interrupt reason provided by Goja.
+			// We use %w to wrap the original error which contains the Goja interrupt message.
+			return nil, fmt.Errorf("javascript execution interrupted: %w", err)
 		}
 		// Handle general JavaScript errors.
 		if jsErr, ok := err.(*goja.Exception); ok {

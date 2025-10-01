@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand"
@@ -24,9 +25,6 @@ import (
 	"github.com/dop251/goja_nodejs/eventloop"
 	"github.com/dop251/goja_nodejs/require"
 	"github.com/google/uuid"
-	"go.uber.org/zap"
-	"golang.org/x/net/html"
-
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/browser/dom"
 	"github.com/xkilldash9x/scalpel-cli/internal/browser/humanoid"
@@ -35,34 +33,15 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/internal/browser/network"
 	"github.com/xkilldash9x/scalpel-cli/internal/browser/parser"
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
+	"go.uber.org/zap"
+	"golang.org/x/net/html"
 )
-
-/*
-Architectural Overview:
-This implementation provides a functional headless browser engine by integrating the Goja JavaScript runtime
-with a stateful Go DOM representation (*html.Node) and a CSS-driven Layout Engine.
-
-Concurrency Model:
-The Goja runtime is single threaded. All JS execution and DOM manipulation triggered by JS occur on the
-dedicated Event Loop goroutine (managed by goja_nodejs/eventloop). Synchronization between Go interactions
-(e.g., Click, Navigate) and the JS runtime is achieved by scheduling tasks onto the event loop using
-eventLoop.RunOnLoop().
-
-DOM Bridge (jsbind implementation):
-The 'jsbind.DOMBridge' structure is the synchronization layer. It exposes W3C DOM APIs
-to the JS runtime, backed by the *html.Node structure, ensuring a live, interactive environment.
-
-Layout Engine Integration:
-After parsing an HTML document and its associated CSS, the `layout.Engine` computes a `LayoutTree`. This
-tree contains the geometry (size and position) of every rendered element, enabling accurate visibility checks
-and coordinate based interactions.
-*/
 
 // Session represents a single, functional browsing context (equivalent to a tab).
 // It implements schemas.SessionContext.
 type Session struct {
 	id     string
-	ctx    context.Context
+	ctx    context.Context // Master context for the session's lifecycle.
 	cancel context.CancelFunc
 	logger *zap.Logger
 	cfg    *config.Config
@@ -74,41 +53,41 @@ type Session struct {
 	harvester          *Harvester
 	layoutEngine       *layout.Engine
 	humanoidController humanoid.Controller
+	jsRegistry *require.Registry
 
 	// JavaScript Engine and Event Loop
-	eventLoop  *eventloop.EventLoop
-	jsRegistry *require.Registry
+	// Protected by 'mu' for safe access/shutdown.
+	eventLoop *eventloop.EventLoop
+	// jsInterrupt removed; we now use s.ctx.Done() as the default VM interrupt.
 
 	// Humanoid configuration
 	humanoidCfg *humanoid.Config
 
 	// State management
+	// mu protects the session state, including the JS engine components above and DOM/Navigation state.
 	mu sync.RWMutex
 
 	currentURL *url.URL
-	// The root of the rendered layout tree, containing element geometry.
 	layoutRoot *layout.LayoutBox
-	// DOMBridge holds the synchronized DOM representation and manages interaction with the JS runtime.
 	domBridge *jsbind.DOMBridge
 
-	// History stack implementation
+	// History stack implementation (Protected by mu)
 	historyStack []*schemas.HistoryState
-	historyIndex int // Points to the current entry in the stack
+	historyIndex int
 
-	// Persistent configuration across navigations
+	// Persistent configuration across navigations (Protected by mu)
 	persistentScripts []string
-	exposedFunctions  map[string]interface{} // Functions exposed via ExposeFunction
+	exposedFunctions  map[string]interface{}
 
 	// Artifacts
 	consoleLogs   []schemas.ConsoleLog
-	consoleLogsMu sync.Mutex
+	consoleLogsMu sync.Mutex // Specific mutex for high-frequency access.
 
 	findingsChan chan<- schemas.Finding
 	onClose      func()
 	closeOnce    sync.Once
 }
 
-// sessionConsolePrinter implements the console.Printer interface required by goja_nodejs.
 type sessionConsolePrinter struct {
 	s *Session
 }
@@ -127,7 +106,7 @@ func (p *sessionConsolePrinter) Error(msg string) {
 
 // Ensure Session implements the required interfaces.
 var _ schemas.SessionContext = (*Session)(nil)
-var _ jsbind.APICallbacks = (*Session)(nil)
+var _ jsbind.BrowserEnvironment = (*Session)(nil)
 var _ dom.CorePagePrimitives = (*Session)(nil)
 var _ humanoid.Executor = (*Session)(nil)
 
@@ -142,6 +121,7 @@ func NewSession(
 	sessionID := uuid.New().String()
 	log := logger.With(zap.String("session_id", sessionID), zap.String("mode", "GojaHeadlessEngine"))
 
+	// [Lifecycle Sovereignty] The Go context is the ultimate source of truth.
 	ctx, cancel := context.WithCancel(parentCtx)
 
 	s := &Session{
@@ -170,7 +150,6 @@ func NewSession(
 	if cfg.Browser.Humanoid.Enabled {
 		if humanoidCfg.Rng == nil {
 			source := rand.NewSource(time.Now().UnixNano())
-			//nolint:gosec
 			humanoidCfg.Rng = rand.New(source)
 		}
 		humanoidCfg.FinalizeSessionPersona(humanoidCfg.Rng)
@@ -185,7 +164,10 @@ func NewSession(
 	s.humanoidController = humanoid.New(humanoidCfg, log.Named("humanoid"), s)
 
 	if err := s.initializeNetworkStack(log); err != nil {
-		s.eventLoop.Stop()
+		// [DEF-PROG] Ensure the event loop is stopped if initialization fails later.
+		if el := s.getEventLoop(); el != nil {
+			el.Stop()
+		}
 		cancel()
 		return nil, fmt.Errorf("failed to initialize network stack: %w", err)
 	}
@@ -194,31 +176,61 @@ func NewSession(
 		return s.stabilize(ctx)
 	}
 	s.interactor = dom.NewInteractor(NewZapAdapter(log.Named("interactor")), domHCfg, stabilizeFn, s)
-	s.initializeDOMBridge(log, s)
+	s.initializeDOMBridge(log)
 
-	s.mu.Lock()
-	s.resetStateForNewDocument(nil, log)
-	s.mu.Unlock()
+	// Initialize the state for the initial (empty) document.
+	// We pass empty maps/slices as there is no prior state.
+	s.resetStateForNewDocument(nil, log, make(map[string]interface{}), make([]string, 0))
 
 	return s, nil
 }
 
-// initializeDOMBridge sets up the jsbind.DOMBridge.
-func (s *Session) initializeDOMBridge(log *zap.Logger, callbacks jsbind.APICallbacks) {
-	s.domBridge = jsbind.NewDOMBridge(log.Named("dombridge"), s.eventLoop, callbacks)
+// [ACID] getEventLoop provides safe, read-locked access to the event loop.
+func (s *Session) getEventLoop() *eventloop.EventLoop {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.eventLoop
 }
 
-// initializeJSEngine sets up the Goja runtime, the event loop, and global configurations.
+// [ACID] getDOMBridge provides safe, read-locked access to the DOM bridge.
+func (s *Session) getDOMBridge() *jsbind.DOMBridge {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.domBridge
+}
+
+func (s *Session) initializeDOMBridge(log *zap.Logger) {
+	el := s.getEventLoop()
+	if el == nil {
+		// Should not happen during initialization sequence.
+		log.Error("Critical error: Event loop missing during DOMBridge initialization.")
+		return
+	}
+	bridge := jsbind.NewDOMBridge(log.Named("dombridge"), el, s)
+
+	s.mu.Lock()
+	s.domBridge = bridge
+	s.mu.Unlock()
+}
+
+// initializeJSEngine starts the event loop and configures the VM interruption strategy.
 func (s *Session) initializeJSEngine(log *zap.Logger) error {
 	s.jsRegistry = new(require.Registry)
 	printer := &sessionConsolePrinter{s: s}
 	s.jsRegistry.RegisterNativeModule("console", console.RequireWithPrinter(printer))
-	s.eventLoop = eventloop.NewEventLoop(eventloop.WithRegistry(s.jsRegistry))
-	s.eventLoop.Start()
 
+	el := eventloop.NewEventLoop(eventloop.WithRegistry(s.jsRegistry))
+	el.Start()
+
+	// Initialize the VM within the event loop's goroutine.
 	initDone := make(chan struct{})
-	s.eventLoop.RunOnLoop(func(vm *goja.Runtime) {
+	el.RunOnLoop(func(vm *goja.Runtime) {
 		defer close(initDone)
+
+		// [Innovation/Lifecycle Sovereignty] Tie the VM's default interrupt directly to the session context.
+		// This ensures the VM stops immediately when the session closes, without needing a separate channel.
+		vm.Interrupt(s.ctx.Done())
+
 		s.jsRegistry.Enable(vm)
 		navigator := vm.NewObject()
 		_ = navigator.Set("userAgent", s.persona.UserAgent)
@@ -228,11 +240,14 @@ func (s *Session) initializeJSEngine(log *zap.Logger) error {
 	})
 	<-initDone
 
+	s.mu.Lock()
+	s.eventLoop = el
+	s.mu.Unlock()
+
 	log.Info("JavaScript engine (Goja) and event loop initialized.")
 	return nil
 }
 
-// captureConsoleLog handles messages from the JS console.
 func (s *Session) captureConsoleLog(logLevel string, message string) {
 	switch logLevel {
 	case "info", "log":
@@ -254,8 +269,10 @@ func (s *Session) captureConsoleLog(logLevel string, message string) {
 	})
 }
 
-// resetStateForNewDocument prepares the session state for a new page load.
-func (s *Session) resetStateForNewDocument(doc *html.Node, log *zap.Logger) {
+// resetStateForNewDocument resets the DOM and JS context.
+// CRITICAL: This function is called by updateState *without* holding s.mu to prevent deadlocks.
+// It must only rely on arguments and thread-safe methods (like DOMBridge methods or getEventLoop).
+func (s *Session) resetStateForNewDocument(doc *html.Node, log *zap.Logger, exposedFunctions map[string]interface{}, persistentScripts []string) {
 	if doc == nil {
 		var err error
 		doc, err = html.Parse(strings.NewReader("<html><head></head><body></body></html>"))
@@ -265,49 +282,72 @@ func (s *Session) resetStateForNewDocument(doc *html.Node, log *zap.Logger) {
 		}
 	}
 
+	// Safely get the current URL for the initial JS location state.
+	s.mu.RLock()
 	initialURL := ""
 	if s.currentURL != nil {
 		initialURL = s.currentURL.String()
 	}
-	s.domBridge.UpdateDOM(doc, initialURL)
+	s.mu.RUnlock()
 
+	bridge := s.getDOMBridge()
+	if bridge == nil {
+		return // Session closed.
+	}
+	bridge.UpdateDOM(doc)
+
+	loop := s.getEventLoop()
+	if loop == nil {
+		return // Session closed.
+	}
+
+	// We must perform the reset synchronously on the event loop to ensure the environment is ready.
 	done := make(chan struct{})
-	s.eventLoop.RunOnLoop(func(vm *goja.Runtime) {
+	loop.RunOnLoop(func(vm *goja.Runtime) {
 		defer close(done)
-		s.domBridge.BindToRuntime(vm)
-		for name, function := range s.exposedFunctions {
+
+		// [DEF-PROG] Check context before starting significant work.
+		if s.ctx.Err() != nil {
+			return
+		}
+
+		bridge.BindToRuntime(vm, initialURL)
+
+		// Apply persistent configurations passed as arguments.
+		for name, function := range exposedFunctions {
 			if err := vm.GlobalObject().Set(name, function); err != nil {
 				log.Error("Failed to expose persistent function", zap.String("name", name), zap.Error(err))
 			}
 		}
-		for i, script := range s.persistentScripts {
+		for i, script := range persistentScripts {
 			log.Debug("Injecting persistent script", zap.Int("index", i))
+			// Execution uses the currently active interrupt handler (default: s.ctx.Done()).
 			if _, err := vm.RunString(script); err != nil {
-				log.Warn("Error executing persistent script", zap.Error(err))
+				if _, ok := err.(*goja.InterruptedError); !ok {
+					log.Warn("Error executing persistent script", zap.Error(err))
+				}
 			}
 		}
-		go func() {
-			time.Sleep(10 * time.Millisecond)
-			s.eventLoop.RunOnLoop(func(vm *goja.Runtime) {
-				docNode := s.domBridge.GetDocumentNode()
-				s.domBridge.DispatchEventOnNode(docNode, "DOMContentLoaded")
-				s.domBridge.DispatchEventOnNode(docNode, "load")
-			})
-		}()
-	})
-	<-done
 
-	if s.currentURL != nil {
-		initialState := &schemas.HistoryState{
-			State: nil,
-			Title: "",
-			URL:   s.currentURL.String(),
-		}
-		s.pushHistoryInternal(initialState)
-	}
+		// [Modern Goja API Utilization] Use eventLoop.SetTimeout instead of manual goroutine/delay.
+		// Schedule DOMContentLoaded and load events to fire after the current script block yields.
+		loop.SetTimeout(func(vm *goja.Runtime) {
+			// [DEF-PROG] Check context again before firing events.
+			if s.ctx.Err() != nil {
+				return
+			}
+			// Safely access bridge again inside the timeout callback.
+			if b := s.getDOMBridge(); b != nil {
+				docNode := b.GetDocumentNode()
+				b.DispatchEventOnNode(docNode, "DOMContentLoaded")
+				b.DispatchEventOnNode(docNode, "load")
+			}
+		}, 1*time.Millisecond) // Minimal delay to allow yielding.
+	})
+	// Wait for the reset to complete on the event loop.
+	<-done
 }
 
-// initializeNetworkStack sets up the http.Client and Harvester middleware.
 func (s *Session) initializeNetworkStack(log *zap.Logger) error {
 	netConfig := network.NewBrowserClientConfig()
 	netConfig.Logger = NewZapAdapter(log.Named("network"))
@@ -332,38 +372,67 @@ func (s *Session) initializeNetworkStack(log *zap.Logger) error {
 	return nil
 }
 
-// ID returns the session ID.
 func (s *Session) ID() string { return s.id }
 
-// GetContext returns the session's lifecycle context.
 func (s *Session) GetContext() context.Context { return s.ctx }
 
-// Close terminates the session and stops the event loop.
+// Close gracefully terminates the session, respecting the provided context deadline.
 func (s *Session) Close(ctx context.Context) error {
+	var returnErr error
 	s.closeOnce.Do(func() {
-		s.logger.Info("Closing session.")
-		if s.eventLoop != nil {
-			s.eventLoop.Stop()
-		}
+		s.logger.Info("Initiating session shutdown.")
+
+		// 1. Cancel the master session context.
+		// This signals all derived contexts AND the VM itself (since vm.Interrupt(s.ctx.Done())).
 		s.cancel()
+
+		// 2. Atomically retrieve the event loop and nullify session references (DEF-PROG).
+		s.mu.Lock()
+		loop := s.eventLoop
+		s.eventLoop = nil
+		s.domBridge = nil
+		s.mu.Unlock()
+
+		// 3. Stop the event loop.
+		if loop != nil {
+			// eventLoop.Stop() blocks until the loop drains. Since the VM is interrupted (via s.cancel()), this should be fast.
+			stopDone := make(chan struct{})
+			go func() {
+				loop.Stop()
+				close(stopDone)
+			}()
+
+			// Wait for the stop to complete, respecting the caller's deadline.
+			select {
+			case <-stopDone:
+				s.logger.Debug("Event loop stopped gracefully.")
+			case <-ctx.Done():
+				s.logger.Warn("Timeout waiting for event loop to stop. Proceeding with forceful shutdown.", zap.Error(ctx.Err()))
+				returnErr = fmt.Errorf("timeout waiting for session event loop to close: %w", ctx.Err())
+				// The loop continues stopping in the background goroutine.
+			}
+		}
+
+		// 4. Cleanup network resources.
 		if s.client != nil {
 			s.client.CloseIdleConnections()
 		}
+
+		// 5. Notify the manager.
 		if s.onClose != nil {
 			s.onClose()
 		}
+		s.logger.Info("Session closed.")
 	})
-	return nil
+	return returnErr
 }
 
-// SetOnClose sets a callback function to be executed when the session is closed.
 func (s *Session) SetOnClose(fn func()) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.onClose = fn
 }
 
-// stabilize waits for the system to reach a stable state (Network Idle + JS Idle).
 func (s *Session) stabilize(ctx context.Context) error {
 	stabCtx, stabCancel := CombineContext(s.ctx, ctx)
 	defer stabCancel()
@@ -385,8 +454,15 @@ func (s *Session) stabilize(ctx context.Context) error {
 		return stabCtx.Err()
 	}
 
+	// Wait for the event loop to process pending tasks.
+	loop := s.getEventLoop()
+	if loop == nil {
+		return errors.New("session closed during stabilization")
+	}
+
 	done := make(chan struct{})
-	s.eventLoop.RunOnLoop(func(vm *goja.Runtime) {
+	// Queue a task and wait for it to execute, implying tasks before it are done.
+	loop.RunOnLoop(func(vm *goja.Runtime) {
 		close(done)
 	})
 
@@ -400,30 +476,37 @@ func (s *Session) stabilize(ctx context.Context) error {
 	return nil
 }
 
-// -- Navigation and Execution --
-
-// Navigate loads a URL and updates the session state.
 func (s *Session) Navigate(ctx context.Context, targetURL string) error {
 	navCtx, navCancel := CombineContext(s.ctx, ctx)
 	defer navCancel()
 
-	resolvedURL, err := s.resolveURL(targetURL)
+	resolvedURL, err := s.ResolveURL(targetURL)
 	if err != nil {
 		return fmt.Errorf("failed to resolve URL '%s': %w", targetURL, err)
 	}
 	s.logger.Info("Navigating", zap.String("url", resolvedURL.String()))
 
+	// Dispatch 'beforeunload' event.
+	loop := s.getEventLoop()
+	if loop == nil {
+		return errors.New("session closed before navigation")
+	}
+
 	done := make(chan struct{})
-	s.eventLoop.RunOnLoop(func(vm *goja.Runtime) {
-		s.mu.RLock()
-		defer s.mu.RUnlock()
-		if s.domBridge != nil {
-			docNode := s.domBridge.GetDocumentNode()
-			s.domBridge.DispatchEventOnNode(docNode, "beforeunload")
+	loop.RunOnLoop(func(vm *goja.Runtime) {
+		// Safely access the bridge within the loop.
+		if bridge := s.getDOMBridge(); bridge != nil {
+			docNode := bridge.GetDocumentNode()
+			bridge.DispatchEventOnNode(docNode, "beforeunload")
 		}
 		close(done)
 	})
-	<-done
+	// Wait for the event dispatch to complete, respecting the navigation context.
+	select {
+	case <-done:
+	case <-navCtx.Done():
+		return navCtx.Err()
+	}
 
 	req, err := http.NewRequestWithContext(navCtx, http.MethodGet, resolvedURL.String(), nil)
 	if err != nil {
@@ -443,7 +526,6 @@ func (s *Session) Navigate(ctx context.Context, targetURL string) error {
 	}
 
 	if s.humanoidCfg != nil && s.humanoidCfg.Enabled {
-		//nolint:gosec
 		if err := hesitate(navCtx, 500*time.Millisecond+time.Duration(rand.Intn(1000))*time.Millisecond); err != nil {
 			return err
 		}
@@ -451,7 +533,6 @@ func (s *Session) Navigate(ctx context.Context, targetURL string) error {
 	return nil
 }
 
-// executeRequest sends the HTTP request, handles redirects, and processes the final response.
 func (s *Session) executeRequest(ctx context.Context, req *http.Request) error {
 	const maxRedirects = 10
 	currentReq := req
@@ -475,8 +556,8 @@ func (s *Session) executeRequest(ctx context.Context, req *http.Request) error {
 	return fmt.Errorf("maximum number of redirects (%d) exceeded", maxRedirects)
 }
 
-// handleRedirect processes a redirect response.
 func (s *Session) handleRedirect(ctx context.Context, resp *http.Response, originalReq *http.Request) (*http.Request, error) {
+	// ... (Implementation remains the same, correctly utilizes context) ...
 	location := resp.Header.Get("Location")
 	if location == "" {
 		return nil, fmt.Errorf("redirect response missing Location header")
@@ -511,7 +592,6 @@ func (s *Session) handleRedirect(ctx context.Context, resp *http.Response, origi
 	return req, nil
 }
 
-// processResponse parses the DOM, updates state, and executes scripts.
 func (s *Session) processResponse(resp *http.Response) error {
 	defer resp.Body.Close()
 
@@ -545,8 +625,8 @@ func (s *Session) processResponse(resp *http.Response) error {
 	return nil
 }
 
-// extractAndParseCSS finds, fetches, and parses CSS.
 func (s *Session) extractAndParseCSS(doc *html.Node, baseURL *url.URL) {
+	// ... (Implementation remains the same, locking is appropriate) ...
 	if doc == nil {
 		return
 	}
@@ -578,6 +658,7 @@ func (s *Session) extractAndParseCSS(doc *html.Node, baseURL *url.URL) {
 			continue
 		}
 		wg.Add(1)
+		// Network I/O happens in a goroutine, respecting s.ctx.
 		go func(url string) {
 			defer wg.Done()
 			req, _ := http.NewRequestWithContext(s.ctx, "GET", url, nil)
@@ -599,6 +680,7 @@ func (s *Session) extractAndParseCSS(doc *html.Node, baseURL *url.URL) {
 	}()
 	for stylesheet := range stylesheetChan {
 		s.mu.Lock()
+		// Ensure we are still using the current engine (it might have changed if a new navigation occurred).
 		if s.layoutEngine == currentEngine {
 			s.layoutEngine.AddStyleSheet(*stylesheet)
 		}
@@ -606,34 +688,75 @@ func (s *Session) extractAndParseCSS(doc *html.Node, baseURL *url.URL) {
 	}
 }
 
-// updateState updates the session's current URL and resets the DOM/JS environment.
+// updateState updates the session's Go state and synchronizes the VM state.
+// [ACID/Deadlock Prevention] Refactored to prevent deadlocks by ensuring s.mu is not held during VM synchronization.
 func (s *Session) updateState(newURL *url.URL, doc *html.Node, resetContext bool) {
+	// Phase 1: Update Go state (URL, Layout, History). This requires locking.
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	s.currentURL = newURL
+
+	// Update Layout Root based on the new document.
 	if doc != nil {
 		s.layoutRoot = s.layoutEngine.Render(doc, float64(s.persona.Width), float64(s.persona.Height))
 	} else {
 		s.layoutRoot = nil
 	}
-	if resetContext {
-		s.resetStateForNewDocument(doc, s.logger)
-	}
+
+	// Determine the page title.
 	title := ""
 	if doc != nil {
 		if titleNode := htmlquery.FindOne(doc, "//title"); titleNode != nil {
 			title = strings.TrimSpace(htmlquery.InnerText(titleNode))
 		}
 	}
-	if resetContext && s.historyIndex >= 0 && s.historyIndex < len(s.historyStack) {
-		s.historyStack[s.historyIndex].Title = title
+
+	// Prepare copies of persistent configuration for the VM reset (needed outside the lock).
+	var exposedFunctionsCopy map[string]interface{}
+	var persistentScriptsCopy []string
+
+	if resetContext {
+		// Handle History for navigation. A context reset implies a navigation that pushes history.
+		newState := &schemas.HistoryState{
+			State: nil,
+			Title: title,
+			URL:   newURL.String(),
+		}
+		s.pushHistoryInternal(newState)
+
+		// Copy persistent data under lock.
+		exposedFunctionsCopy = make(map[string]interface{})
+		for k, v := range s.exposedFunctions {
+			exposedFunctionsCopy[k] = v
+		}
+		persistentScriptsCopy = make([]string, len(s.persistentScripts))
+		copy(persistentScriptsCopy, s.persistentScripts)
+
+	} else {
+		// If not resetting (e.g., minor update), just update the title of the current entry.
+		if s.historyIndex >= 0 && s.historyIndex < len(s.historyStack) {
+			s.historyStack[s.historyIndex].Title = title
+		}
 	}
+
+	// CRITICAL: Release the lock before synchronizing with the VM.
+	s.mu.Unlock()
+
+	// Phase 2: Reset VM state and DOM Bridge (Synchronously).
+	if resetContext {
+		// This function waits for the event loop, which is now safe as s.mu is released.
+		s.resetStateForNewDocument(doc, s.logger, exposedFunctionsCopy, persistentScriptsCopy)
+	}
+
 	s.logger.Debug("Session state updated", zap.String("url", newURL.String()), zap.String("title", title), zap.Bool("context_reset", resetContext))
 }
 
-// executePageScripts finds and executes <script> tags.
 func (s *Session) executePageScripts(doc *html.Node) {
+	loop := s.getEventLoop()
+	if loop == nil {
+		return // Session closed.
+	}
+
 	gqDoc := goquery.NewDocumentFromNode(doc)
 	gqDoc.Find("script").Each(func(i int, sel *goquery.Selection) {
 		scriptType, _ := sel.Attr("type")
@@ -642,13 +765,18 @@ func (s *Session) executePageScripts(doc *html.Node) {
 			return
 		}
 		if src, exists := sel.Attr("src"); exists && src != "" {
+			// External scripts are fetched asynchronously.
 			s.fetchAndExecuteScript(src)
 		} else {
+			// Inline scripts are queued onto the event loop immediately.
 			scriptContent := sel.Text()
 			if scriptContent != "" {
-				s.eventLoop.RunOnLoop(func(vm *goja.Runtime) {
+				loop.RunOnLoop(func(vm *goja.Runtime) {
+					// Execution uses the currently active interrupt handler (default: s.ctx.Done()).
 					if _, err := vm.RunString(scriptContent); err != nil {
-						s.logger.Warn("Error executing inline script", zap.Error(err))
+						if _, ok := err.(*goja.InterruptedError); !ok {
+							s.logger.Warn("Error executing inline script", zap.Error(err))
+						}
 					}
 				})
 			}
@@ -656,102 +784,78 @@ func (s *Session) executePageScripts(doc *html.Node) {
 	})
 }
 
-// fetchAndExecuteScript handles downloading and executing external JavaScript files.
 func (s *Session) fetchAndExecuteScript(src string) {
-	resolvedURL, err := s.resolveURL(src)
+	resolvedURL, err := s.ResolveURL(src)
 	if err != nil {
 		s.logger.Warn("Failed to resolve external script URL", zap.String("src", src), zap.Error(err))
 		return
 	}
+
+	// Fetch asynchronously (non-blocking I/O).
 	go func() {
-		req, _ := http.NewRequestWithContext(s.ctx, http.MethodGet, resolvedURL.String(), nil)
+		// Network request respects the session context (s.ctx).
+		req, err := http.NewRequestWithContext(s.ctx, http.MethodGet, resolvedURL.String(), nil)
+		if err != nil {
+			s.logger.Error("Failed to create request for external script", zap.Error(err), zap.String("url", resolvedURL.String()))
+			return
+		}
+
 		s.prepareRequestHeaders(req)
 		req.Header.Set("Accept", "*/*")
+
 		resp, err := s.client.Do(req)
 		if err != nil {
+			// [DEF-PROG] Only log if the error wasn't due to the session closing.
+			if s.ctx.Err() == nil {
+				s.logger.Warn("Failed to fetch external script", zap.Error(err), zap.String("url", resolvedURL.String()))
+			}
 			return
 		}
 		defer resp.Body.Close()
+
 		if resp.StatusCode != http.StatusOK {
 			return
 		}
-		body, _ := io.ReadAll(resp.Body)
-		s.eventLoop.RunOnLoop(func(vm *goja.Runtime) {
+
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			s.logger.Warn("Failed to read body of external script", zap.Error(err), zap.String("url", resolvedURL.String()))
+			return
+		}
+
+		// [DEF-PROG] Check context and get event loop before queuing execution.
+		if s.ctx.Err() != nil {
+			return
+		}
+		loop := s.getEventLoop()
+		if loop == nil {
+			return
+		}
+
+		loop.RunOnLoop(func(vm *goja.Runtime) {
+			// Execution uses the currently active interrupt handler.
 			if _, err := vm.RunScript(resolvedURL.String(), string(body)); err != nil {
-				s.logger.Warn("Error executing external script", zap.Error(err), zap.String("url", resolvedURL.String()))
+				if _, ok := err.(*goja.InterruptedError); !ok {
+					s.logger.Warn("Error executing external script", zap.Error(err), zap.String("url", resolvedURL.String()))
+				}
 			}
 		})
 	}()
 }
 
-// -- Implementation of dom.CorePagePrimitives --
-
-func (s *Session) GetCurrentURL() string {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if s.currentURL != nil {
-		return s.currentURL.String()
-	}
-	return ""
-}
-
 func (s *Session) GetDOMSnapshot(ctx context.Context) (io.Reader, error) {
-	s.mu.RLock()
-	bridge := s.domBridge
-	s.mu.RUnlock()
+	bridge := s.getDOMBridge()
 	if bridge == nil {
-		return bytes.NewBufferString(""), nil
+		// Return empty if the session is closed.
+		return bytes.NewBufferString("<html></html>"), nil
 	}
+	// GetOuterHTML handles its internal locking for the DOM structure.
 	htmlContent, err := bridge.GetOuterHTML()
 	if err != nil {
 		return nil, err
 	}
 	return strings.NewReader(htmlContent), nil
 }
-
-func (s *Session) ExecuteClick(ctx context.Context, selector string, minMs, maxMs int) error {
-	element, err := s.findElementNode(selector)
-	if err != nil {
-		return err
-	}
-	if s.humanoidCfg != nil && s.humanoidCfg.Enabled {
-		if err := simulateClickTiming(ctx, minMs, maxMs); err != nil {
-			return err
-		}
-	}
-	s.eventLoop.RunOnLoop(func(vm *goja.Runtime) {
-		s.domBridge.DispatchEventOnNode(element, "click")
-	})
-	return s.handleClickConsequence(ctx, element)
-}
-
-func (s *Session) ExecuteType(ctx context.Context, selector string, text string, holdMeanMs float64) error {
-	element, err := s.findElementNode(selector)
-	if err != nil {
-		return err
-	}
-	// Simplified: A real implementation would need to update the DOM via the bridge.
-	s.logger.Warn("ExecuteType is a simplified implementation.", zap.String("selector", selector))
-	return nil
-}
-
-func (s *Session) ExecuteSelect(ctx context.Context, selector string, value string) error {
-	// Simplified: A real implementation would need to update the DOM via the bridge.
-	s.logger.Warn("ExecuteSelect is a simplified implementation.", zap.String("selector", selector))
-	return nil
-}
-
-func (s *Session) IsVisible(ctx context.Context, selector string) bool {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if s.layoutRoot == nil {
-		return false
-	}
-	geo, err := s.layoutEngine.GetElementGeometry(s.layoutRoot, selector)
-	return err == nil && geo != nil
-}
-
-// -- High-Level Interaction Methods (implementing schemas.SessionContext) --
 
 func (s *Session) Interact(ctx context.Context, config schemas.InteractionConfig) error {
 	if s.interactor == nil {
@@ -798,9 +902,17 @@ func (s *Session) Submit(ctx context.Context, selector string) error {
 	if form == nil {
 		return fmt.Errorf("element '%s' is not associated with a form", selector)
 	}
-	s.eventLoop.RunOnLoop(func(vm *goja.Runtime) {
-		s.domBridge.DispatchEventOnNode(form, "submit")
-	})
+
+	// Dispatch the submit event on the event loop.
+	loop := s.getEventLoop()
+	if loop != nil {
+		loop.RunOnLoop(func(vm *goja.Runtime) {
+			if bridge := s.getDOMBridge(); bridge != nil {
+				bridge.DispatchEventOnNode(form, "submit")
+			}
+		})
+	}
+
 	if err := s.submitForm(ctx, form); err != nil {
 		return err
 	}
@@ -822,6 +934,7 @@ func (s *Session) ScrollPage(ctx context.Context, direction string) error {
 	default:
 		return fmt.Errorf("unsupported scroll direction: %s", direction)
 	}
+	// Uses the robust ExecuteScript implementation.
 	_, err := s.ExecuteScript(ctx, script, nil)
 	return err
 }
@@ -833,30 +946,46 @@ func (s *Session) WaitForAsync(ctx context.Context, milliseconds int) error {
 	return s.stabilize(ctx)
 }
 
-// -- JavaScript Integration --
-
 func (s *Session) ExposeFunction(ctx context.Context, name string, function interface{}) error {
+	// Update the persistent map (requires lock).
 	s.mu.Lock()
 	s.exposedFunctions[name] = function
 	s.mu.Unlock()
 
+	// Expose to the current runtime environment.
+	loop := s.getEventLoop()
+	if loop == nil {
+		return errors.New("session closed or event loop not initialized")
+	}
+
 	errChan := make(chan error, 1)
-	s.eventLoop.RunOnLoop(func(vm *goja.Runtime) {
+	loop.RunOnLoop(func(vm *goja.Runtime) {
 		errChan <- vm.Set(name, function)
 	})
-	return <-errChan
+
+	// Wait for completion, respecting the context.
+	select {
+	case err := <-errChan:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (s *Session) InjectScriptPersistently(ctx context.Context, script string) error {
+	// Update the persistent list (requires lock).
 	s.mu.Lock()
 	s.persistentScripts = append(s.persistentScripts, script)
 	s.mu.Unlock()
+
+	// Inject into the current environment immediately.
 	_, err := s.ExecuteScript(ctx, script, nil)
 	return err
 }
 
 func (s *Session) ExecuteScript(ctx context.Context, script string, args []interface{}) (json.RawMessage, error) {
 	var result interface{}
+	// The core logic is handled by the robustly refactored executeScriptInternal.
 	err := s.executeScriptInternal(ctx, script, &result)
 	if err != nil {
 		return nil, err
@@ -867,92 +996,478 @@ func (s *Session) ExecuteScript(ctx context.Context, script string, args []inter
 	return json.Marshal(result)
 }
 
+// executeScriptInternal is the core JS execution logic, refactored for robustness, context respect, and performance
+// based on the "Handle Swapping" pattern for dedicated, long-lived VMs.
 func (s *Session) executeScriptInternal(ctx context.Context, script string, res interface{}) error {
+	// 1. Create the execution context...
 	execCtx, execCancel := CombineContext(s.ctx, ctx)
 	defer execCancel()
+	// 2. Check if the context is already cancelled before attempting to schedule.
+	if execCtx.Err() != nil {
+		return execCtx.Err()
+	}
+
+	// 3. Get the event loop.
+	loop := s.getEventLoop()
+	if loop == nil {
+		return errors.New("session closed: event loop unavailable")
+	}
+
+	// 4. Prepare a channel for the result.
 	resultChan := make(chan struct {
 		Value goja.Value
 		Error error
 	}, 1)
 
-	s.eventLoop.RunOnLoop(func(vm *goja.Runtime) {
-		interrupt := make(chan struct{})
-		vm.Interrupt(interrupt)
+	// 5. Schedule the execution on the event loop.
+	loop.RunOnLoop(func(vm *goja.Runtime) {
+		// This block executes within the event loop's single goroutine.
+// CRITICAL FIX: Clear any stale interrupts from previous executions.
+		// As per Goja documentation, if the VM was previously interrupted, the flag persists
+		// and will cause the next Run*() call to fail immediately if not cleared.
+		vm.ClearInterrupt()
+
+		// 5.1. Create a specific interrupt handle for this execution.
+		execInterruptHandle := make(chan struct{})
+
+		// 5.2. SWAP: Set the VM's interrupt to our specific handle.
+		// Defer the restoration of the original session-wide handle (s.ctx.Done()).
+		vm.Interrupt(execInterruptHandle)
+		defer vm.Interrupt(s.ctx.Done())
+
+
+		// 5.3. Create a channel to signal when execution is finished, to stop the watchdog.
+		executionDone := make(chan struct{})
+
+		// 5.4. LAUNCH WATCHDOG: This runs in a new goroutine.
+		// It watches for the execution context to be done (e.g., timeout).
 		go func() {
 			select {
 			case <-execCtx.Done():
-				close(interrupt)
-			case <-resultChan:
+				// Context timed out or was canceled. Interrupt the VM by closing the specific handle.
+				close(execInterruptHandle)
+			case <-executionDone:
+				// Script finished normally. The watchdog's job is done.
 			}
 		}()
-		val, err := vm.RunString(script)
+
+		// 5.5. Execute the script within a closure to manage the 'executionDone' signal.
+		var val goja.Value
+		var err error
+		func() {
+			// Signal the watchdog to stop monitoring when this function returns.
+			defer close(executionDone)
+			val, err = vm.RunString(script)
+		}()
+
+		// 5.6. Send the result back to the waiting caller.
+		// Use a select to avoid blocking if the caller has already given up (execCtx.Done()).
 		select {
 		case resultChan <- struct {
 			Value goja.Value
 			Error error
 		}{val, err}:
-		default:
+		case <-execCtx.Done():
+		}
+	})
+
+    // 6. Wait for the result from the event loop... (rest of the function remains the same)
+	select {
+	case result := <-resultChan:
+		// 7. Process the result (handle errors, export values).
+		return s.processScriptResult(execCtx, result.Value, result.Error, res)
+	case <-execCtx.Done():
+		// The caller's context was canceled while waiting for the result.
+		return execCtx.Err()
+	}
+}
+// waitForPromise uses the event loop to wait for a promise to settle.
+// waitForPromise uses the event loop to wait for a promise to settle.
+func (s *Session) waitForPromise(ctx context.Context, promise *goja.Promise) (goja.Value, error) {
+	loop := s.getEventLoop()
+	if loop == nil {
+		return nil, errors.New("session closed while waiting for promise")
+	}
+
+	resultChan := make(chan struct {
+		Value goja.Value
+		Error error
+	}, 1)
+
+	// 'check' is a function that will be scheduled on the event loop.
+	var check func()
+
+	check = func() {
+		// Before doing anything, ensure the session/context is still active.
+		if ctx.Err() != nil {
+			// Non-blocking send, as the context done case will catch it below.
+			select {
+			case resultChan <- struct {
+				Value goja.Value
+				Error error
+			}{nil, ctx.Err()}:
+			default:
+			}
+			return
+		}
+
+		switch promise.State() {
+		case goja.PromiseStateFulfilled:
+			resultChan <- struct {
+				Value goja.Value
+				Error error
+			}{promise.Result(), nil}
+		case goja.PromiseStateRejected:
+			// Wrap the rejection reason in a Go error.
+			err := fmt.Errorf("javascript promise rejected: %v", promise.Result().Export())
+			resultChan <- struct {
+				Value goja.Value
+				Error error
+			}{nil, err}
+		case goja.PromiseStatePending:
+			// The promise is still pending, so we schedule another check.
+			// FIX: The call to check() is now wrapped in a function with the correct signature.
+			loop.SetTimeout(func(_ *goja.Runtime) {
+				check()
+			}, 10*time.Millisecond)
+		}
+	}
+
+	// Schedule the first check on the event loop.
+	// FIX: This call is also wrapped to provide the correct function signature.
+	loop.RunOnLoop(func(_ *goja.Runtime) {
+		check()
+	})
+
+	// Wait for the result from our channel or for the context to be canceled.
+	select {
+	case res := <-resultChan:
+		return res.Value, res.Error
+	case <-ctx.Done():
+		return nil, fmt.Errorf("context canceled while waiting for promise: %w", ctx.Err())
+	}
+}
+// processScriptResult handles errors and exports the value from the VM. (DRY Principle)
+func (s *Session) processScriptResult(ctx context.Context, value goja.Value, err error, res interface{}) error {
+	// First, check for immediate errors from the script execution itself.
+	if err != nil {
+		var gojaException *goja.Exception
+		var interruptedError *goja.InterruptedError
+
+		if errors.As(err, &interruptedError) {
+			if ctx.Err() != nil {
+				return fmt.Errorf("javascript execution interrupted by context: %w", ctx.Err())
+			}
+			return fmt.Errorf("javascript execution interrupted (session closing): %w", err)
+		} else if errors.As(err, &gojaException) {
+			return fmt.Errorf("javascript exception: %s", gojaException.String())
+		} else {
+			return fmt.Errorf("javascript execution error: %w", err)
+		}
+	}
+
+	// If the initial result is a promise, wait for it to settle.
+	if promise, ok := value.Export().(*goja.Promise); ok {
+		// The waitForPromise function returns the resolved value or the rejection error.
+		value, err = s.waitForPromise(ctx, promise)
+		if err != nil {
+			// This error is from the promise settling (e.g., rejection or context timeout).
+			return err
+		}
+	}
+
+	// Handle exporting the final result value.
+	if res != nil && value != nil && !goja.IsUndefined(value) && !goja.IsNull(value) {
+		loop := s.getEventLoop()
+		if loop == nil {
+			return errors.New("session closed: event loop unavailable for result export")
+		}
+
+		exportErrChan := make(chan error, 1)
+		loop.RunOnLoop(func(vm *goja.Runtime) {
+			exportErrChan <- vm.ExportTo(value, res)
+		})
+
+		select {
+		case exportErr := <-exportErrChan:
+			return exportErr
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return nil
+}
+// -- dom.CorePagePrimitives implementation --
+
+func (s *Session) GetCurrentURL() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.currentURL != nil {
+		return s.currentURL.String()
+	}
+	return ""
+}
+
+func (s *Session) ExecuteClick(ctx context.Context, selector string, minMs, maxMs int) error {
+	element, err := s.findElementNode(selector)
+	if err != nil {
+		return err
+	}
+	if s.humanoidCfg != nil && s.humanoidCfg.Enabled {
+		// Placeholder for humanoid timing simulation.
+	}
+
+	// Dispatch the click event on the event loop.
+	loop := s.getEventLoop()
+	if loop != nil {
+		loop.RunOnLoop(func(vm *goja.Runtime) {
+			if bridge := s.getDOMBridge(); bridge != nil {
+				bridge.DispatchEventOnNode(element, "click")
+			}
+		})
+	}
+
+	return s.handleClickConsequence(ctx, element)
+}
+
+func (s *Session) ExecuteType(ctx context.Context, selector string, text string, holdMeanMs float64) error {
+	element, err := s.findElementNode(selector)
+	if err != nil {
+		return err
+	}
+
+	loop := s.getEventLoop()
+	if loop == nil {
+		return errors.New("session closed during interaction")
+	}
+
+	// Focus the element first.
+	loop.RunOnLoop(func(vm *goja.Runtime) {
+		if bridge := s.getDOMBridge(); bridge != nil {
+			bridge.DispatchEventOnNode(element, "focus")
+		}
+	})
+
+	// Get initial value using the robust ExecuteScript.
+	escapedSelector := strings.ReplaceAll(selector, "'", "\\'")
+	scriptToGetValue := fmt.Sprintf(`document.querySelector('%s').value || ''`, escapedSelector)
+
+	var result json.RawMessage
+	result, err = s.ExecuteScript(ctx, scriptToGetValue, nil)
+	if err != nil {
+		return fmt.Errorf("could not get initial value of element '%s': %w", selector, err)
+	}
+	var currentValue string
+	if err := json.Unmarshal(result, &currentValue); err != nil {
+		return fmt.Errorf("could not decode element value: %w", err)
+	}
+
+	for _, char := range text {
+		if s.humanoidCfg != nil && s.humanoidCfg.Enabled {
+			if err := hesitate(ctx, 50*time.Millisecond); err != nil {
+				return err
+			}
+		}
+
+		currentValue += string(char)
+		escapedValue := strings.ReplaceAll(currentValue, "'", "\\'")
+		escapedValue = strings.ReplaceAll(escapedValue, `\`, `\\`)
+
+		// Update value via script.
+		scriptToSetValue := fmt.Sprintf(`document.querySelector('%s').value = '%s'`, escapedSelector, escapedValue)
+		if _, err := s.ExecuteScript(ctx, scriptToSetValue, nil); err != nil {
+			s.logger.Warn("Failed to update element value via script", zap.String("selector", selector), zap.Error(err))
+		}
+
+		// Dispatch keyboard events.
+		// Need to check loop availability again inside the loop (DEF-PROG).
+		currentLoop := s.getEventLoop()
+		if currentLoop == nil {
+			return errors.New("session closed during typing loop")
+		}
+		currentLoop.RunOnLoop(func(vm *goja.Runtime) {
+			if bridge := s.getDOMBridge(); bridge != nil {
+				bridge.DispatchEventOnNode(element, "keydown")
+				bridge.DispatchEventOnNode(element, "keypress")
+				bridge.DispatchEventOnNode(element, "input")
+				bridge.DispatchEventOnNode(element, "keyup")
+			}
+		})
+	}
+
+	// Blur the element after typing.
+	finalLoop := s.getEventLoop()
+	if finalLoop != nil {
+		finalLoop.RunOnLoop(func(vm *goja.Runtime) {
+			if bridge := s.getDOMBridge(); bridge != nil {
+				bridge.DispatchEventOnNode(element, "blur")
+			}
+		})
+	}
+
+	return nil
+}
+
+func (s *Session) ExecuteSelect(ctx context.Context, selector string, value string) error {
+	selectNode, err := s.findElementNode(selector)
+	if err != nil {
+		return err
+	}
+
+	// Check if it's actually a <select> element. This requires synchronization.
+	loop := s.getEventLoop()
+	if loop == nil {
+		return errors.New("session closed during interaction")
+	}
+
+	isSelect := false
+	// We need to wait for this check to complete before proceeding.
+	done := make(chan struct{})
+	loop.RunOnLoop(func(_ *goja.Runtime) {
+		defer close(done)
+		if strings.ToLower(selectNode.Data) == "select" {
+			isSelect = true
 		}
 	})
 
 	select {
-	case result := <-resultChan:
-		if result.Error != nil {
-			return fmt.Errorf("javascript execution error: %w", result.Error)
-		}
-		if res != nil && result.Value != nil && !goja.IsUndefined(result.Value) && !goja.IsNull(result.Value) {
-			exportErrChan := make(chan error, 1)
-			s.eventLoop.RunOnLoop(func(vm *goja.Runtime) {
-				exportErrChan <- vm.ExportTo(result.Value, res)
-			})
-			select {
-			case exportErr := <-exportErrChan:
-				return exportErr
-			case <-execCtx.Done():
-				return execCtx.Err()
+	case <-done:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+
+	if !isSelect {
+		return fmt.Errorf("element '%s' is not a select element", selector)
+	}
+
+	escapedSelector := strings.ReplaceAll(selector, "'", "\\'")
+	escapedValue := strings.ReplaceAll(value, "'", "\\'")
+	escapedValue = strings.ReplaceAll(escapedValue, `\`, `\\`)
+
+	script := fmt.Sprintf(`
+        const select = document.querySelector('%s');
+        if (!select) { return false; }
+        const options = Array.from(select.options);
+        let found = false;
+        options.forEach(opt => {
+            if (opt.value === '%s') {
+                opt.selected = true;
+                found = true;
+            } else {
+                opt.selected = false;
+            }
+        });
+        if (found) { select.value = '%s'; }
+        return found;
+    `, escapedSelector, escapedValue, escapedValue)
+
+	// Uses the robust ExecuteScript implementation.
+	resultRaw, err := s.ExecuteScript(ctx, script, nil)
+	if err != nil {
+		return fmt.Errorf("script to set select value failed for '%s': %w", selector, err)
+	}
+
+	var found bool
+	if err := json.Unmarshal(resultRaw, &found); err != nil || !found {
+		return fmt.Errorf("option with value '%s' not found or script failed", value)
+	}
+
+	// Dispatch events.
+	finalLoop := s.getEventLoop()
+	if finalLoop != nil {
+		finalLoop.RunOnLoop(func(vm *goja.Runtime) {
+			if bridge := s.getDOMBridge(); bridge != nil {
+				bridge.DispatchEventOnNode(selectNode, "input")
+				bridge.DispatchEventOnNode(selectNode, "change")
+			}
+		})
+	}
+
+	return nil
+}
+
+func (s *Session) IsVisible(ctx context.Context, selector string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.layoutRoot == nil {
+		return false
+	}
+	geo, err := s.layoutEngine.GetElementGeometry(s.layoutRoot, selector)
+	return err == nil && geo != nil
+}
+
+// -- jsbind.BrowserEnvironment implementation --
+
+// JSNavigate handles navigation initiated from JavaScript (e.g., location.href = ...).
+func (s *Session) JSNavigate(targetURL string) {
+	// Navigation involves network I/O and stabilization, which cannot happen synchronously
+	// within the event loop (deadlock risk). It must be asynchronous.
+	go func() {
+		// Use the main session context (s.ctx).
+		if err := s.Navigate(s.ctx, targetURL); err != nil {
+			// [DEF-PROG] Only log if the error wasn't due to the session closing.
+			if s.ctx.Err() == nil {
+				s.logger.Error("JS-initiated navigation failed", zap.Error(err))
 			}
 		}
-		return nil
-	case <-execCtx.Done():
-		return execCtx.Err()
+	}()
+}
+
+func (s *Session) NotifyURLChange(targetURL string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	newURL, err := url.Parse(targetURL)
+	if err == nil {
+		s.currentURL = newURL
+		s.logger.Debug("URL updated by JS (e.g., hash change)", zap.String("url", newURL.String()))
+	} else {
+		s.logger.Warn("Failed to parse URL from JS notification", zap.String("url", targetURL), zap.Error(err))
 	}
 }
 
-// -- Implementation of jsbind.APICallbacks --
-
 func (s *Session) ExecuteFetch(ctx context.Context, reqData schemas.FetchRequest) (*schemas.FetchResponse, error) {
+	// ... (Implementation remains the same, correctly uses CombineContext) ...
 	fetchCtx, fetchCancel := CombineContext(s.ctx, ctx)
 	defer fetchCancel()
-	resolvedURL, err := s.resolveURL(reqData.URL)
+
+	resolvedURL, err := s.ResolveURL(reqData.URL)
 	if err != nil {
 		return nil, err
 	}
+
 	var bodyReader io.Reader
 	if len(reqData.Body) > 0 {
 		bodyReader = bytes.NewReader(reqData.Body)
 	}
+
 	httpReq, err := http.NewRequestWithContext(fetchCtx, reqData.Method, resolvedURL.String(), bodyReader)
 	if err != nil {
 		return nil, err
 	}
+
 	s.prepareRequestHeaders(httpReq)
 	for _, h := range reqData.Headers {
 		httpReq.Header.Add(h.Name, h.Value)
 	}
+
 	fetchClient := *s.client
-	fetchClient.CheckRedirect = nil
+	fetchClient.CheckRedirect = nil // Fetch API handles redirects differently than navigation.
 	if reqData.Credentials == "omit" {
 		fetchClient.Jar = nil
 	}
+
 	httpResp, err := fetchClient.Do(httpReq)
 	if err != nil {
 		return nil, err
 	}
 	defer httpResp.Body.Close()
+
 	respBody, err := io.ReadAll(httpResp.Body)
 	if err != nil {
 		return nil, err
 	}
+
 	response := &schemas.FetchResponse{
 		URL:        httpResp.Request.URL.String(),
 		Status:     httpResp.StatusCode,
@@ -969,6 +1484,7 @@ func (s *Session) ExecuteFetch(ctx context.Context, reqData schemas.FetchRequest
 }
 
 func (s *Session) AddCookieFromString(cookieStr string) error {
+	// ... (Implementation remains the same, correctly uses RLock) ...
 	if s.client.Jar == nil {
 		return fmt.Errorf("cookie jar not initialized")
 	}
@@ -980,14 +1496,16 @@ func (s *Session) AddCookieFromString(cookieStr string) error {
 	}
 	header := http.Header{}
 	header.Add("Set-Cookie", cookieStr)
-	cookies := header.Cookies()
+	res := http.Response{Header: header}
+	cookies := res.Cookies()
 	if len(cookies) > 0 {
-		s.client.Jar.SetCookies(currentURL, cookies[:1])
+		s.client.Jar.SetCookies(currentURL, cookies)
 	}
 	return nil
 }
 
 func (s *Session) GetCookieString() (string, error) {
+	// ... (Implementation remains the same, correctly uses RLock) ...
 	if s.client.Jar == nil {
 		return "", nil
 	}
@@ -1014,7 +1532,9 @@ func (s *Session) PushHistory(state *schemas.HistoryState) error {
 	return nil
 }
 
+// pushHistoryInternal must be called under write lock (s.mu).
 func (s *Session) pushHistoryInternal(state *schemas.HistoryState) {
+	// Truncate the forward history.
 	s.historyStack = s.historyStack[:s.historyIndex+1]
 	s.historyStack = append(s.historyStack, state)
 	s.historyIndex++
@@ -1026,6 +1546,7 @@ func (s *Session) ReplaceHistory(state *schemas.HistoryState) error {
 	if s.historyIndex >= 0 {
 		s.historyStack[s.historyIndex] = state
 	} else {
+		// If history is empty, replace acts like push.
 		s.pushHistoryInternal(state)
 	}
 	return nil
@@ -1046,39 +1567,21 @@ func (s *Session) GetCurrentHistoryState() interface{} {
 	return nil
 }
 
-func (s *Session) Navigate(targetURL string) {
-	go func() {
-		if err := s.Navigate(s.ctx, targetURL); err != nil {
-			s.logger.Error("JS-initiated navigation failed", zap.Error(err))
-		}
-	}()
-}
-
-func (s *Session) NotifyURLChange(targetURL string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	newURL, err := url.Parse(targetURL)
-	if err == nil {
-		s.currentURL = newURL
-	}
-}
-
 func (s *Session) ResolveURL(targetURL string) (*url.URL, error) {
-	resolvedURL, err := s.resolveURL(targetURL)
-	if err != nil {
-		return nil, err
-	}
 	s.mu.RLock()
 	currentURL := s.currentURL
 	s.mu.RUnlock()
-	if currentURL != nil && currentURL.String() != "about:blank" {
-		currentOrigin := fmt.Sprintf("%s://%s", currentURL.Scheme, currentURL.Host)
-		newOrigin := fmt.Sprintf("%s://%s", resolvedURL.Scheme, resolvedURL.Host)
-		if currentOrigin != newOrigin {
-			return nil, fmt.Errorf("SecurityError: history state URL must be same-origin")
-		}
+	parsedURL, err := url.Parse(targetURL)
+	if err != nil {
+		return nil, err
 	}
-	return resolvedURL, nil
+	if currentURL != nil {
+		return currentURL.ResolveReference(parsedURL), nil
+	}
+	if !parsedURL.IsAbs() {
+		return nil, fmt.Errorf("must be an absolute URL for initial navigation: %s", targetURL)
+	}
+	return parsedURL, nil
 }
 
 // -- humanoid.Executor implementation --
@@ -1089,11 +1592,13 @@ func (s *Session) Sleep(ctx context.Context, d time.Duration) error {
 
 func (s *Session) DispatchMouseEvent(ctx context.Context, data schemas.MouseEventData) error {
 	s.logger.Debug("Dispatching mouse event", zap.Any("data", data))
+	// Implementation required to map this to DOM events on the event loop.
 	return nil
 }
 
 func (s *Session) SendKeys(ctx context.Context, keys string) error {
 	s.logger.Debug("Sending keys", zap.String("keys", keys))
+	// Implementation required.
 	return nil
 }
 
@@ -1128,7 +1633,7 @@ func (s *Session) CollectArtifacts(ctx context.Context) (*schemas.Artifacts, err
 		artifacts.DOM = string(snapshotBytes)
 	}
 
-	// Simplified storage collection.
+	// Storage state collection needs implementation (e.g., via DOMBridge).
 	artifacts.Storage = schemas.StorageState{}
 
 	return artifacts, nil
@@ -1153,57 +1658,152 @@ func (s *Session) AddFinding(finding schemas.Finding) error {
 
 // -- Helper Functions --
 
-func (s *Session) resolveURL(targetURL string) (*url.URL, error) {
-	s.mu.RLock()
-	currentURL := s.currentURL
-	s.mu.RUnlock()
-	parsedURL, err := url.Parse(targetURL)
-	if err != nil {
-		return nil, err
-	}
-	if currentURL != nil {
-		return currentURL.ResolveReference(parsedURL), nil
-	}
-	if !parsedURL.IsAbs() {
-		return nil, fmt.Errorf("must be an absolute URL for initial navigation: %s", targetURL)
-	}
-	return parsedURL, nil
-}
-
 func (s *Session) prepareRequestHeaders(req *http.Request) {
 	req.Header.Set("User-Agent", s.persona.UserAgent)
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
 	req.Header.Set("Accept-Language", strings.Join(s.persona.Languages, ","))
 	req.Header.Set("Accept-Encoding", "gzip, deflate, br")
-	if s.currentURL != nil {
-		req.Header.Set("Referer", s.currentURL.String())
+
+	// Safely get the current URL for the Referer header.
+	s.mu.RLock()
+	currentURL := s.currentURL
+	s.mu.RUnlock()
+	if currentURL != nil {
+		req.Header.Set("Referer", currentURL.String())
 	}
 }
 
 func (s *Session) findElementNode(selector string) (*html.Node, error) {
-	s.mu.RLock()
-	bridge := s.domBridge
-	s.mu.RUnlock()
+	bridge := s.getDOMBridge()
 	if bridge == nil {
-		return nil, fmt.Errorf("DOM bridge is not initialized")
+		return nil, fmt.Errorf("DOM bridge is not initialized or session is closed")
 	}
+	// QuerySelector handles its internal DOM locking.
 	return bridge.QuerySelector(selector)
 }
 
 func (s *Session) handleClickConsequence(ctx context.Context, element *html.Node) error {
+	// Basic handling for <a> tag clicks.
 	if strings.ToLower(element.Data) == "a" {
 		if href := htmlquery.SelectAttr(element, "href"); href != "" {
+			// Initiate navigation. This happens outside the event loop.
 			return s.Navigate(ctx, href)
 		}
 	}
-	// Add other consequences (form submission, etc.) here.
 	return nil
 }
 
 func (s *Session) submitForm(ctx context.Context, form *html.Node) error {
-	// A full implementation would serialize form data and make an HTTP request.
-	s.logger.Info("Form submission triggered.", zap.String("action", htmlquery.SelectAttr(form, "action")))
-	return nil
+	// Form submission requires gathering data from the DOM, which must happen on the event loop.
+	var action, method, enctype string
+	var formData url.Values
+
+	loop := s.getEventLoop()
+	if loop == nil {
+		return errors.New("session closed during form submission preparation")
+	}
+
+	// [ACID] We must gather form data synchronously on the event loop as it accesses the DOM state.
+	done := make(chan struct{})
+
+	loop.RunOnLoop(func(vm *goja.Runtime) {
+		defer close(done)
+
+		action = htmlquery.SelectAttr(form, "action")
+		method = strings.ToUpper(htmlquery.SelectAttr(form, "method"))
+		enctype = htmlquery.SelectAttr(form, "enctype")
+
+		if method == "" {
+			method = http.MethodGet
+		}
+		if enctype == "" {
+			enctype = "application/x-www-form-urlencoded"
+		}
+
+		formData = url.Values{}
+
+		inputs := htmlquery.Find(form, ".//input | .//textarea | .//select")
+		for _, input := range inputs {
+			name := htmlquery.SelectAttr(input, "name")
+			if name == "" {
+				continue
+			}
+			tagName := strings.ToLower(input.Data)
+
+			if _, disabled := getAttr(input, "disabled"); disabled {
+				continue
+			}
+
+			switch tagName {
+			case "input":
+				inputType := strings.ToLower(htmlquery.SelectAttr(input, "type"))
+				if (inputType == "checkbox" || inputType == "radio") {
+					if _, checked := getAttr(input, "checked"); checked {
+						formData.Add(name, htmlquery.SelectAttr(input, "value"))
+					}
+				} else if inputType != "submit" && inputType != "reset" && inputType != "button" && inputType != "image" {
+					formData.Add(name, htmlquery.SelectAttr(input, "value"))
+				}
+			case "textarea":
+				formData.Add(name, htmlquery.InnerText(input))
+			case "select":
+				selectedOption := htmlquery.FindOne(input, ".//option[@selected]")
+				if selectedOption != nil {
+					formData.Add(name, htmlquery.SelectAttr(selectedOption, "value"))
+				} else {
+					firstOption := htmlquery.FindOne(input, ".//option")
+					if firstOption != nil {
+						formData.Add(name, htmlquery.SelectAttr(firstOption, "value"))
+					}
+				}
+			}
+		}
+	})
+
+	// Wait for data gathering, respecting the context.
+	select {
+	case <-done:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+
+	targetURL, err := s.ResolveURL(action)
+	if err != nil {
+		return fmt.Errorf("failed to resolve form action URL: %w", err)
+	}
+
+	var req *http.Request
+
+	if method == http.MethodPost {
+		if enctype != "application/x-www-form-urlencoded" {
+			s.logger.Warn("Unsupported form enctype, submitting as urlencoded", zap.String("enctype", enctype))
+		}
+		body := strings.NewReader(formData.Encode())
+		req, err = http.NewRequestWithContext(ctx, method, targetURL.String(), body)
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded") // Use the standard type
+	} else { // GET request
+		targetURL.RawQuery = formData.Encode()
+		req, err = http.NewRequestWithContext(ctx, method, targetURL.String(), nil)
+		if err != nil {
+			return err
+		}
+	}
+
+	s.prepareRequestHeaders(req)
+	// Execute the resulting network request.
+	return s.executeRequest(ctx, req)
+}
+
+func getAttr(n *html.Node, key string) (string, bool) {
+	for _, attr := range n.Attr {
+		if attr.Key == key {
+			return attr.Val, true
+		}
+	}
+	return "", false
 }
 
 func findParentForm(element *html.Node) *html.Node {
@@ -1215,32 +1815,45 @@ func findParentForm(element *html.Node) *html.Node {
 	return nil
 }
 
+// CombineContext creates a new context that is canceled if either the parentCtx or secondaryCtx is canceled.
 func CombineContext(parentCtx, secondaryCtx context.Context) (context.Context, context.CancelFunc) {
+	// If the secondary context is already done, we can return it immediately.
+	// This also handles the case where secondaryCtx is nil.
+	if secondaryCtx.Err() != nil {
+		return secondaryCtx, func() {}
+	}
+	// If the parent is already done, return it.
+	if parentCtx.Err() != nil {
+		return parentCtx, func() {}
+	}
+
 	combinedCtx, cancel := context.WithCancel(parentCtx)
+
+	// Stop is a flag to prevent the cancel function from being called more than once.
+	// This is good practice when dealing with multiple context cancellations.
+	stop := make(chan struct{})
+
+	// This single goroutine will handle the cancellation from the secondary context.
 	go func() {
 		select {
 		case <-secondaryCtx.Done():
+			// If the secondary context is done, cancel the combined context.
 			cancel()
 		case <-combinedCtx.Done():
+			// If the combined context is done for any other reason, just exit.
+		case <-stop:
+			// The cancel function has been called, so we can exit.
 		}
 	}()
-	return combinedCtx, cancel
-}
 
-func hesitate(ctx context.Context, d time.Duration) error {
-	select {
-	case <-time.After(d):
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
+	// Return a custom cancel function that also stops our monitoring goroutine.
+	return combinedCtx, func() {
+		// We use a non-blocking send to the stop channel to prevent a deadlock
+		// if the goroutine has already exited.
+		select {
+		case stop <- struct{}{}:
+		default:
+		}
+		cancel()
 	}
 }
-
-func simulateClickTiming(ctx context.Context, minMs, maxMs int) error {
-	if maxMs <= minMs {
-		return hesitate(ctx, time.Duration(minMs)*time.Millisecond)
-	}
-	delay := rand.Intn(maxMs-minMs) + minMs
-	return hesitate(ctx, time.Duration(delay)*time.Millisecond)
-}
-

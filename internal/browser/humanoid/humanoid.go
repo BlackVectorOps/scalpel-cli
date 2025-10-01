@@ -67,6 +67,27 @@ func New(config Config, logger *zap.Logger, executor Executor) *Humanoid {
 	return h
 }
 
+// NewTestHumanoid creates a Humanoid instance with deterministic dependencies for testing.
+func NewTestHumanoid(executor Executor, seed int64) *Humanoid {
+	config := DefaultConfig()
+
+	// Pass the agnostic executor to the updated New function.
+	h := New(config, zap.NewNop(), executor)
+
+	rng := rand.New(rand.NewSource(seed))
+	h.rng = rng
+	h.noiseX = perlin.NewPerlin(2, 2, 3, seed)
+	h.noiseY = perlin.NewPerlin(2, 2, 3, seed+1)
+
+	// Set specific dynamic config values for predictable test behavior.
+	h.dynamicConfig.FittsA = 100.0
+	h.dynamicConfig.FittsB = 150.0
+	h.dynamicConfig.PerlinAmplitude = 2.0
+	h.dynamicConfig.GaussianStrength = 0.5
+
+	return h
+}
+
 // ensureVisible is a private helper that checks options and performs scrolling if needed.
 // It's the core of the new "implicit scrolling" design.
 func (h *Humanoid) ensureVisible(ctx context.Context, selector string, opts *InteractionOptions) error {
@@ -78,3 +99,4 @@ func (h *Humanoid) ensureVisible(ctx context.Context, selector string, opts *Int
 	}
 	return nil
 }
+

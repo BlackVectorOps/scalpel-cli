@@ -5,15 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"math"
-	"math/rand"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/aquilax/go-perlin"
 	"github.com/stretchr/testify/assert"
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
-	"go.uber.org/zap"
 )
 
 // =============================================================================
@@ -136,26 +133,6 @@ func (m *mockExecutor) ExecuteScript(ctx context.Context, script string, args []
 	return json.Marshal(map[string]interface{}{})
 }
 
-// newTestHumanoid creates a Humanoid instance with deterministic dependencies for testing.
-func newTestHumanoid(executor Executor) *Humanoid {
-	const seed = 12345
-	config := DefaultConfig()
-
-	// Pass the agnostic executor to the updated New function.
-	h := New(config, zap.NewNop(), executor)
-
-	rng := rand.New(rand.NewSource(seed))
-	h.rng = rng
-	h.noiseX = perlin.NewPerlin(2, 2, 3, seed)
-	h.noiseY = perlin.NewPerlin(2, 2, 3, seed+1)
-	h.dynamicConfig.FittsA = 100.0
-	h.dynamicConfig.FittsB = 150.0
-	h.dynamicConfig.PerlinAmplitude = 2.0
-	h.dynamicConfig.GaussianStrength = 0.5
-
-	return h
-}
-
 // floatAlmostEqual checks if two float64 values are within a tolerance.
 func floatAlmostEqual(a, b, tolerance float64) bool {
 	return math.Abs(a-b) <= tolerance
@@ -190,7 +167,7 @@ func TestComputeEaseInOutCubic(t *testing.T) {
 func TestSimulateTrajectory_Success(t *testing.T) {
 	// 1. Setup
 	mock := newMockExecutor()
-	h := newTestHumanoid(mock)
+	h := NewTestHumanoid(mock, 12345)
 	h.currentPos = Vector2D{X: 100, Y: 100}
 
 	start := Vector2D{X: 100, Y: 100}
@@ -224,7 +201,7 @@ func TestSimulateTrajectory_Success(t *testing.T) {
 func TestSimulateTrajectory_Drag(t *testing.T) {
 	// 1. Setup
 	mock := newMockExecutor()
-	h := newTestHumanoid(mock)
+	h := NewTestHumanoid(mock, 12345)
 	start := Vector2D{X: 0, Y: 0}
 	end := Vector2D{X: 200, Y: 200}
 
@@ -245,7 +222,7 @@ func TestSimulateTrajectory_Drag(t *testing.T) {
 func TestSimulateTrajectory_ContextCancel(t *testing.T) {
 	// 1. Setup
 	mock := newMockExecutor()
-	h := newTestHumanoid(mock)
+	h := NewTestHumanoid(mock, 12345)
 
 	// Configure the mock to cancel the context after 10 mouse move events.
 	ctx, cancel := context.WithCancel(context.Background())
@@ -262,3 +239,4 @@ func TestSimulateTrajectory_ContextCancel(t *testing.T) {
 	assert.ErrorIs(t, err, context.Canceled, "error should be context.Canceled")
 	assert.Len(t, mock.dispatchedEvents, 10, "exactly 10 events should have been dispatched before cancellation")
 }
+
