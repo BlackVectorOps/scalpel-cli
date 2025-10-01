@@ -386,7 +386,7 @@ const (
 	CookieSameSiteNone   CookieSameSite = "None"
 )
 
-// Cookie represents a browser cookie, matching the structure used internally by Playwright and CDP.
+// Cookie represents a browser cookie.
 type Cookie struct {
 	Name     string         `json:"name"`
 	Value    string         `json:"value"`
@@ -403,7 +403,6 @@ type Cookie struct {
 
 // StorageState captures the state of browser storage at a point in time.
 type StorageState struct {
-	// Updated to use the local Cookie definition.
 	Cookies        []*Cookie         `json:"cookies"`
 	LocalStorage   map[string]string `json:"local_storage"`
 	SessionStorage map[string]string `json:"session_storage"`
@@ -411,13 +410,38 @@ type StorageState struct {
 
 // Artifacts is a collection of all data gathered during a browser interaction.
 type Artifacts struct {
-	HAR         *HAR         `json:"har"`
-	DOM         string       `json:"dom"`
-	ConsoleLogs []ConsoleLog `json:"console_logs"`
-	Storage     StorageState `json:"storage"`
+	HAR         *json.RawMessage `json:"har"`
+	DOM         string           `json:"dom"`
+	ConsoleLogs []ConsoleLog     `json:"console_logs"`
+	Storage     StorageState     `json:"storage"`
 }
 
-// -- Humanoid Interaction Schemas (Moved from internal package) --
+// HistoryState represents an entry in the browser's session history.
+type HistoryState struct {
+	State interface{} `json:"state"`
+	Title string      `json:"title"`
+	URL   string      `json:"url"`
+}
+
+// FetchRequest represents the data for a fetch request initiated from JS.
+type FetchRequest struct {
+	URL         string   `json:"url"`
+	Method      string   `json:"method"`
+	Headers     []NVPair `json:"headers"`
+	Body        []byte   `json:"body"`
+	Credentials string   `json:"credentials"`
+}
+
+// FetchResponse represents the data from a fetch response.
+type FetchResponse struct {
+	URL        string   `json:"url"`
+	Status     int      `json:"status"`
+	StatusText string   `json:"statusText"`
+	Headers    []NVPair `json:"headers"`
+	Body       []byte   `json:"body"`
+}
+
+// -- Humanoid Interaction Schemas --
 
 // ElementGeometry defines the bounding box and vertices of a DOM element.
 type ElementGeometry struct {
@@ -436,7 +460,7 @@ const (
 	MouseWheel   MouseEventType = "mouseWheel"
 )
 
-// MouseButton defines the mouse button being pressed.
+// Defines the mouse button being pressed.
 type MouseButton string
 
 const (
@@ -446,7 +470,7 @@ const (
 	ButtonMiddle MouseButton = "middle"
 )
 
-// MouseEventData encapsulates all data for a mouse event.
+// This type encapsulates all data for a mouse event.
 type MouseEventData struct {
 	Type       MouseEventType `json:"type"`
 	X          float64        `json:"x"`
@@ -719,4 +743,3 @@ type OASTInteraction struct {
 	InteractionTime time.Time
 	RawRequest      string
 }
-

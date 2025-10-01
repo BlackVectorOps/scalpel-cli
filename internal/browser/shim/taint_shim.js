@@ -49,7 +49,7 @@
     // -- Reporting Mechanism --
     /**
      * Bridge back to Go. Must be defined in Go code using ExposeFunction("__scalpel_sink_event").
-     * The Go implementation (using chromedp.Expose or Playwright.ExposeFunction) handles the serialization automatically.
+     * The Go implementation handles the serialization automatically.
      */
     function reportSink(type, value, detail) {
         if (typeof window.__scalpel_sink_event === 'function') {

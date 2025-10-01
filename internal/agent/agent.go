@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -19,18 +20,6 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
 	"github.com/xkilldash9x/scalpel-cli/internal/knowledgegraph"
 	"github.com/xkilldash9x/scalpel-cli/internal/llmclient"
-)
-
-// -- UPGRADE NOTE: Defined Constants --
-// Adding some structured error codes and new action types here for clarity.
-// This helps make the observations sent back to the Mind more consistent.
-const (
-	ErrCodeNotImplemented            = "NOT_IMPLEMENTED"
-	ErrCodeExecutionFailure          = "EXECUTION_FAILURE"
-	ErrCodeHumanoidInteractionFailed = "HUMANOID_INTERACTION_FAILED"
-
-	// This assumes ActionHumanoidDragAndDrop is a new action type.
-	ActionHumanoidDragAndDrop ActionType = "HUMANOID_DRAG_AND_DROP"
 )
 
 // Agent orchestrates the components of an autonomous security mission.
@@ -67,7 +56,14 @@ func NewGraphStoreFromConfig(
 		if pool == nil {
 			return nil, fmt.Errorf("PostgreSQL store requires a valid database connection pool")
 		}
-		return knowledgegraph.NewPostgresKG(ctx, pool, logger)
+		// NOTE: This line causes a build error that cannot be fixed without more context.
+		// The compiler expects knowledgegraph.NewPostgresKG to be called with a `*sql.DB` argument,
+		// but we only have a `*pgxpool.Pool`. This suggests a significant refactor happened in the
+		// knowledgegraph package that needs to be reconciled here.
+		// Temporarily casting to nil to allow other files to compile.
+		// THIS MUST BE FIXED by providing the correct DB connection type.
+		var db *sql.DB
+		return knowledgegraph.NewPostgresKG(db)
 	case "in-memory":
 		return knowledgegraph.NewInMemoryKG(logger)
 	default:
@@ -286,7 +282,7 @@ func (a *Agent) executeHumanoidAction(ctx context.Context, action Action) *Execu
 			break
 		}
 		// Use Type for realistic typing simulation.
-		err = a.humanoid.Type(ctx, action.Selector, action.Value)
+		err = a.humanoid.Type(ctx, action.Selector, action.Value, nil)
 
 	case ActionHumanoidDragAndDrop:
 		startSelector := action.Selector
@@ -297,7 +293,7 @@ func (a *Agent) executeHumanoidAction(ctx context.Context, action Action) *Execu
 			err = fmt.Errorf("ActionHumanoidDragAndDrop requires 'selector' (start) and 'metadata.target_selector' (end, string)")
 			break
 		}
-		err = a.humanoid.DragAndDrop(ctx, startSelector, targetSelector)
+		err = a.humanoid.DragAndDrop(ctx, startSelector, targetSelector, nil)
 
 	default:
 		// This should ideally not happen if actionLoop is configured correctly.
@@ -461,23 +457,3 @@ func (a *Agent) finish(result MissionResult) {
 	a.resultChan <- result
 }
 
-// A placeholder for a utility function that would parse
-// common browser automation errors into structured codes.
-func ParseBrowserError(err error, action Action) (string, map[string]interface{}) {
-	// In a real implementation, this would inspect the error string for patterns like:
-	// "no node found for selector", "waiting for selector timed out", etc.
-	errStr := err.Error()
-	details := map[string]interface{}{"message": errStr}
-	if action.Selector != "" {
-		details["selector"] = action.Selector
-	}
-
-	if strings.Contains(errStr, "no node found") || strings.Contains(errStr, "could not find element") {
-		return "ELEMENT_NOT_FOUND", details
-	}
-	if strings.Contains(errStr, "timed out") {
-		return "TIMEOUT_ERROR", details
-	}
-
-	return ErrCodeExecutionFailure, details
-}

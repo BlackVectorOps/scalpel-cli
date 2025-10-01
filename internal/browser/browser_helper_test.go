@@ -16,7 +16,6 @@ import (
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/browser/humanoid"
-	// FIX: Import the session package to resolve the undefined Session type.
 	"github.com/xkilldash9x/scalpel-cli/internal/browser/session"
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
 )
@@ -45,18 +44,11 @@ func TestMain(m *testing.M) {
 	// Use sync.Once to ensure initialization happens only once.
 	suiteManagerOnce.Do(func() {
 		suiteLogger.Info("Initializing global browser test suite manager...")
-		// NewManager handles installation and launch internally via deferred initialization.
-		suiteManager, suiteManagerErr = NewManager(ctx, suiteConfig, suiteLogger)
+		// The config is now passed per-session in NewAnalysisContext.
+		suiteManager, suiteManagerErr = NewManager(ctx, suiteLogger)
 		if suiteManagerErr != nil {
 			suiteLogger.Error("Failed to create global browser manager.", zap.Error(suiteManagerErr))
 			// We don't exit here yet, allowing tests to potentially run if they handle the error.
-			return
-		}
-
-		// Force initialization now to catch errors early.
-		if err := suiteManager.initialize(ctx); err != nil {
-			suiteManagerErr = err
-			suiteLogger.Error("Failed to initialize global browser manager.", zap.Error(suiteManagerErr))
 			return
 		}
 		suiteLogger.Info("Global browser manager initialized.")
@@ -64,6 +56,7 @@ func TestMain(m *testing.M) {
 
 	if suiteManagerErr != nil {
 		// If initialization failed, we must exit as browser tests cannot run.
+		fmt.Printf("Failed to initialize browser manager for tests: %v\n", suiteManagerErr)
 		os.Exit(1)
 	}
 
@@ -84,7 +77,6 @@ func TestMain(m *testing.M) {
 }
 
 type testFixture struct {
-	// FIX: Use the correctly namespaced type from the imported session package.
 	Session      *session.Session
 	Config       *config.Config
 	Manager      *Manager
@@ -168,12 +160,12 @@ func newTestFixture(t *testing.T, configurators ...fixtureConfigurator) *testFix
 	)
 	require.NoError(t, err, "Failed to create new analysis context (session)")
 
-	// FIX: Cast to the correctly namespaced session.Session type.
 	sess, ok := sessionInterface.(*session.Session)
 	require.True(t, ok, "session must be of type *session.Session")
 
 	// Ensure the session is closed when the test finishes.
 	t.Cleanup(func() {
+		// FIX: Corrected all capitalization issues in this block.
 		// Use a background context with timeout for cleanup.
 		closeCtx, closeCancel := context.WithTimeout(context.Background(), shutdownTimeout/3)
 		defer closeCancel()

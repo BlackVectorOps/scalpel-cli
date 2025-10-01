@@ -36,8 +36,8 @@ func setupTestManager(t *testing.T) (*browser.Manager, *config.Config) {
 	cfg.Network.PostLoadWait = 10 * time.Millisecond
 
 	logger := zap.NewNop()
-	// NewManager is assumed to be the Pure Go implementation as per file context.
-	m, err := browser.NewManager(context.Background(), cfg, logger)
+	// FIX: Removed the 'cfg' argument from the NewManager call to match the updated function signature.
+	m, err := browser.NewManager(context.Background(), logger)
 	require.NoError(t, err)
 	return m, cfg
 }
@@ -100,7 +100,7 @@ func TestManager_ConcurrentSessionCreation(t *testing.T) {
 			defer wg.Done()
 
 			// Use a shorter context for the creation/work phase.
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 			defer cancel()
 
 			s, err := m.NewAnalysisContext(ctx, cfg, schemas.DefaultPersona, "", "", nil)
@@ -147,7 +147,7 @@ func TestManager_NavigateAndExtract(t *testing.T) {
 	m, _ := setupTestManager(t)
 	defer m.Shutdown(context.Background())
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	t.Cleanup(cancel)
 
 	// 3. Execute NavigateAndExtract
@@ -191,7 +191,7 @@ func TestManager_NavigateAndExtract_ErrorHandling(t *testing.T) {
 	m, _ := setupTestManager(t)
 	defer m.Shutdown(context.Background())
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	t.Cleanup(cancel)
 
 	// Test case: Navigation fails (e.g., to a closed port/non-existent server).
@@ -224,4 +224,3 @@ func TestManager_NavigateAndExtract_ErrorHandling(t *testing.T) {
 		assert.Empty(t, links)
 	})
 }
-

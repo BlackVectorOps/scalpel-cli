@@ -25,26 +25,6 @@ func putRNG(r *rand.Rand) {
 	rngPool.Put(r)
 }
 
-// simulateClickTiming pauses for the duration of a mouse click (press and release).
-func simulateClickTiming(ctx context.Context, minMs, maxMs int) error {
-	// If timings are 0 or invalid, return immediately.
-	if minMs <= 0 || maxMs <= 0 || minMs > maxMs {
-		return nil
-	}
-
-	rng := getRNG()
-	defer putRNG(rng)
-
-	// Calculate random duration within the bounds.
-	rangeMs := maxMs - minMs
-	if rangeMs < 0 {
-		rangeMs = 0
-	}
-	durationMs := minMs + rng.Intn(rangeMs+1)
-
-	return hesitate(ctx, time.Duration(durationMs)*time.Millisecond)
-}
-
 // simulateTyping simulates the timing of typing a string character by character.
 func simulateTyping(ctx context.Context, text string, holdMeanMs float64) error {
 	if holdMeanMs <= 0 || len(text) == 0 {
@@ -94,4 +74,24 @@ func hesitate(ctx context.Context, duration time.Duration) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+// simulateClickTiming pauses for the duration of a mouse click (press and release).
+func simulateClickTiming(ctx context.Context, minMs, maxMs int) error {
+	// If timings are 0 or invalid, return immediately.
+	if minMs <= 0 || maxMs <= 0 || minMs > maxMs {
+		return nil
+	}
+
+	rng := getRNG()
+	defer putRNG(rng)
+
+	// Calculate random duration within the bounds.
+	rangeMs := maxMs - minMs
+	if rangeMs < 0 {
+		rangeMs = 0
+	}
+	durationMs := minMs + rng.Intn(rangeMs+1)
+
+	return hesitate(ctx, time.Duration(durationMs)*time.Millisecond)
 }

@@ -12,11 +12,12 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
+	"github.com/xkilldash9x/scalpel-cli/internal/browser/humanoid"
 	"github.com/xkilldash9x/scalpel-cli/internal/browser/session"
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
-	"go.uber.org/zap"
 )
 
 // =============================================================================
@@ -37,7 +38,13 @@ func setupSessionTestEnvironment(t *testing.T) (context.Context, *session.Sessio
 	t.Helper()
 
 	// -- Create a minimal configuration for the test --
-	cfg := config.NewDefaultConfig()
+	cfg := &config.Config{
+		Browser: config.BrowserConfig{
+			Humanoid: humanoid.DefaultConfig(),
+		},
+		Network: config.NetworkConfig{},
+		IAST:    config.IASTConfig{},
+	}
 	cfg.Browser.Humanoid.Enabled = true // Ensure humanoid is active
 	// Speed up tests by reducing delays
 	cfg.Browser.Humanoid.KeyHoldMeanMs = 5.0
@@ -62,7 +69,7 @@ func setupSessionTestEnvironment(t *testing.T) (context.Context, *session.Sessio
 					<style>
 						/* Basic styles to ensure elements have dimensions */
 						#target { width: 100px; height: 100px; background: blue; margin-top: 50px; }
-						#inputField { width: 200px; margin-top: 20px; }
+						#inputField { width: 200px; height: 20px; margin-top: 20px; display: inline-block; }
 					</style>
 				</head>
 				<body>
@@ -91,13 +98,12 @@ func setupSessionTestEnvironment(t *testing.T) (context.Context, *session.Sessio
 	return ctx, sess, server
 }
 
-
 // TestContextCancellation_DuringMovement verifies that a MoveTo operation
 // can be correctly interrupted by context cancellation.
 func TestContextCancellation_DuringMovement(t *testing.T) {
 	t.Parallel()
 	ctx, sess, _ := setupSessionTestEnvironment(t) // sess is now the executor
-	h := newTestHumanoid(sess)                      // Pass the session directly
+	h := humanoid.NewTestHumanoid(sess, 12345)     // Pass the session directly
 
 	// Create a new context that we can cancel independently for the action.
 	actionCtx, actionCancel := context.WithCancel(ctx)
@@ -105,7 +111,8 @@ func TestContextCancellation_DuringMovement(t *testing.T) {
 
 	go func() {
 		// The humanoid will use the session's GetElementGeometry, Sleep, etc.
-		errChan <- h.MoveTo(actionCtx, "#target", nil)
+		// FIX: Use valid XPath selector instead of CSS shorthand.
+		errChan <- h.MoveTo(actionCtx, "//*[@id='target']", nil)
 	}()
 
 	// Give the MoveTo operation a moment to start.
@@ -126,7 +133,7 @@ func TestContextCancellation_DuringMovement(t *testing.T) {
 func TestContextCancellation_DuringTyping(t *testing.T) {
 	t.Parallel()
 	ctx, sess, _ := setupSessionTestEnvironment(t) // sess is now the executor
-	h := newTestHumanoid(sess)                      // Pass the session directly
+	h := humanoid.NewTestHumanoid(sess, 12345)     // Pass the session directly
 
 	actionCtx, actionCancel := context.WithCancel(ctx)
 	errChan := make(chan error, 1)
@@ -134,7 +141,8 @@ func TestContextCancellation_DuringTyping(t *testing.T) {
 	go func() {
 		// A long string ensures the typing action is in progress when we cancel it.
 		longSentence := "This is a very long sentence designed to take a significant amount of time to type, ensuring we can cancel it mid-operation."
-		errChan <- h.Type(actionCtx, "#inputField", longSentence, nil)
+		// FIX: Use valid XPath selector instead of CSS shorthand.
+		errChan <- h.Type(actionCtx, "//*[@id='inputField']", longSentence, nil)
 	}()
 
 	// Allow the typing to get started.
@@ -148,3 +156,5 @@ func TestContextCancellation_DuringTyping(t *testing.T) {
 		t.Fatal("Test timed out waiting for the Type action to return after cancellation.")
 	}
 }
+
+
