@@ -10,10 +10,12 @@ import (
 )
 
 var (
+	// The global configuration instance.
 	instance *Config
 	// Caches the loading error to prevent repeated failed initializations.
 	loadErr error
-	once    sync.Once
+	// Ensures the configuration is loaded only once.
+	once sync.Once
 )
 
 // Config holds the entire application configuration.
@@ -64,8 +66,8 @@ type DatabaseConfig struct {
 
 // EngineConfig configures the core task processing engine.
 type EngineConfig struct {
-	QueueSize          int           `mapstructure:"queue_size" yaml:"queue_size"`
-	WorkerConcurrency  int           `mapstructure:"worker_concurrency" yaml:"worker_concurrency"`
+	QueueSize         int           `mapstructure:"queue_size" yaml:"queue_size"`
+	WorkerConcurrency int           `mapstructure:"worker_concurrency" yaml:"worker_concurrency"`
 	DefaultTaskTimeout time.Duration `mapstructure:"default_task_timeout" yaml:"default_task_timeout"`
 }
 
@@ -97,7 +99,6 @@ type NetworkConfig struct {
 	Headers               map[string]string `mapstructure:"headers" yaml:"headers"`
 	PostLoadWait          time.Duration     `mapstructure:"post_load_wait" yaml:"post_load_wait"`
 	Proxy                 ProxyConfig       `mapstructure:"proxy" yaml:"proxy"`
-	// FIX: Added missing field to resolve compilation error in session.go.
 	IgnoreTLSErrors       bool              `mapstructure:"ignore_tls_errors" yaml:"ignore_tls_errors"`
 }
 
@@ -173,16 +174,16 @@ type AuthConfig struct {
 
 // ATOConfig configures the Account Takeover scanner.
 type ATOConfig struct {
-	Enabled                bool     `mapstructure:"enabled" yaml:"enabled"`
-	CredentialFile         string   `mapstructure:"credential_file" yaml:"credential_file"`
-	Concurrency            int      `mapstructure:"concurrency" yaml:"concurrency"`
-	MinRequestDelayMs      int      `mapstructure:"min_request_delay_ms" yaml:"min_request_delay_ms"`
-	RequestDelayJitterMs   int      `mapstructure:"request_delay_jitter_ms" yaml:"request_delay_jitter_ms"`
-	SuccessKeywords        []string `mapstructure:"success_keywords" yaml:"success_keywords"`
-	UserFailureKeywords    []string `mapstructure:"user_failure_keywords" yaml:"user_failure_keywords"`
-	PassFailureKeywords    []string `mapstructure:"pass_failure_keywords" yaml:"pass_failure_keywords"`
+	Enabled              bool     `mapstructure:"enabled" yaml:"enabled"`
+	CredentialFile       string   `mapstructure:"credential_file" yaml:"credential_file"`
+	Concurrency          int      `mapstructure:"concurrency" yaml:"concurrency"`
+	MinRequestDelayMs    int      `mapstructure:"min_request_delay_ms" yaml:"min_request_delay_ms"`
+	RequestDelayJitterMs int      `mapstructure:"request_delay_jitter_ms" yaml:"request_delay_jitter_ms"`
+	SuccessKeywords      []string `mapstructure:"success_keywords" yaml:"success_keywords"`
+	UserFailureKeywords  []string `mapstructure:"user_failure_keywords" yaml:"user_failure_keywords"`
+	PassFailureKeywords  []string `mapstructure:"pass_failure_keywords" yaml:"pass_failure_keywords"`
 	GenericFailureKeywords []string `mapstructure:"generic_failure_keywords" yaml:"generic_failure_keywords"`
-	LockoutKeywords        []string `mapstructure:"lockout_keywords" yaml:"lockout_keywords"`
+	LockoutKeywords      []string `mapstructure:"lockout_keywords" yaml:"lockout_keywords"`
 }
 
 // IDORConfig defines the settings for the Insecure Direct Object Reference scanner.
@@ -253,6 +254,24 @@ type LLMModelConfig struct {
 	TopK          int               `mapstructure:"top_k" yaml:"top_k"`
 	MaxTokens     int               `mapstructure:"max_tokens" yaml:"max_tokens"`
 	SafetyFilters map[string]string `mapstructure:"safety_filters" yaml:"safety_filters"`
+}
+
+// NewDefaultConfig creates a new configuration struct populated with default values.
+// This is super useful for tests or for bootstrapping the app when a config
+// file is missing.
+func NewDefaultConfig() *Config {
+	v := viper.New()
+	// We're setting the defaults using the same mechanism as the main app.
+	SetDefaults(v)
+
+	var cfg Config
+	// Unmarshal the defaults into our struct.
+	if err := v.Unmarshal(&cfg); err != nil {
+		// This should realistically never fail if our defaults and struct tags are correct.
+		// Panicking here is reasonable because it indicates a fundamental programmer error.
+		panic(fmt.Sprintf("failed to unmarshal default config: %v", err))
+	}
+	return &cfg
 }
 
 // SetDefaults initializes default values for various configuration parameters.

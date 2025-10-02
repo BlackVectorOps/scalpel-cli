@@ -23,7 +23,8 @@ func flexibleSQLMatcher(sql string) string {
 	// Trim leading/trailing space
 	trimmed := strings.TrimSpace(sql)
 	// Replace all sequences of whitespace characters (spaces, tabs, newlines) with the regex `\s+`
-	return regexp.MustCompile(`\s+`).ReplaceAllString(trimmed, `\s+`)
+	// and quote the rest of the meta characters.
+	return regexp.MustCompile(`\s+`).ReplaceAllString(regexp.QuoteMeta(trimmed), `\s+`)
 }
 
 // -- Test Cases --
@@ -57,7 +58,7 @@ func TestPersistData(t *testing.T) {
 		require.NoError(t, err)
 
 		scanID := uuid.NewString()
-		finding := schemas.Finding{ID: "finding-1", Vulnerability: schemas.Vulnerability{Name: "XSS"}, Evidence: json.RawMessage("{}")}
+		finding := schemas.Finding{ID: "finding-1", Vulnerability: schemas.Vulnerability{Name: "XSS"}, Evidence: "{}"}
 		node := schemas.NodeInput{ID: "node-1", Type: schemas.NodeURL}
 		edge := schemas.EdgeInput{ID: "edge-1", From: "node-1", To: "node-2", Type: "LINKS_TO"}
 
@@ -136,7 +137,7 @@ func TestPersistData(t *testing.T) {
 		require.NoError(t, err)
 
 		copyErr := errors.New("copy from failed")
-		envelope := &schemas.ResultEnvelope{Findings: []schemas.Finding{{ID: "f-1", Vulnerability: schemas.Vulnerability{Name: "Test"}, Evidence: json.RawMessage("{}")}}}
+		envelope := &schemas.ResultEnvelope{Findings: []schemas.Finding{{ID: "f-1", Vulnerability: schemas.Vulnerability{Name: "Test"}, Evidence: "{}"}}}
 
 		mockPool.ExpectBegin()
 		findingColumns := []string{"id", "scan_id", "task_id", "target", "module", "vulnerability", "severity", "description", "evidence", "recommendation", "cwe", "observed_at"}
@@ -171,8 +172,7 @@ func TestGetFindingsByScanID(t *testing.T) {
 		`
 		scanID := uuid.NewString()
 		now := time.Now()
-		// Provide the evidence as json.RawMessage (a raw string literal is easiest)
-		evidenceJSON := json.RawMessage(`{"detail": "some evidence"}`)
+		evidenceJSON := `{"detail": "some evidence"}`
 
 		columns := []string{"id", "task_id", "observed_at", "target", "module", "vulnerability", "severity", "description", "evidence", "recommendation", "cwe"}
 		rows := pgxmock.NewRows(columns).
@@ -190,8 +190,7 @@ func TestGetFindingsByScanID(t *testing.T) {
 		// Assertions for the retrieved finding.
 		assert.Equal(t, "finding-123", findings[0].ID)
 		assert.Equal(t, "SQLi", findings[0].Vulnerability.Name)
-		// Note: When comparing json.RawMessage, it's a byte slice. Direct comparison is fine.
-		assert.Equal(t, evidenceJSON, findings[0].Evidence)
+		assert.JSONEq(t, evidenceJSON, findings[0].Evidence)
 		assert.NoError(t, mockPool.ExpectationsWereMet())
 	})
 }

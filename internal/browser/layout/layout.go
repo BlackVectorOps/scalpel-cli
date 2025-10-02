@@ -1,3 +1,4 @@
+// internal/browser/layout/layout.go
 package layout
 
 import (
@@ -2540,3 +2541,4 @@ func findLayoutBoxForNode(root *LayoutBox, target *html.Node) *LayoutBox {
     }
     return nil
 }
+

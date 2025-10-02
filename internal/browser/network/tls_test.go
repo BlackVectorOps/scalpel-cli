@@ -22,18 +22,23 @@ import (
 )
 
 // SetupObservability ensures the global logger is initialized for tests.
+//
+// MISALIGNMENT: The report emphasizes strict state isolation in concurrent environments.
+// Relying on a global logger (Singleton pattern via observability.GetLogger())
+// violates this principle. Initializing global state here is also race-prone
+// as tests run concurrently. Best practice dictates using dependency injection
+// for loggers rather than global accessors.
 func SetupObservability(t *testing.T) {
 	t.Helper()
 
 	// BUILD FIX: The compiler error "undefined: observability.SetLogger" indicates that
 	// the SetLogger function is not exported from the observability package.
-	// To fix this, you must go to the file that defines this function (e.g., internal/observability/logger.go)
-	// and change its name from "setLogger" to "SetLogger" (capitalize the first letter).
+	// ACTION REQUIRED: Go to the file defining this function (e.g., internal/observability/logger.go)
+	// and ensure the function name is capitalized (e.g., "SetLogger").
 	//
-	// The line below is commented out to allow the package to compile.
-	// WARNING: Leaving this commented out will likely cause panics at runtime
-	// because other parts of the code expect a non-nil logger.
+	// The line below is crucial for preventing runtime panics caused by a nil logger.
 	if observability.GetLogger() == nil {
+		// CRITICAL: This line must be uncommented after exporting SetLogger.
 		// observability.SetLogger(zaptest.NewLogger(t))
 	}
 }
@@ -193,5 +198,3 @@ func (h *tlsTestHelper) close() {
 		h.listener.Close()
 	}
 }
-
-

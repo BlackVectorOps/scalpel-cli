@@ -358,13 +358,41 @@ var DefaultPersona = Persona{
 	Locale:      "en-US",
 }
 
-// InteractionConfig defines parameters for the automated page interactor.
+// InteractionAction defines the type of action to perform in an interaction step.
+type InteractionAction string
+
+const (
+	ActionNavigate InteractionAction = "navigate"
+	ActionClick    InteractionAction = "click"
+	ActionType     InteractionAction = "type"
+	ActionSelect   InteractionAction = "select"
+	ActionSubmit   InteractionAction = "submit"
+	ActionWait     InteractionAction = "wait"
+	ActionScroll   InteractionAction = "scroll"
+)
+
+// InteractionStep defines a single action to be performed in a sequence.
+type InteractionStep struct {
+	Action       InteractionAction `json:"action"`
+	Selector     string            `json:"selector,omitempty"`
+	Value        string            `json:"value,omitempty"`        // For Type, Navigate, Select
+	Milliseconds int               `json:"milliseconds,omitempty"` // For Wait
+	Direction    string            `json:"direction,omitempty"`    // For Scroll
+}
+
+// InteractionConfig defines parameters for browser interaction.
+// It supports both an automated, recursive interaction model (MaxDepth, etc.)
+// and an explicit, step-by-step model (Steps).
 type InteractionConfig struct {
+	// Fields for automated, recursive interaction
 	MaxDepth                int               `json:"max_depth"`
 	MaxInteractionsPerDepth int               `json:"max_interactions_per_depth"`
 	InteractionDelayMs      int               `json:"interaction_delay_ms"`
 	PostInteractionWaitMs   int               `json:"post_interaction_wait_ms"`
 	CustomInputData         map[string]string `json:"custom_input_data,omitempty"`
+
+	// Field for explicit, step-by-step interaction
+	Steps []InteractionStep `json:"steps,omitempty"`
 }
 
 // ConsoleLog represents a single entry from the browser's console.

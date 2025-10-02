@@ -5,8 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"time"
-	"github.com/jackc/pgx/v5/pgconn"
+
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"go.uber.org/zap"
 )
@@ -78,16 +79,19 @@ func (s *Store) PersistData(ctx context.Context, envelope *schemas.ResultEnvelop
 func (s *Store) persistFindings(ctx context.Context, tx pgx.Tx, scanID string, findings []schemas.Finding) error {
 	rows := make([][]interface{}, len(findings))
 	for i, f := range findings {
-		evidenceJSON, err := json.Marshal(f.Evidence)
-		if err != nil {
-			return fmt.Errorf("failed to marshal evidence for finding %s: %w", f.ID, err)
+		// The Evidence field is already a string that should contain valid JSON.
+		// There's no need to marshal it again, which would incorrectly double-encode it.
+		// pgx's CopyFrom can handle passing a string to a jsonb column directly.
+		evidence := f.Evidence
+		if evidence == "" {
+			evidence = "{}" // Ensure we don't insert a null or empty string which might violate JSON constraints.
 		}
-
 		rows[i] = []interface{}{
 			f.ID, scanID, f.TaskID,
 			f.Target, f.Module, f.Vulnerability.Name,
 			string(f.Severity), f.Description,
-			evidenceJSON, f.Recommendation, f.CWE,
+			evidence,
+			f.Recommendation, f.CWE,
 			f.Timestamp,
 		}
 	}
