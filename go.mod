@@ -8,8 +8,6 @@ require (
 	github.com/antchfx/htmlquery v1.3.4
 	github.com/aquilax/go-perlin v1.1.0
 	github.com/cenkalti/backoff/v4 v4.3.0
-	github.com/chromedp/cdproto v0.0.0-20250803210736-d308e07a266d
-	github.com/chromedp/chromedp v0.14.1
 	github.com/dop251/goja v0.0.0-20250630131328-58d95d85e994
 	github.com/dop251/goja_nodejs v0.0.0-20250409162600-f7acab6894b0
 	github.com/elazarl/goproxy v1.7.2
@@ -17,7 +15,6 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.7.6
 	github.com/pashagolub/pgxmock/v2 v2.12.0
-	github.com/playwright-community/playwright-go v0.5200.1
 	github.com/spf13/cobra v1.10.1
 	github.com/spf13/viper v1.21.0
 	github.com/stretchr/testify v1.11.1

@@ -3,6 +3,7 @@ package headers
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
@@ -50,15 +51,26 @@ func (a *HeadersAnalyzer) Analyze(ctx context.Context, analysisCtx *core.Analysi
 		return nil
 	}
 
+	// -- Start of Fix --
+	// The HAR artifact is raw JSON, so we need to unmarshal it first.
+	// We assume a `schemas.HAR` struct exists that mirrors the HAR JSON structure.
+	var harData schemas.HAR
+	if err := json.Unmarshal(*analysisCtx.Artifacts.HAR, &harData); err != nil {
+		a.Logger.Error("Failed to unmarshal HAR data for header analysis", zap.Error(err))
+		return fmt.Errorf("failed to unmarshal HAR data: %w", err)
+	}
+	// -- End of Fix --
+
 	// Iterate through HAR entries to find the main document request for the target URL.
 	var mainResponse *schemas.Response
 	targetURL := analysisCtx.TargetURL.String()
 
-	for i, entry := range analysisCtx.Artifacts.HAR.Log.Entries {
+	// -- Fix: Use the newly unmarshaled harData struct instead of analysisCtx.Artifacts.HAR --
+	for i, entry := range harData.Log.Entries {
 		// A simple check: if the request URL matches the target URL.
 		// A more robust implementation might check for the main document frame type.
 		if entry.Request.URL == targetURL {
-			mainResponse = &analysisCtx.Artifacts.HAR.Log.Entries[i].Response
+			mainResponse = &harData.Log.Entries[i].Response
 			break
 		}
 	}
@@ -210,11 +222,11 @@ func (a *HeadersAnalyzer) reportMissingHeader(analysisCtx *core.AnalysisContext,
 			Name:        fmt.Sprintf("Missing Security Header: %s", headerName),
 			Description: "A recommended security header is missing from the HTTP response.",
 		},
-		Severity:     schemas.SeverityMedium,
-		Description:  fmt.Sprintf("The response is missing the '%s' security header. This header is important for protecting against various web vulnerabilities.", headerName),
-		Evidence:     fmt.Sprintf("Header not present in response: %s", headerName),
+		Severity:       schemas.SeverityMedium,
+		Description:    fmt.Sprintf("The response is missing the '%s' security header. This header is important for protecting against various web vulnerabilities.", headerName),
+		Evidence:       fmt.Sprintf("Header not present in response: %s", headerName),
 		Recommendation: fmt.Sprintf("Configure the web server or application framework to include the '%s' header in all relevant HTTP responses.", headerName),
-		CWE:          []string{cwe},
+		CWE:            []string{cwe},
 	}
 	analysisCtx.AddFinding(finding)
 }
@@ -231,11 +243,11 @@ func (a *HeadersAnalyzer) reportFinding(analysisCtx *core.AnalysisContext, vulnN
 			Name:        vulnName,
 			Description: description,
 		},
-		Severity:     severity,
-		Description:  description,
-		Evidence:     evidence,
+		Severity:       severity,
+		Description:    description,
+		Evidence:       evidence,
 		Recommendation: recommendation,
-		CWE:          []string{cwe},
+		CWE:            []string{cwe},
 	}
 	analysisCtx.AddFinding(finding)
 }

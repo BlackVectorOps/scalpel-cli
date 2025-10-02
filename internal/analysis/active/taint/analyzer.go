@@ -20,7 +20,6 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/internal/browser/humanoid" // Added import
 )
 
-
 //go:embed taint_shim.js
 var taintShimFS embed.FS
 
@@ -343,7 +342,6 @@ func (a *Analyzer) executePause(ctx context.Context, browserCtx context.Context,
 	return nil
 }
 
-
 // executeProbes orchestrates the various probing strategies against the target.
 // MODIFICATION: Updated signature to accept Humanoid and BrowserContext. Integrated pauses.
 func (a *Analyzer) executeProbes(ctx context.Context, session SessionContext, h *humanoid.Humanoid, browserCtx context.Context) error {
@@ -525,7 +523,7 @@ func (a *Analyzer) probePersistentSources(ctx context.Context, session SessionCo
 	}
 
 	// FIX: The ExecuteScript function now requires a third 'options' argument. Pass nil.
-	if err := session.ExecuteScript(ctx, injectionScript, nil); err != nil {
+	if _, err := session.ExecuteScript(ctx, injectionScript, nil); err != nil {
 		a.logger.Warn("Failed to inject persistent probes via JavaScript", zap.Error(err))
 	}
 

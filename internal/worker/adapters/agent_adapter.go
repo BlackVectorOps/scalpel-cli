@@ -22,13 +22,10 @@ func NewAgentAdapter() *AgentAdapter {
 	}
 }
 
-// kicks off an agent mission.
 func (a *AgentAdapter) Analyze(ctx context.Context, analysisCtx *core.AnalysisContext) error {
 	a.Logger = analysisCtx.Logger
 	a.Logger.Info("Agent mission received. Initializing agent...")
 
-	// Use strongly typed parameters for robustness and clarity.
-	// FIX: Use robust type assertion to handle both value and pointer types.
 	var params schemas.AgentMissionParams
 	switch p := analysisCtx.Task.Parameters.(type) {
 	case schemas.AgentMissionParams:
@@ -46,32 +43,41 @@ func (a *AgentAdapter) Analyze(ctx context.Context, analysisCtx *core.AnalysisCo
 		return fmt.Errorf("invalid parameters type for Agent mission; expected schemas.AgentMissionParams or *schemas.AgentMissionParams, got %s", actualType)
 	}
 
-	// Validate required parameters.
 	if params.MissionBrief == "" {
 		return fmt.Errorf("validation error: agent mission task is missing required 'MissionBrief'")
 	}
 
-	// The agent needs access to the global context to use shared services
-	// like the logger, browser manager, and knowledge graph.
 	agentMission := agent.Mission{
 		ID:        analysisCtx.Task.TaskID,
 		Objective: params.MissionBrief,
 		TargetURL: analysisCtx.Task.TargetURL,
 	}
 
-	// Initialize the agent instance, passing the full global context.
-	agentInstance, err := agent.New(ctx, agentMission, analysisCtx.Global)
+	// The agent is an active module that requires a browser session to run.
+	// We create one here and pass it to the agent's constructor.
+	session, err := analysisCtx.Global.BrowserManager.NewAnalysisContext(
+		ctx,
+		analysisCtx.Task,
+		schemas.DefaultPersona,
+		"", // initialURL
+		"", // initialData
+		analysisCtx.Global.FindingsChan,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to create browser session for agent: %w", err)
+	}
+	defer session.Close(context.Background())
+
+	// Pass the newly created session as the fourth argument.
+	agentInstance, err := agent.New(ctx, agentMission, analysisCtx.Global, session)
 	if err != nil {
 		return fmt.Errorf("failed to initialize agent: %w", err)
 	}
 
 	a.Logger.Info("Agent initialized. Starting mission execution.")
 
-	// Run the agent's main logic loop.
-	// This is a blocking call that will run until the mission is complete or the context is cancelled.
 	missionResult, err := agentInstance.RunMission(ctx)
 	if err != nil {
-		// Check if the error was due to context cancellation (timeout or interruption).
 		if ctx.Err() != nil {
 			a.Logger.Warn("Agent mission interrupted or timed out.", zap.Error(err))
 			return ctx.Err()
@@ -79,10 +85,8 @@ func (a *AgentAdapter) Analyze(ctx context.Context, analysisCtx *core.AnalysisCo
 		return fmt.Errorf("agent mission failed: %w", err)
 	}
 
-	// Integrate the results from the agent back into the analysis context.
 	a.Logger.Info("Agent mission completed.", zap.String("summary", missionResult.Summary))
 
-	// Merge findings and Knowledge Graph updates.
 	if len(missionResult.Findings) > 0 {
 		for _, finding := range missionResult.Findings {
 			analysisCtx.AddFinding(finding)

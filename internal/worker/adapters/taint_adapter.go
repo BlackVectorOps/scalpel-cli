@@ -27,7 +27,6 @@ func (a *TaintAdapter) Analyze(ctx context.Context, analysisCtx *core.AnalysisCo
 	logger := analysisCtx.Logger.With(zap.String("adapter", a.Name()))
 	logger.Info("Initializing taint analysis")
 
-	// 1. Verify Dependencies
 	if analysisCtx.Global.BrowserManager == nil {
 		return fmt.Errorf("critical error: browser manager not initialized in global context")
 	}
@@ -35,7 +34,6 @@ func (a *TaintAdapter) Analyze(ctx context.Context, analysisCtx *core.AnalysisCo
 	oastProvider := analysisCtx.Global.OASTProvider
 	reporter := NewContextReporter(analysisCtx)
 
-	// 2. Configure Analyzer
 	cfg := analysisCtx.Global.Config.Scanners.Active.Taint
 	taintConfig := taint.Config{
 		TaskID:                  analysisCtx.Task.TaskID,
@@ -53,34 +51,35 @@ func (a *TaintAdapter) Analyze(ctx context.Context, analysisCtx *core.AnalysisCo
 		},
 	}
 
-	// 3. Initialize Analyzer
 	analyzer, err := taint.NewAnalyzer(taintConfig, reporter, oastProvider, logger)
 	if err != nil {
 		return fmt.Errorf("failed to initialize taint analyzer: %w", err)
 	}
 
-	// 4. Create a dedicated browser session for this task.
-	// FIX: The DefaultPersona constant was moved from the 'stealth' package to the 'schemas'
-	// package to act as the canonical definition. This reference has been updated accordingly.
+	// -- Start of Fix --
+	// The NewAnalysisContext signature has changed.
+	// 1. Pass the specific Task object instead of the entire global Config.
+	// 2. Add the global FindingsChan as the final argument.
 	session, err := analysisCtx.Global.BrowserManager.NewAnalysisContext(
 		ctx,
-		analysisCtx.Global.Config,
+		analysisCtx.Task, // Argument 2 changed
 		schemas.DefaultPersona,
 		"",
 		"",
+		analysisCtx.Global.FindingsChan, // Argument 6 added
 	)
+	// -- End of Fix --
 	if err != nil {
 		return fmt.Errorf("failed to create browser session for taint analysis: %w", err)
 	}
 	defer session.Close(context.Background())
 
-	// 5. Execute Analysis with the created session.
 	logger.Info("Starting taint analysis execution", zap.String("target_url", analysisCtx.TargetURL.String()))
 
 	if err := analyzer.Analyze(ctx, session); err != nil {
 		if ctx.Err() != nil {
 			logger.Warn("Taint analysis interrupted or timed out", zap.Error(err))
-			return nil
+			return nil // An interrupt isn't a failure of the adapter itself.
 		}
 		return fmt.Errorf("taint analysis failed during execution: %w", err)
 	}
@@ -88,3 +87,4 @@ func (a *TaintAdapter) Analyze(ctx context.Context, analysisCtx *core.AnalysisCo
 	logger.Info("Taint analysis execution completed")
 	return nil
 }
+

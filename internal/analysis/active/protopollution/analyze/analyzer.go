@@ -1,6 +1,6 @@
 // Package analyze implements the active analysis logic for detecting client-side
 // prototype pollution vulnerabilities.
-package analyze
+package proto
 
 import (
 	"context"

@@ -4,16 +4,9 @@ package dom
 import (
 	"context"
 	"io"
-    // humanoid import removed as it is unused in this file.
-)
 
-// InteractionConfig defines how the Interactor should behave during exploration.
-type InteractionConfig struct {
-	MaxDepth                int
-	MaxInteractionsPerDepth int
-	InteractionDelayMs      int // Delay immediately after an interaction (if no major state change)
-	PostInteractionWaitMs   int // Wait time after stabilization before starting the next discovery phase
-}
+	"github.com/xkilldash9x/scalpel-cli/api/schemas"
+)
 
 // HumanoidConfig defines parameters for simulating human behavior timings.
 type HumanoidConfig struct {
@@ -24,8 +17,9 @@ type HumanoidConfig struct {
 }
 
 // Default Configs
-func NewDefaultInteractionConfig() InteractionConfig {
-	return InteractionConfig{
+// NewDefaultInteractionConfig creates a default config using the canonical schema.
+func NewDefaultInteractionConfig() schemas.InteractionConfig {
+	return schemas.InteractionConfig{
 		MaxDepth:                5,
 		MaxInteractionsPerDepth: 5,
 		InteractionDelayMs:      500,
@@ -47,7 +41,7 @@ type Logger interface {
 	Warn(msg string, args ...interface{})
 	Info(msg string, args ...interface{})
 	Debug(msg string, args ...interface{})
-    Error(msg string, args ...interface{})
+	Error(msg string, args ...interface{})
 }
 
 // NopLogger is a default logger that does nothing.
@@ -74,6 +68,6 @@ type CorePagePrimitives interface {
 	GetCurrentURL() string
 	// GetDOMSnapshot fetches the current HTML body for parsing.
 	GetDOMSnapshot(ctx context.Context) (io.Reader, error)
-    // IsVisible checks if the element matching the selector is visible according to the Layout Engine.
-    IsVisible(ctx context.Context, selector string) bool
+	// IsVisible checks if the element matching the selector is visible according to the Layout Engine.
+	IsVisible(ctx context.Context, selector string) bool
 }

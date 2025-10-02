@@ -167,28 +167,35 @@ func NewClient(config *ClientConfig) *http.Client {
 // configureTLS sets up the TLS configuration and ensures strong defaults and ALPN settings.
 func configureTLS(config *ClientConfig) *tls.Config {
 	var tlsConfig *tls.Config
-
-	// 1. Determine the base configuration, prioritizing secure defaults from the DialerConfig.
+	// 1. Get a base config, preferring a user-supplied one.
 	if config.TLSConfig != nil {
 		tlsConfig = config.TLSConfig.Clone()
-	} else if config.DialerConfig != nil && config.DialerConfig.TLSConfig != nil {
-		tlsConfig = config.DialerConfig.TLSConfig.Clone()
 	} else {
+		// No user config, so start with a fresh, secure default.
 		tlsConfig = NewDialerConfig().TLSConfig.Clone()
 	}
 
-	// 2. Apply security hardening.
-	if tlsConfig.MinVersion < requiredMinTLSVersion {
-		tlsConfig.MinVersion = requiredMinTLSVersion
-	}
+	// 2. Get the secure defaults to merge from.
+	defaults := NewDialerConfig().TLSConfig
 
-	// 3. Configure ALPN (Application-Layer Protocol Negotiation) for HTTP/2.
+	// 3. Merge missing defaults into the user's config.
+	if len(tlsConfig.CipherSuites) == 0 {
+		tlsConfig.CipherSuites = defaults.CipherSuites
+	}
+	if tlsConfig.ClientSessionCache == nil {
+		tlsConfig.ClientSessionCache = defaults.ClientSessionCache
+	}
 	if len(tlsConfig.NextProtos) == 0 {
 		// "h2" must be listed before "http/1.1" to prefer HTTP/2.
 		tlsConfig.NextProtos = []string{"h2", "http/1.1"}
 	}
 
-	// 4. Apply the final override for ignoring TLS errors (useful in automation).
+	// 4. Apply security hardening.
+	if tlsConfig.MinVersion < requiredMinTLSVersion {
+		tlsConfig.MinVersion = requiredMinTLSVersion
+	}
+
+	// 5. Apply the final override for ignoring TLS errors.
 	tlsConfig.InsecureSkipVerify = config.InsecureSkipVerify
 
 	return tlsConfig

@@ -14,8 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/chromedp/cdproto/cdp"
-	"github.com/chromedp/chromedp"
+	// Removed chromedp dependencies
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 
@@ -57,9 +56,10 @@ type baselineFailure struct {
 }
 
 // csrfToken holds the name and value for an anti-forgery token.
+// Added JSON tags for unmarshaling from ExecuteScript results.
 type csrfToken struct {
-	Name  string
-	Value string
+	Name  string `json:"name"`
+	Value string `json:"value"`
 }
 
 // endpointIdentifier creates a unique string for a given method and URL to track tested endpoints.
@@ -140,12 +140,24 @@ func (a *ATOAnalyzer) Analyze(ctx context.Context, analysisCtx schemas.SessionCo
 		return nil
 	}
 
-	artifacts, err := analysisCtx.CollectArtifacts()
+	// CollectArtifacts now requires the context.
+	artifacts, err := analysisCtx.CollectArtifacts(ctx)
 	if err != nil {
 		return fmt.Errorf("ATO analyzer failed to collect artifacts: %w", err)
 	}
 
-	loginAttempts := a.discoverLoginEndpoints(artifacts)
+	// Handle HAR data unmarshaling as it's defined as *json.RawMessage in schemas.
+	if artifacts.HAR == nil {
+		a.Logger.Info("No HAR data collected, cannot discover login endpoints.")
+		return nil
+	}
+
+	var harData schemas.HAR
+	if err := json.Unmarshal(*artifacts.HAR, &harData); err != nil {
+		return fmt.Errorf("failed to unmarshal HAR data: %w", err)
+	}
+
+	loginAttempts := a.discoverLoginEndpoints(&harData)
 	if len(loginAttempts) == 0 {
 		a.Logger.Info("No potential login endpoints were found to test.")
 		return nil
@@ -174,16 +186,23 @@ func (a *ATOAnalyzer) Analyze(ctx context.Context, analysisCtx schemas.SessionCo
 	close(results)
 
 	for finding := range results {
-		analysisCtx.AddFinding(finding)
+		// Handle potential error returned by AddFinding.
+		if err := analysisCtx.AddFinding(finding); err != nil {
+			a.Logger.Error("Failed to report finding via SessionContext", zap.Error(err))
+		}
 	}
 
 	return nil
 }
 
 // parses HAR artifacts to find unique login requests.
-func (a *ATOAnalyzer) discoverLoginEndpoints(artifacts *schemas.Artifacts) map[string]*loginAttempt {
+func (a *ATOAnalyzer) discoverLoginEndpoints(harData *schemas.HAR) map[string]*loginAttempt {
 	loginAttempts := make(map[string]*loginAttempt)
-	for _, entry := range artifacts.HAR.Log.Entries {
+	if harData == nil {
+		return loginAttempts
+	}
+
+	for _, entry := range harData.Log.Entries {
 		if attempt, err := a.identifyLoginRequest(entry.Request); err == nil {
 			id := attempt.endpointIdentifier()
 			if _, exists := loginAttempts[id]; !exists {
@@ -254,10 +273,16 @@ func (a *ATOAnalyzer) identifyLoginRequest(req schemas.Request) (*loginAttempt, 
 	if userField != "" && passField != "" {
 		headers := make(map[string]string)
 		for _, h := range req.Headers {
-			if !strings.EqualFold(h.Name, "Content-Length") {
+			// Exclude headers managed by the browser (like Content-Length, Cookie) when replaying via fetch.
+			if !strings.EqualFold(h.Name, "Content-Length") && !strings.EqualFold(h.Name, "Cookie") {
 				headers[h.Name] = h.Value
 			}
 		}
+		// Ensure Content-Type is set correctly if not already present in headers map.
+		if _, ok := headers["Content-Type"]; !ok && contentType != "" {
+			headers["Content-Type"] = contentType
+		}
+
 		return &loginAttempt{
 			URL:         req.URL,
 			Method:      req.Method,
@@ -301,9 +326,10 @@ func (a *ATOAnalyzer) testEndpoint(ctx context.Context, analysisCtx schemas.Sess
 			return findings
 		}
 
-		if err := a.executePause(ctx, analysisCtx, h); err != nil {
-			// Check if the error was due to context cancellation (either operation ctx or browser ctx).
-			if ctx.Err() != nil || (analysisCtx.GetContext() != nil && analysisCtx.GetContext().Err() != nil) {
+		// Pass only the context and the humanoid controller to executePause.
+		if err := a.executePause(ctx, h); err != nil {
+			// Check if the error was due to context cancellation.
+			if ctx.Err() != nil {
 				a.Logger.Warn("ATO analysis cancelled during pause.", zap.Error(err))
 				return findings
 			}
@@ -313,13 +339,18 @@ func (a *ATOAnalyzer) testEndpoint(ctx context.Context, analysisCtx schemas.Sess
 
 		token, err := a.getFreshCSRFToken(ctx, analysisCtx, attempt.URL)
 		if err != nil {
-			a.Logger.Warn("Failed to fetch fresh CSRF token, continuing without it.", zap.Error(err))
+			// Only warn if the context wasn't cancelled.
+			if ctx.Err() == nil {
+				a.Logger.Warn("Failed to fetch fresh CSRF token, continuing without it.", zap.Error(err))
+			}
 		}
 
 		a.Logger.Debug("Attempting login", zap.String("username", creds.Username), zap.String("url", attempt.URL))
 		response, err := a.executeLoginAttempt(ctx, analysisCtx, attempt, creds, token)
 		if err != nil {
-			a.Logger.Error("Failed to execute login attempt", zap.Error(err), zap.String("url", attempt.URL))
+			if ctx.Err() == nil {
+				a.Logger.Error("Failed to execute login attempt", zap.Error(err), zap.String("url", attempt.URL))
+			}
 			continue
 		}
 
@@ -351,7 +382,9 @@ func (a *ATOAnalyzer) establishBaseline(ctx context.Context, analysisCtx schemas
 
 	token, err := a.getFreshCSRFToken(ctx, analysisCtx, attempt.URL)
 	if err != nil {
-		a.Logger.Warn("Failed to get CSRF token for baseline request.", zap.Error(err))
+		if ctx.Err() == nil {
+			a.Logger.Warn("Failed to get CSRF token for baseline request.", zap.Error(err))
+		}
 	}
 
 	res, err := a.executeLoginAttempt(ctx, analysisCtx, attempt, randomCreds, token)
@@ -366,10 +399,9 @@ func (a *ATOAnalyzer) establishBaseline(ctx context.Context, analysisCtx schemas
 	}, nil
 }
 
-// getFreshCSRFToken navigates to the login page and attempts to scrape a CSRF token value.
+// getFreshCSRFToken navigates to the login page and attempts to scrape a CSRF token value using the SessionContext.
+// REFACTORED: Replaced chromedp logic with SessionContext methods.
 func (a *ATOAnalyzer) getFreshCSRFToken(ctx context.Context, analysisCtx schemas.SessionContext, pageURL string) (*csrfToken, error) {
-	var tokenName, tokenValue string
-	var nodes []*cdp.Node
 
 	// --- Humanoid Integration: Retrieve Controller ---
 	var h *humanoid.Humanoid
@@ -378,66 +410,93 @@ func (a *ATOAnalyzer) getFreshCSRFToken(ctx context.Context, analysisCtx schemas
 	}
 	// ---------------------------------------------------
 
-	tasks := chromedp.Tasks{}
-
-	// Pre-navigation pause (Cognitive planning)
+	// 1. Pre-navigation pause (Cognitive planning)
 	if h != nil {
-		tasks = append(tasks, h.CognitivePause(300, 100))
+		// Call CognitivePause directly using the operation context 'ctx'.
+		if err := h.CognitivePause(ctx, 300, 100); err != nil {
+			if ctx.Err() != nil {
+				return nil, fmt.Errorf("context cancelled during pre-navigation pause: %w", err)
+			}
+			a.Logger.Debug("Humanoid cognitive pause failed before navigation", zap.Error(err))
+		}
 	}
 
-	tasks = append(tasks, chromedp.Navigate(pageURL))
-	// Wait for the page to be ready before proceeding.
-	tasks = append(tasks, chromedp.WaitReady("body"))
-
-	// Post-navigation pause (Visual scanning of the page)
-	if h != nil {
-		tasks = append(tasks, h.CognitivePause(500, 200))
+	// 2. Navigate using the SessionContext interface (Replaces chromedp.Navigate)
+	if err := analysisCtx.Navigate(ctx, pageURL); err != nil {
+		return nil, fmt.Errorf("navigation failed: %w", err)
 	}
 
-	for _, selector := range csrfFieldHeuristics {
-		tasks = append(tasks, chromedp.ActionFunc(func(c context.Context) error {
-			// If we already found a token, no need to keep searching.
-			if tokenName != "" {
-				return nil
-			}
-			err := chromedp.Nodes(selector, &nodes, chromedp.AtLeast(0)).Do(c)
-			if err != nil || len(nodes) == 0 {
-				return nil // Continue to next selector
-			}
+	// 3. Wait for the page to stabilize (Replaces chromedp.WaitReady)
+	// WaitForAsync(0) waits for network idle and stabilization.
+	if err := analysisCtx.WaitForAsync(ctx, 0); err != nil {
+		// Log this error, but we might still be able to scrape if the DOM is partially ready.
+		a.Logger.Warn("Waiting for page stabilization failed, proceeding with scraping attempt.", zap.Error(err), zap.String("url", pageURL))
+	}
 
-			// Brief hesitation during scraping
-			if h != nil {
-				// 'c' is the browser context provided by chromedp.Run.
-				if err := h.Hesitate(50 * time.Millisecond).Do(c); err != nil {
-					// Log error but don't fail the whole process if hesitation fails.
-					a.Logger.Debug("Humanoid hesitation failed during CSRF scraping", zap.Error(err))
+	// 4. Post-navigation pause (Visual scanning of the page)
+	if h != nil {
+		if err := h.CognitivePause(ctx, 500, 200); err != nil {
+			if ctx.Err() != nil {
+				return nil, fmt.Errorf("context cancelled during post-navigation pause: %w", err)
+			}
+			a.Logger.Debug("Humanoid cognitive pause failed after navigation", zap.Error(err))
+		}
+	}
+
+	// 5. Scrape CSRF token using JavaScript execution (Replaces chromedp.Nodes/Attributes)
+	// The script iterates over the provided selectors (passed as arguments) and returns the first match.
+	// Uses an IIFE (Immediately Invoked Function Expression).
+	script := `
+		(function(selectors) {
+			for (const selector of selectors) {
+				const el = document.querySelector(selector);
+				if (el) {
+					const name = el.getAttribute('name');
+					const value = el.getAttribute('value');
+					if (name && value) {
+						// Return the object directly, matching JSON tags in csrfToken struct.
+						return { name: name, value: value };
+					}
 				}
 			}
+			return null; // No token found
+		})(arguments[0]);
+	`
 
-			var attrs map[string]string
-			if err := chromedp.Attributes(selector, &attrs, chromedp.FromNode(nodes[0])).Do(c); err != nil {
-				return err
-			}
-			if name, ok := attrs["name"]; ok {
-				if val, ok := attrs["value"]; ok {
-					tokenName = name
-					tokenValue = val
-					a.Logger.Debug("Found CSRF token", zap.String("name", name), zap.String("value", "REDACTED"))
-				}
-			}
-			return nil
-		}))
+	// Prepare arguments for ExecuteScript
+	args := []interface{}{csrfFieldHeuristics}
+
+	// Brief hesitation during scraping (simulating visual search)
+	if h != nil {
+		// Call Hesitate directly.
+		if err := h.Hesitate(ctx, 50*time.Millisecond); err != nil {
+			a.Logger.Debug("Humanoid hesitation failed during CSRF scraping", zap.Error(err))
+		}
 	}
 
-	if err := chromedp.Run(analysisCtx.GetContext(), tasks); err != nil {
-		return nil, fmt.Errorf("could not navigate to page or scrape CSRF token: %w", err)
+	resultRaw, err := analysisCtx.ExecuteScript(ctx, script, args)
+	if err != nil {
+		return nil, fmt.Errorf("failed to execute CSRF scraping script: %w", err)
 	}
 
-	if tokenName != "" {
-		return &csrfToken{Name: tokenName, Value: tokenValue}, nil
+	// Check if the result is null (no token found)
+	if resultRaw == nil || string(resultRaw) == "null" {
+		a.Logger.Debug("No CSRF token found on page.", zap.String("url", pageURL))
+		return nil, nil // No token found, but not an error
 	}
 
-	return nil, nil // No token found, but not an error
+	// Unmarshal the result into the csrfToken struct
+	var token csrfToken
+	if err := json.Unmarshal(resultRaw, &token); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal CSRF token data from script result: %w", err)
+	}
+
+	if token.Name != "" && token.Value != "" {
+		a.Logger.Debug("Found CSRF token", zap.String("name", token.Name), zap.String("value", "REDACTED"))
+		return &token, nil
+	}
+
+	return nil, nil
 }
 
 // fetchResponse is a struct to unmarshal the structured JSON response from the browser fetch call.
@@ -448,8 +507,10 @@ type fetchResponse struct {
 	Error      string `json:"error"`
 }
 
-// executeLoginAttempt safely replays a modified login request using the browser's fetch API.
+// executeLoginAttempt safely replays a modified login request using the browser's fetch API via the SessionContext.
+// REFACTORED: Replaced chromedp.Evaluate with SessionContext.ExecuteScript and argument passing.
 func (a *ATOAnalyzer) executeLoginAttempt(ctx context.Context, analysisCtx schemas.SessionContext, attempt *loginAttempt, creds schemas.Credential, token *csrfToken) (*fetchResponse, error) {
+	// 1. Prepare the request body
 	bodyParams := make(map[string]interface{})
 	for k, v := range attempt.BodyParams {
 		bodyParams[k] = v
@@ -470,49 +531,60 @@ func (a *ATOAnalyzer) executeLoginAttempt(ctx context.Context, analysisCtx schem
 	} else { // Assume form-urlencoded
 		values := url.Values{}
 		for k, v := range bodyParams {
+			// Ensure values are strings when encoding form data.
 			values.Add(k, fmt.Sprintf("%v", v))
 		}
 		bodyString = values.Encode()
 	}
 
-	headersJSON, err := json.Marshal(attempt.Headers)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal headers to JSON: %w", err)
-	}
-	bodyJSON, err := json.Marshal(bodyString)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal body to JSON: %w", err)
-	}
-
-	script := fmt.Sprintf(`
+	// 2. Define the script (using arguments instead of fmt.Sprintf for safety and clarity)
+	// The script executes an async fetch and returns the result object directly.
+	script := `
 		(async (url, method, headers, body) => {
 			try {
 				const response = await fetch(url, {
-					method: method, headers: headers, body: body,
-					credentials: 'omit', redirect: 'manual',
+					method: method,
+					headers: headers,
+					body: body,
+					credentials: 'omit', // Do not send cookies automatically
+					redirect: 'manual',  // Handle redirects manually
 				});
 				const responseBody = await response.text();
-				return JSON.stringify({
-					body: responseBody, status: response.status,
-					statusText: response.statusText, error: ''
-				});
+				// Return the structured object directly.
+				return {
+					body: responseBody,
+					status: response.status,
+					statusText: response.statusText,
+					error: ''
+				};
 			} catch (e) {
-				return JSON.stringify({ body: '', status: 0, error: e.message });
+				// Handle network errors (CORS, connection refused, etc.)
+				return { body: '', status: 0, statusText: '', error: e.message };
 			}
-		})(%q, %q, %s, %s);
-	`, attempt.URL, attempt.Method, string(headersJSON), string(bodyJSON))
+		})(arguments[0], arguments[1], arguments[2], arguments[3]);
+	`
 
-	var responseJSON string
-	if err := chromedp.Run(analysisCtx.GetContext(),
-		chromedp.Evaluate(script, &responseJSON),
-	); err != nil {
-		return nil, fmt.Errorf("chromedp.Evaluate failed: %w", err)
+	// 3. Prepare arguments for ExecuteScript
+	// attempt.Headers (map[string]string) is compatible with JS object/headers initialization.
+	args := []interface{}{
+		attempt.URL,
+		attempt.Method,
+		attempt.Headers,
+		bodyString,
 	}
 
+	// 4. Execute the script using the SessionContext interface (Replaces chromedp.Run/Evaluate)
+	responseRaw, err := analysisCtx.ExecuteScript(ctx, script, args)
+	if err != nil {
+		return nil, fmt.Errorf("ExecuteScript failed for login attempt: %w", err)
+	}
+
+	// 5. Unmarshal the result
 	var response fetchResponse
-	if err := json.Unmarshal([]byte(responseJSON), &response); err != nil {
+	if err := json.Unmarshal(responseRaw, &response); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal fetch response from browser: %w", err)
 	}
+
 	if response.Error != "" {
 		return nil, fmt.Errorf("in-page fetch failed: %s", response.Error)
 	}
@@ -524,18 +596,24 @@ func (a *ATOAnalyzer) analyzeLoginResponse(res *fetchResponse, baseline *baselin
 	// 1. Perform differential analysis first for the highest reliability.
 	if baseline != nil {
 		currentBodyHash := sha256.Sum256([]byte(res.Body))
+		// Basic check for difference.
 		if res.Status != baseline.Status || len(res.Body) != baseline.Length || currentBodyHash != baseline.BodyHash {
-			return loginFailureDifferential
+			// If it differs, it might be success or enumeration. We continue to check keywords.
+			// If no keywords match later, we will classify it as differential.
+		} else {
+			// It matches the baseline (known invalid user/pass), so it's likely a failure.
+			return loginFailureUser
 		}
 	}
 
-	// 2. Fallback to keyword-based analysis.
+	// 2. Keyword-based analysis.
 	bodyLower := strings.ToLower(res.Body)
 	if res.Status >= 200 && res.Status < 400 {
-		isSuccess := res.Status >= 300 && res.Status < 400
+		isSuccess := res.Status >= 300 && res.Status < 400 // Assume redirect is success.
 		if !isSuccess {
 			for _, kw := range a.cfg.SuccessKeywords {
-				if strings.Contains(bodyLower, kw) {
+				// Keywords should be compared in lowercase.
+				if strings.Contains(bodyLower, strings.ToLower(kw)) {
 					isSuccess = true
 					break
 				}
@@ -547,30 +625,40 @@ func (a *ATOAnalyzer) analyzeLoginResponse(res *fetchResponse, baseline *baselin
 	}
 
 	for _, kw := range a.cfg.LockoutKeywords {
-		if strings.Contains(bodyLower, kw) {
+		if strings.Contains(bodyLower, strings.ToLower(kw)) {
 			return loginFailureLockout
 		}
 	}
-	for _, kw := range a.cfg.UserFailureKeywords {
-		if strings.Contains(bodyLower, kw) {
-			return loginFailureUser
-		}
-	}
+	// Keywords indicating valid user, invalid password.
 	for _, kw := range a.cfg.PassFailureKeywords {
-		if strings.Contains(bodyLower, kw) {
+		if strings.Contains(bodyLower, strings.ToLower(kw)) {
 			return loginFailurePass
 		}
 	}
+	// Keywords indicating invalid user.
+	for _, kw := range a.cfg.UserFailureKeywords {
+		if strings.Contains(bodyLower, strings.ToLower(kw)) {
+			return loginFailureUser
+		}
+	}
 	for _, kw := range a.cfg.GenericFailureKeywords {
-		if strings.Contains(bodyLower, kw) {
+		if strings.Contains(bodyLower, strings.ToLower(kw)) {
 			return loginFailureGeneric
 		}
 	}
+
+	// 3. Revisit differential analysis. If we reached here and had a baseline, it means the response
+	// differed from the baseline but didn't match any specific keywords.
+	if baseline != nil {
+		return loginFailureDifferential
+	}
+
 	return loginUnknown
 }
 
 // executePause handles the pacing between requests using Humanoid if available, or falling back to legacy sleep.
-func (a *ATOAnalyzer) executePause(ctx context.Context, analysisCtx schemas.SessionContext, h *humanoid.Humanoid) error {
+// REFACTORED: Calls Humanoid methods directly instead of using chromedp.Run. Removed unused analysisCtx parameter.
+func (a *ATOAnalyzer) executePause(ctx context.Context, h *humanoid.Humanoid) error {
 	minDelayMs := a.cfg.MinRequestDelayMs
 	jitterMs := a.cfg.RequestDelayJitterMs
 
@@ -579,9 +667,8 @@ func (a *ATOAnalyzer) executePause(ctx context.Context, analysisCtx schemas.Sess
 	}
 
 	if h != nil {
-		// Use Humanoid's CognitivePause for realistic behavior (idling, micro-movements, fatigue awareness).
+		// Use Humanoid's CognitivePause for realistic behavior.
 		// Calculate Mean and StdDev based on Min + Jitter configuration.
-		// Mean = MinDelay + Jitter/2; StdDev = Jitter/2 (approx)
 
 		mean := float64(minDelayMs)
 		stdDev := 0.0
@@ -591,7 +678,7 @@ func (a *ATOAnalyzer) executePause(ctx context.Context, analysisCtx schemas.Sess
 			stdDev = float64(jitterMs) / 2.0
 		}
 
-		// If the configuration results in a very small delay, we still apply a reasonable cognitive pause if Humanoid is enabled.
+		// If the configuration results in a very small delay, apply a reasonable cognitive pause if Humanoid is enabled.
 		if mean < 50.0 {
 			mean = 500.0 // Default to 500ms if config is tiny.
 			if stdDev < 100.0 {
@@ -599,17 +686,8 @@ func (a *ATOAnalyzer) executePause(ctx context.Context, analysisCtx schemas.Sess
 			}
 		}
 
-		// Execute the action using the session's browser context, required for Humanoid actions.
-		browserCtx := analysisCtx.GetContext()
-		if browserCtx == nil {
-			// Handle gracefully if browser context is somehow unavailable.
-			a.Logger.Error("Browser context is nil, falling back to legacy pause.")
-			a.legacyPause(ctx)
-			return nil
-		}
-
-		// Execute the action. Errors (including context cancellation of browserCtx) will be returned.
-		return chromedp.Run(browserCtx, h.CognitivePause(mean, stdDev))
+		// Execute the action using the operation context 'ctx'.
+		return h.CognitivePause(ctx, mean, stdDev)
 
 	} else {
 		// Fallback: Use the legacy randomized sleep using the operation context.

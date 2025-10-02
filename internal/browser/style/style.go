@@ -1,7 +1,10 @@
+// internal/browser/style/style.go
 package style
 
 import (
+	"fmt"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -11,16 +14,67 @@ import (
 	"golang.org/x/net/html"
 )
 
+// -- NEW INTERFACE TO BREAK IMPORT CYCLE --
+
+// ShadowDOMProcessor defines the contract for a module that handles shadow DOM logic.
+// This interface allows the style engine to remain decoupled from the concrete
+// implementation of the shadow DOM engine, breaking the import cycle.
+type ShadowDOMProcessor interface {
+	DetectShadowHost(node *html.Node) bool
+	InstantiateShadowRoot(host *html.Node) (*html.Node, []parser.StyleSheet)
+	AssignSlots(host *StyledNode)
+}
+
+// -- Constants and Configuration --
+
+const (
+	BaseFontSize      = 16.0 // Default root font size.
+	DefaultLineHeight = 1.2  // Default multiplier for 'line-height: normal'.
+)
+
+// -- Style Engine --
+
+// Engine orchestrates the styling process, including the cascade,
+// inheritance, and Shadow DOM style encapsulation.
+type Engine struct {
+	userAgentSheets []parser.StyleSheet
+	authorSheets    []parser.StyleSheet
+	shadowEngine    ShadowDOMProcessor // MODIFIED: Changed from concrete type to interface.
+	viewportWidth   float64
+	viewportHeight  float64
+}
+
+// NewEngine creates a new styling engine. It requires a ShadowDOMProcessor
+// to handle shadow DOM instantiation and slotting.
+func NewEngine(shadowEngine ShadowDOMProcessor) *Engine { // MODIFIED: Signature changed.
+	return &Engine{
+		shadowEngine: shadowEngine,
+	}
+}
+
+// AddAuthorSheet adds a stylesheet provided by the webpage author.
+func (se *Engine) AddAuthorSheet(sheet parser.StyleSheet) {
+	se.authorSheets = append(se.authorSheets, sheet)
+}
+
+// SetViewport sets the dimensions used for viewport-relative units.
+func (se *Engine) SetViewport(width, height float64) {
+	se.viewportWidth = width
+	se.viewportHeight = height
+}
+
 // -- Canonical Data Structures --
 
 // StyledNode represents a DOM node combined with its computed styles. It is the
 // bridge between the parser's output and the layout engine's input.
 type StyledNode struct {
-	Node           *html.Node
+	Node *html.Node
 	ComputedStyles map[parser.Property]parser.Value
 	Children       []*StyledNode
 	// ShadowRoot holds the encapsulated style tree for this node, if it's a shadow host.
 	ShadowRoot *StyledNode
+	// SlotAssignment holds nodes from the light DOM assigned to this slot.
+	SlotAssignment []*StyledNode
 }
 
 // Color represents an RGBA color.
@@ -53,6 +107,484 @@ type GridLine struct {
 	Name        string
 }
 
+// -- Style Tree Construction (The Cascade and Inheritance) --
+
+// BuildTree constructs the StyledNode tree, integrating Shadow DOM processing.
+func (se *Engine) BuildTree(node *html.Node, parent *StyledNode) *StyledNode {
+	return se.buildTreeRecursive(node, parent, se.authorSheets)
+}
+
+// buildTreeRecursive is the internal implementation that handles scoped stylesheets for Shadow DOM.
+func (se *Engine) buildTreeRecursive(node *html.Node, parent *StyledNode, scopedSheets []parser.StyleSheet) *StyledNode {
+	if node.Type == html.CommentNode {
+		return nil
+	}
+	// Skip <head> element content.
+	if parent != nil && parent.Node != nil && parent.Node.Type == html.ElementNode && strings.ToLower(parent.Node.Data) == "html" {
+		if node.Type == html.ElementNode && strings.ToLower(node.Data) == "head" {
+			return nil
+		}
+	}
+
+	computedStyles := make(map[parser.Property]parser.Value)
+
+	// Calculate styles based on the cascade using the provided scoped stylesheets.
+	if node.Type == html.ElementNode {
+		computedStyles = se.CalculateStyles(node, scopedSheets)
+	}
+
+	styledNode := &StyledNode{
+		Node:           node,
+		ComputedStyles: computedStyles,
+	}
+
+	// Handle inheritance from parent styles.
+	if parent != nil {
+		se.inheritStyles(styledNode, parent)
+	} else {
+		se.applyRootDefaults(styledNode)
+	}
+
+	// Resolve relative values like 'em' or '%' into absolute pixel values.
+	se.resolveRelativeValues(styledNode, parent)
+
+	// Check if this node is a shadow host and process its shadow root.
+	if se.shadowEngine.DetectShadowHost(node) {
+		// Instantiate the shadow root and get its encapsulated stylesheets.
+		shadowRootNode, shadowScopedSheets := se.shadowEngine.InstantiateShadowRoot(node)
+		if shadowRootNode != nil {
+			// Build the shadow tree recursively with its own scoped styles.
+			// The host (styledNode) is passed as the parent for inheritance across the boundary.
+			styledNode.ShadowRoot = se.buildTreeRecursive(shadowRootNode, styledNode, shadowScopedSheets)
+		}
+	}
+
+	// Recursively style light DOM children.
+	for c := node.FirstChild; c != nil; c = c.NextSibling {
+		childStyled := se.buildTreeRecursive(c, styledNode, scopedSheets)
+		if childStyled != nil {
+			styledNode.Children = append(styledNode.Children, childStyled)
+		}
+	}
+
+	return styledNode
+}
+
+// applies default styles to the root element.
+func (se *Engine) applyRootDefaults(sn *StyledNode) {
+	if _, exists := sn.ComputedStyles["font-size"]; !exists {
+		sn.ComputedStyles["font-size"] = parser.Value(fmt.Sprintf("%fpx", BaseFontSize))
+	}
+}
+
+// inheritStyles applies CSS inheritance rules from a parent node to a child node.
+func (se *Engine) inheritStyles(child, parent *StyledNode) {
+	inheritableProperties := map[parser.Property]bool{
+		"color": true, "font-family": true, "font-size": true, "font-weight": true,
+		"line-height": true, "text-align": true, "visibility": true, "cursor": true,
+	}
+
+	// Handle explicit 'inherit' keyword.
+	for prop, val := range child.ComputedStyles {
+		if val == "inherit" {
+			if parentVal, parentHas := parent.ComputedStyles[prop]; parentHas {
+				child.ComputedStyles[prop] = parentVal
+			}
+		}
+	}
+
+	// Handle standard inheritance for properties that do so by default.
+	for prop := range inheritableProperties {
+		if _, exists := child.ComputedStyles[prop]; !exists {
+			if val, parentHas := parent.ComputedStyles[prop]; parentHas {
+				child.ComputedStyles[prop] = val
+			}
+		}
+	}
+}
+
+// resolveRelativeValues computes values that depend on other computed values (e.g., em units).
+func (se *Engine) resolveRelativeValues(sn *StyledNode, parent *StyledNode) {
+	// Resolve font-size first, as other units may depend on it.
+	parentFontSize := BaseFontSize
+	if parent != nil {
+		parentFontSize = ParseAbsoluteLength(parent.Lookup("font-size", fmt.Sprintf("%fpx", BaseFontSize)))
+	}
+
+	if fontSizeStr, ok := sn.ComputedStyles["font-size"]; ok {
+		resolvedFontSize := ParseLengthWithUnits(string(fontSizeStr), parentFontSize, BaseFontSize, parentFontSize, se.viewportWidth, se.viewportHeight)
+		sn.ComputedStyles["font-size"] = parser.Value(fmt.Sprintf("%fpx", resolvedFontSize))
+	}
+
+	currentFontSize := ParseAbsoluteLength(sn.Lookup("font-size", fmt.Sprintf("%fpx", BaseFontSize)))
+
+	// Resolve line-height.
+	if lineHeightStr, ok := sn.ComputedStyles["line-height"]; ok {
+		resolvedLineHeight := se.resolveLineHeight(string(lineHeightStr), currentFontSize)
+		sn.ComputedStyles["line-height"] = parser.Value(fmt.Sprintf("%fpx", resolvedLineHeight))
+	}
+}
+
+// resolveLineHeight handles unitless multipliers and other length values for line-height.
+func (se *Engine) resolveLineHeight(value string, fontSize float64) float64 {
+	value = strings.TrimSpace(value)
+	if value == "normal" {
+		return fontSize * DefaultLineHeight
+	}
+
+	// Check for unitless number (multiplier).
+	if val, err := parseFloat(value); err == nil && !strings.ContainsAny(value, "px%emremvwvhvminvmax") {
+		return fontSize * val
+	}
+
+	// Treat as a standard length.
+	return ParseLengthWithUnits(value, fontSize, BaseFontSize, 0, se.viewportWidth, se.viewportHeight)
+}
+
+// StyleOrigin and DeclarationWithContext are used for the CSS cascade algorithm.
+type StyleOrigin int
+
+const (
+	OriginUserAgent StyleOrigin = iota
+	OriginAuthor
+	OriginInline
+)
+
+type DeclarationWithContext struct {
+	Declaration parser.Declaration
+	Specificity struct{ A, B, C int }
+	Origin      StyleOrigin
+	Order       int
+}
+
+// CalculateStyles determines the final computed styles for a node using the cascade algorithm.
+func (se *Engine) CalculateStyles(node *html.Node, scopedSheets []parser.StyleSheet) map[parser.Property]parser.Value {
+	var declarations []DeclarationWithContext
+	order := 0
+
+	processSheets := func(sheets []parser.StyleSheet, origin StyleOrigin) {
+		for _, sheet := range sheets {
+			for _, rule := range sheet.Rules {
+				for _, selectorGroup := range rule.SelectorGroups {
+					if matchingComplexSelector, ok := se.matches(node, selectorGroup); ok {
+						a, b, c := matchingComplexSelector.CalculateSpecificity()
+						for _, decl := range rule.Declarations {
+							declarations = append(declarations, DeclarationWithContext{
+								Declaration: decl,
+								Specificity: struct{ A, B, C int }{a, b, c},
+								Origin:      origin,
+								Order:       order,
+							})
+							order++
+						}
+						break
+					}
+				}
+			}
+		}
+	}
+
+	// 1. User Agent styles
+	processSheets(se.userAgentSheets, OriginUserAgent)
+	// 2. Author styles (scoped to the current DOM tree)
+	processSheets(scopedSheets, OriginAuthor)
+
+	// 3. Inline styles
+	for _, attr := range node.Attr {
+		if attr.Key == "style" {
+			inlineDecls := parseInlineStyles(attr.Val)
+			for _, decl := range inlineDecls {
+				declarations = append(declarations, DeclarationWithContext{
+					Declaration: decl,
+					Specificity: struct{ A, B, C int }{1, 0, 0}, // Inline styles have high specificity
+					Origin:      OriginInline,
+					Order:       order,
+				})
+				order++
+			}
+		}
+	}
+
+	// Sort declarations based on cascade priority (importance, origin, specificity, order).
+	sort.Slice(declarations, func(i, j int) bool {
+		d1, d2 := declarations[i], declarations[j]
+		p1, p2 := calculateCascadePriority(d1), calculateCascadePriority(d2)
+		if p1 != p2 {
+			return p1 < p2
+		}
+		s1, s2 := d1.Specificity, d2.Specificity
+		if s1.A != s2.A {
+			return s1.A < s2.A
+		}
+		if s1.B != s2.B {
+			return s1.B < s2.B
+		}
+		if s1.C != s2.C {
+			return s1.C < s2.C
+		}
+		return d1.Order < d2.Order
+	})
+
+	// Apply the winning declarations.
+	styles := make(map[parser.Property]parser.Value)
+	for _, declCtx := range declarations {
+		styles[declCtx.Declaration.Property] = declCtx.Declaration.Value
+	}
+
+	expandShorthands(styles)
+	return styles
+}
+
+func expandShorthands(styles map[parser.Property]parser.Value) {
+	expandFlexShorthand(styles)
+	expand1To4Shorthand(styles, "margin", "margin-top", "margin-right", "margin-bottom", "margin-left")
+	expand1To4Shorthand(styles, "padding", "padding-top", "padding-right", "padding-bottom", "padding-left")
+	expand1To4Shorthand(styles, "border-width", "border-top-width", "border-right-width", "border-bottom-width", "border-left-width")
+
+	if borderVal, ok := styles["border"]; ok {
+		parts := strings.Fields(string(borderVal))
+		width, styleVal := "medium", "none"
+		foundWidth, foundStyle := false, false
+		for _, part := range parts {
+			if !foundWidth && (strings.ContainsAny(part, "px%emremvwvh") || (len(part) > 0 && (part[0] >= '0' && part[0] <= '9')) || part == "thin" || part == "medium" || part == "thick") {
+				width = part
+				foundWidth = true
+			} else if !foundStyle && (part == "solid" || part == "dashed" || part == "dotted" || part == "double" || part == "none" || part == "hidden") {
+				styleVal = part
+				foundStyle = true
+			}
+		}
+		for _, side := range []string{"top", "right", "bottom", "left"} {
+			styles[parser.Property("border-"+side+"-width")] = parser.Value(width)
+			styles[parser.Property("border-"+side+"-style")] = parser.Value(styleVal)
+		}
+	}
+}
+
+func expand1To4Shorthand(styles map[parser.Property]parser.Value, shorthand, top, right, bottom, left parser.Property) {
+	val, ok := styles[shorthand]
+	if !ok {
+		return
+	}
+	parts := strings.Fields(string(val))
+	switch len(parts) {
+	case 1:
+		v1 := parser.Value(parts[0])
+		styles[top], styles[right], styles[bottom], styles[left] = v1, v1, v1, v1
+	case 2:
+		v1, v2 := parser.Value(parts[0]), parser.Value(parts[1])
+		styles[top], styles[right], styles[bottom], styles[left] = v1, v2, v1, v2
+	case 3:
+		v1, v2, v3 := parser.Value(parts[0]), parser.Value(parts[1]), parser.Value(parts[2])
+		styles[top], styles[right], styles[bottom], styles[left] = v1, v2, v3, v2
+	case 4:
+		v1, v2, v3, v4 := parser.Value(parts[0]), parser.Value(parts[1]), parser.Value(parts[2]), parser.Value(parts[3])
+		styles[top], styles[right], styles[bottom], styles[left] = v1, v2, v3, v4
+	}
+}
+
+func expandFlexShorthand(styles map[parser.Property]parser.Value) {
+	flexVal, ok := styles["flex"]
+	if !ok {
+		return
+	}
+	grow, shrink, basis := "0", "1", "auto"
+	parts := strings.Fields(string(flexVal))
+	isLengthCheck := func(s string) bool {
+		return strings.ContainsAny(s, "px%emremvwvhvminvmax") || (s == "0" && len(s) == 1)
+	}
+
+	if len(parts) == 1 {
+		switch parts[0] {
+		case "none":
+			grow, shrink, basis = "0", "0", "auto"
+		case "auto":
+			grow, shrink, basis = "1", "1", "auto"
+		default:
+			isLength := isLengthCheck(parts[0])
+			if _, err := parseFloat(parts[0]); err == nil && !isLength {
+				grow = parts[0]
+			} else {
+				basis = parts[0]
+				grow = "1"
+				shrink = "1"
+			}
+		}
+	} else if len(parts) == 2 {
+		grow = parts[0]
+		isLength := isLengthCheck(parts[1])
+		if _, err := parseFloat(parts[1]); err == nil && !isLength {
+			shrink = parts[1]
+		} else {
+			basis = parts[1]
+		}
+	} else if len(parts) >= 3 {
+		grow = parts[0]
+		shrink = parts[1]
+		basis = parts[2]
+	}
+
+	styles["flex-grow"] = parser.Value(grow)
+	styles["flex-shrink"] = parser.Value(shrink)
+	styles["flex-basis"] = parser.Value(basis)
+}
+
+func calculateCascadePriority(d DeclarationWithContext) int {
+	isImportant := d.Declaration.Important
+	switch d.Origin {
+	case OriginUserAgent:
+		if isImportant {
+			return 5
+		}
+		return 1
+	case OriginAuthor:
+		if isImportant {
+			return 4
+		}
+		return 2
+	case OriginInline:
+		if isImportant {
+			return 4
+		}
+		return 3
+	}
+	return 0
+}
+
+func parseInlineStyles(styleAttr string) []parser.Declaration {
+	var decls []parser.Declaration
+	parts := strings.Split(styleAttr, ";")
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		kv := strings.SplitN(part, ":", 2)
+		if len(kv) == 2 {
+			prop, val := strings.TrimSpace(kv[0]), strings.TrimSpace(kv[1])
+			important := false
+			if strings.HasSuffix(strings.ToLower(val), "!important") {
+				important = true
+				val = strings.TrimSpace(val[:len(val)-len("!important")])
+			}
+			decls = append(decls, parser.Declaration{
+				Property: parser.Property(prop), Value: parser.Value(val), Important: important,
+			})
+		}
+	}
+	return decls
+}
+
+// -- Advanced Selector Matching (Combinators) --
+func (se *Engine) matches(node *html.Node, group parser.SelectorGroup) (*parser.ComplexSelector, bool) {
+	if node.Type != html.ElementNode {
+		return nil, false
+	}
+	for _, complexSelector := range group {
+		currentIndex := len(complexSelector.Selectors) - 1
+		if currentIndex < 0 {
+			continue
+		}
+		if se.recursiveMatch(node, complexSelector, currentIndex) {
+			return &complexSelector, true
+		}
+	}
+	return nil, false
+}
+
+func (se *Engine) recursiveMatch(node *html.Node, complexSelector parser.ComplexSelector, index int) bool {
+	if node == nil || index < 0 {
+		return false
+	}
+	if node.Type != html.ElementNode {
+		return false
+	}
+	currentSelectorWithCombinator := complexSelector.Selectors[index]
+	if !se.matchesSimple(node, currentSelectorWithCombinator.SimpleSelector) {
+		return false
+	}
+	if index == 0 {
+		return true
+	}
+	nextIndex := index - 1
+	combinator := currentSelectorWithCombinator.Combinator
+	switch combinator {
+	case parser.CombinatorDescendant:
+		for parent := node.Parent; parent != nil; parent = parent.Parent {
+			if se.recursiveMatch(parent, complexSelector, nextIndex) {
+				return true
+			}
+		}
+		return false
+	case parser.CombinatorChild:
+		return se.recursiveMatch(node.Parent, complexSelector, nextIndex)
+	case parser.CombinatorAdjacentSibling:
+		prevSibling := getPreviousElementSibling(node)
+		return se.recursiveMatch(prevSibling, complexSelector, nextIndex)
+	case parser.CombinatorGeneralSibling:
+		for sibling := getPreviousElementSibling(node); sibling != nil; sibling = getPreviousElementSibling(sibling) {
+			if se.recursiveMatch(sibling, complexSelector, nextIndex) {
+				return true
+			}
+		}
+		return false
+	case parser.CombinatorNone:
+		return true
+	}
+	return false
+}
+
+func getPreviousElementSibling(node *html.Node) *html.Node {
+	sibling := node.PrevSibling
+	for sibling != nil {
+		if sibling.Type == html.ElementNode {
+			return sibling
+		}
+		sibling = sibling.PrevSibling
+	}
+	return nil
+}
+
+func (se *Engine) matchesSimple(node *html.Node, selector parser.SimpleSelector) bool {
+	if selector.TagName != "" && selector.TagName != "*" && strings.ToLower(node.Data) != selector.TagName {
+		return false
+	}
+	if selector.ID != "" {
+		idFound := false
+		for _, attr := range node.Attr {
+			if attr.Key == "id" && attr.Val == selector.ID {
+				idFound = true
+				break
+			}
+		}
+		if !idFound {
+			return false
+		}
+	}
+	if len(selector.Classes) > 0 {
+		var nodeClasses []string
+		for _, attr := range node.Attr {
+			if attr.Key == "class" {
+				nodeClasses = strings.Fields(attr.Val)
+				break
+			}
+		}
+		for _, requiredClass := range selector.Classes {
+			found := false
+			for _, nodeClass := range nodeClasses {
+				if nodeClass == requiredClass {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // -- Value Lookup and Property Parsers --
 
 // Lookup retrieves a style, falling back if not present.
@@ -67,22 +599,18 @@ func (sn *StyledNode) Lookup(property, fallback string) string {
 func ParseColor(value string) (Color, bool) {
 	value = strings.TrimSpace(strings.ToLower(value))
 
-	// 1. Keywords
 	if color, ok := cssColors[value]; ok {
 		return color, true
 	}
 
-	// 2. Hex codes
 	if strings.HasPrefix(value, "#") {
 		return parseHexColor(value)
 	}
 
-	// 3. rgb() / rgba()
 	if strings.HasPrefix(value, "rgb") {
 		return parseRGBColor(value)
 	}
 
-	// Default to black if parsing fails (common browser behavior).
 	return Color{0, 0, 0, 255}, false
 }
 
@@ -92,23 +620,19 @@ func parseHexColor(hex string) (Color, bool) {
 
 	switch len(hex) {
 	case 3:
-		// #RGB -> #RRGGBB
 		r = hexDigit(hex[0]) * 17
 		g = hexDigit(hex[1]) * 17
 		b = hexDigit(hex[2]) * 17
 	case 4:
-		// #RGBA -> #RRGGBBAA
 		r = hexDigit(hex[0]) * 17
 		g = hexDigit(hex[1]) * 17
 		b = hexDigit(hex[2]) * 17
 		a = hexDigit(hex[3]) * 17
 	case 6:
-		// #RRGGBB
 		r = hexDigit(hex[0])<<4 | hexDigit(hex[1])
 		g = hexDigit(hex[2])<<4 | hexDigit(hex[3])
 		b = hexDigit(hex[4])<<4 | hexDigit(hex[5])
 	case 8:
-		// #RRGGBBAA
 		r = hexDigit(hex[0])<<4 | hexDigit(hex[1])
 		g = hexDigit(hex[2])<<4 | hexDigit(hex[3])
 		b = hexDigit(hex[4])<<4 | hexDigit(hex[5])
@@ -139,12 +663,10 @@ func parseRGBColor(value string) (Color, bool) {
 		return Color{}, false
 	}
 
-	// Split by comma or space (CSS Color Module Level 4 allows space separation).
 	parts := strings.FieldsFunc(matches[1], func(r rune) bool {
 		return r == ',' || r == ' '
 	})
 
-	// Filter out empty strings and handle slash separator for alpha.
 	var values []string
 	for i := 0; i < len(parts); i++ {
 		p := parts[i]
@@ -152,14 +674,12 @@ func parseRGBColor(value string) (Color, bool) {
 			continue
 		}
 		if p == "/" {
-			// If slash is found, the next part must be the alpha channel.
 			if i+1 < len(parts) && parts[i+1] != "" {
 				values = append(values, parts[i+1])
 				i++
 			}
 			continue
 		}
-		// If we already have 3 components and haven't found a slash, stop (invalid format).
 		if len(values) < 3 {
 			values = append(values, p)
 		}
@@ -189,23 +709,19 @@ func parseColorComponent(value string, isAlpha bool) uint8 {
 		if err != nil {
 			return 0
 		}
-		// Both RGB and Alpha percentages are scaled to 0-255.
 		return uint8(clamp(percent/100.0*255.0, 0, 255))
 	}
 
 	if isAlpha {
-		// Alpha is a float between 0.0 and 1.0.
 		val, err := strconv.ParseFloat(value, 64)
 		if err != nil {
-			return 255 // Default alpha to 1 if parsing fails
+			return 255
 		}
 		return uint8(clamp(val*255.0, 0, 255))
 	}
 
-	// RGB components are integers between 0 and 255.
 	val, err := strconv.Atoi(value)
 	if err != nil {
-		// Allow floats as well, rounding.
 		if fval, err := strconv.ParseFloat(value, 64); err == nil {
 			return uint8(clamp(fval+0.5, 0, 255))
 		}
@@ -414,7 +930,6 @@ func (sn *StyledNode) GetJustifyContent() JustifyContent {
 	case "space-evenly":
 		return JustifySpaceEvenly
 	default:
-		// "normal" often behaves as flex-start in flex layout.
 		return JustifyFlexStart
 	}
 }
@@ -431,7 +946,6 @@ const (
 )
 
 func (sn *StyledNode) GetAlignItems() AlignItems {
-	// Default for flexbox is stretch.
 	switch sn.Lookup("align-items", "stretch") {
 	case "flex-start":
 		return AlignFlexStart
@@ -442,7 +956,6 @@ func (sn *StyledNode) GetAlignItems() AlignItems {
 	case "baseline":
 		return AlignBaseline
 	default:
-		// "normal" behaves as stretch in flex layout.
 		return AlignStretch
 	}
 }
@@ -490,7 +1003,6 @@ const (
 )
 
 func (sn *StyledNode) GetAlignContent() AlignContent {
-	// Default for align-content is 'normal' which behaves as 'stretch'.
 	switch sn.Lookup("align-content", "stretch") {
 	case "flex-start":
 		return AlignContentFlexStart
@@ -518,7 +1030,6 @@ func (sn *StyledNode) IsVisible() bool {
 	if visibility == "hidden" || visibility == "collapse" {
 		return false
 	}
-	// Check opacity.
 	opacityStr := sn.Lookup("opacity", "1.0")
 	if opacity, err := strconv.ParseFloat(opacityStr, 64); err == nil && opacity <= 0.0 {
 		return false
@@ -639,7 +1150,6 @@ func (sn *StyledNode) ParseGridLine(property, fallback string) GridLine {
 	return GridLine{Name: value}
 }
 
-// getDefaultDisplay provides a basic User Agent stylesheet equivalent.
 func getDefaultDisplay(node *html.Node) DisplayType {
 	if node.Type != html.ElementNode {
 		return DisplayInline
@@ -659,4 +1169,155 @@ func getDefaultDisplay(node *html.Node) DisplayType {
 	default:
 		return DisplayInline
 	}
+}
+
+// -- Public Helpers --
+
+// GetFontSize is a public helper to get the font size from a styled node.
+func GetFontSize(sn *StyledNode) float64 {
+	if sn == nil {
+		return BaseFontSize
+	}
+	return ParseAbsoluteLength(sn.Lookup("font-size", fmt.Sprintf("%fpx", BaseFontSize)))
+}
+
+// ParseLengthWithUnits is a public helper to parse CSS length values.
+func ParseLengthWithUnits(value string, parentFontSize, rootFontSize, referenceDimension, viewportWidth, viewportHeight float64) float64 {
+	value = strings.TrimSpace(value)
+	if value == "" || value == "auto" || value == "normal" {
+		return 0.0
+	}
+
+	if strings.HasSuffix(value, "%") {
+		if percent, err := parseFloat(strings.TrimSuffix(value, "%")); err == nil {
+			return referenceDimension * (percent / 100.0)
+		}
+	}
+	if strings.HasSuffix(value, "px") {
+		if px, err := parseFloat(strings.TrimSuffix(value, "px")); err == nil {
+			return px
+		}
+	}
+	if strings.HasSuffix(value, "em") {
+		if val, err := parseFloat(strings.TrimSuffix(value, "em")); err == nil {
+			return val * parentFontSize
+		}
+	}
+	if strings.HasSuffix(value, "rem") {
+		if val, err := parseFloat(strings.TrimSuffix(value, "rem")); err == nil {
+			return val * rootFontSize
+		}
+	}
+	if strings.HasSuffix(value, "vw") {
+		if val, err := parseFloat(strings.TrimSuffix(value, "vw")); err == nil {
+			return viewportWidth * (val / 100.0)
+		}
+	}
+	if strings.HasSuffix(value, "vh") {
+		if val, err := parseFloat(strings.TrimSuffix(value, "vh")); err == nil {
+			return viewportHeight * (val / 100.0)
+		}
+	}
+	if strings.HasSuffix(value, "vmin") {
+		if val, err := parseFloat(strings.TrimSuffix(value, "vmin")); err == nil {
+			return min(viewportWidth, viewportHeight) * (val / 100.0)
+		}
+	}
+	if strings.HasSuffix(value, "vmax") {
+		if val, err := parseFloat(strings.TrimSuffix(value, "vmax")); err == nil {
+			return max(viewportWidth, viewportHeight) * (val / 100.0)
+		}
+	}
+	if val, err := parseFloat(value); err == nil {
+		return val
+	}
+	return 0.0
+}
+
+// -- NEW: Placeholder function for GetFontAscent --
+// Provides a reasonable estimate for font ascent, crucial for baseline alignment.
+// A real implementation would require a font rendering library.
+func GetFontAscent(sn *StyledNode) float64 {
+	fontSize := GetFontSize(sn)
+	// Common heuristic: ascent is about 80% of the font size.
+	return fontSize * 0.8
+}
+
+// -- NEW: Placeholder function for MeasureText --
+// Provides a rough estimate for the width of a text node.
+// A real implementation would use a font library to measure the glyphs.
+func MeasureText(sn *StyledNode) (width, height float64) {
+	if sn == nil || sn.Node == nil || sn.Node.Type != html.TextNode {
+		return 0, 0
+	}
+	text := sn.Node.Data
+	fontSize := GetFontSize(sn)
+	// Super simple heuristic: width is number of chars * half the font size.
+	// This is wildly inaccurate but prevents the layout from collapsing to zero.
+	estimatedWidth := float64(len(text)) * fontSize * 0.6
+	return estimatedWidth, fontSize
+}
+
+// -- Internal Helpers --
+
+// MODIFIED: Renamed to ParseAbsoluteLength to make it public.
+func ParseAbsoluteLength(value string) float64 {
+	return ParseLengthWithUnits(value, 0, 0, 0, 0, 0)
+}
+
+func parseFloat(s string) (float64, error) {
+	var result float64
+	var sign float64 = 1
+	var decimalPoint bool
+	var decimalPlace float64 = 0.1
+	if len(s) == 0 {
+		return 0, fmt.Errorf("empty string")
+	}
+	i := 0
+	if s[0] == '-' {
+		sign = -1
+		i++
+	} else if s[0] == '+' {
+		i++
+	}
+	parsedSomething := false
+	for ; i < len(s); i++ {
+		ch := s[i]
+		if ch >= '0' && ch <= '9' {
+			parsedSomething = true
+			digit := float64(ch - '0')
+			if decimalPoint {
+				result += digit * decimalPlace
+				decimalPlace *= 0.1
+			} else {
+				result = result*10 + digit
+			}
+		} else if ch == '.' && !decimalPoint {
+			parsedSomething = true
+			decimalPoint = true
+		} else {
+			break
+		}
+	}
+	if !parsedSomething {
+		return 0, fmt.Errorf("invalid float format: %s", s)
+	}
+	if result == 0 && sign == -1 {
+		return 0, nil
+	}
+	return result * sign, nil
+}
+
+func min(a, b float64) float64 {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func max(a, b float64) float64 {
+	if a > b {
+		return a
+	}
+	return b
 }

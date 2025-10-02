@@ -103,31 +103,10 @@ type ExecutionResult struct {
 	Status          string                 `json:"status"` // "success" or "failed"
 	ObservationType ObservationType        `json:"observation_type"`
 	Data            interface{}            `json:"data,omitempty"`
-	ErrorCode       string                 `json:"error_code,omitempty"`
+	ErrorCode       ErrorCode              `json:"error_code,omitempty"`
 	ErrorDetails    map[string]interface{} `json:"error_details,omitempty"`
 }
 
-// Define specific error codes for Humanoid and general execution failures.
-const (
-	// General Execution Errors
-	ErrCodeExecutionFailure = "EXECUTION_FAILURE"
-	ErrCodeNotImplemented   = "NOT_IMPLEMENTED"
-	ErrCodeInvalidParameters = "INVALID_PARAMETERS"
-
-	// Browser/DOM Errors (used by both ExecutorRegistry and Agent/Humanoid)
-	ErrCodeElementNotFound = "ELEMENT_NOT_FOUND"
-	ErrCodeTimeoutError    = "TIMEOUT_ERROR"
-	ErrCodeNavigationError = "NAVIGATION_ERROR"
-
-	// Humanoid-specific errors
-	// ErrCodeHumanoidTargetNotVisible indicates the element exists but cannot be interacted with visually (e.g., obscured, off-screen).
-	// This is crucial for the Mind to decide to scroll.
-	ErrCodeHumanoidTargetNotVisible = "HUMANOID_TARGET_NOT_VISIBLE"
-	// ErrCodeHumanoidGeometryInvalid indicates the element's coordinates or structure are invalid (e.g., zero size).
-	ErrCodeHumanoidGeometryInvalid = "HUMANOID_GEOMETRY_INVALID"
-	// ErrCodeHumanoidInteractionFailed is a generic failure during the interaction process.
-	ErrCodeHumanoidInteractionFailed = "HUMANOID_INTERACTION_FAILED"
-)
 
 // CognitiveMessageType defines the message types used on the CognitiveBus.
 type CognitiveMessageType string

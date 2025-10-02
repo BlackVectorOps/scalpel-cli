@@ -3,6 +3,7 @@ package taint
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -91,11 +92,6 @@ func (m *MockSessionContext) SimulateCallback(t *testing.T, name string, payload
 	}
 }
 
-func (m *MockSessionContext) ExecuteScript(ctx context.Context, script string, res interface{}) error {
-	args := m.Called(ctx, script, res)
-	return args.Error(0)
-}
-
 func (m *MockSessionContext) Navigate(ctx context.Context, url string) error {
 	args := m.Called(ctx, url)
 	return args.Error(0)
@@ -111,7 +107,6 @@ func (m *MockSessionContext) Close(ctx context.Context) error {
 	return args.Error(0)
 }
 
-// FIX: ALL interaction methods now correctly include context.Context to satisfy the interface.
 func (m *MockSessionContext) Click(ctx context.Context, selector string) error {
 	args := m.Called(ctx, selector)
 	return args.Error(0)
@@ -150,7 +145,6 @@ func (m *MockSessionContext) AddFinding(finding schemas.Finding) error {
 	return args.Error(0)
 }
 
-// FIX: This is the single, correct implementation of CollectArtifacts with context.Context.
 func (m *MockSessionContext) CollectArtifacts(ctx context.Context) (*schemas.Artifacts, error) {
 	args := m.Called(ctx)
 	var artifacts *schemas.Artifacts
@@ -160,7 +154,37 @@ func (m *MockSessionContext) CollectArtifacts(ctx context.Context) (*schemas.Art
 	return artifacts, args.Error(1)
 }
 
+func (m *MockSessionContext) Sleep(ctx context.Context, d time.Duration) error {
+	args := m.Called(ctx, d)
+	return args.Error(0)
+}
 
+func (m *MockSessionContext) DispatchMouseEvent(ctx context.Context, data schemas.MouseEventData) error {
+	args := m.Called(ctx, data)
+	return args.Error(0)
+}
+
+func (m *MockSessionContext) SendKeys(ctx context.Context, keys string) error {
+	args := m.Called(ctx, keys)
+	return args.Error(0)
+}
+
+func (m *MockSessionContext) GetElementGeometry(ctx context.Context, selector string) (*schemas.ElementGeometry, error) {
+	args := m.Called(ctx, selector)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(*schemas.ElementGeometry), args.Error(1)
+}
+
+func (m *MockSessionContext) ExecuteScript(ctx context.Context, script string, args []interface{}) (json.RawMessage, error) {
+	callArgs := m.Called(ctx, script, args)
+	var res json.RawMessage
+	if callArgs.Get(0) != nil {
+		res = callArgs.Get(0).(json.RawMessage)
+	}
+	return res, callArgs.Error(1)
+}
 
 // MockResultsReporter mocks the ResultsReporter interface.
 type MockResultsReporter struct {
@@ -204,7 +228,6 @@ func (m *MockOASTProvider) GetServerURL() string {
 
 // Test Setup Helper
 
-// FIX: Updated return signature, removed BrowserInteractor management.
 func setupAnalyzer(t *testing.T, configMod func(*Config), oastEnabled bool) (*Analyzer, *MockResultsReporter, *MockOASTProvider) {
 	t.Helper()
 	logger := zaptest.NewLogger(t)
@@ -238,7 +261,6 @@ func setupAnalyzer(t *testing.T, configMod func(*Config), oastEnabled bool) (*An
 		oastProviderIface = oastProvider
 	}
 
-	// FIX: Updated NewAnalyzer call signature (removed browser argument).
 	analyzer, err := NewAnalyzer(config, reporter, oastProviderIface, logger)
 	require.NoError(t, err, "NewAnalyzer should not return an error")
 	return analyzer, reporter, oastProvider
@@ -253,7 +275,6 @@ func TestNewAnalyzer_Defaults(t *testing.T) {
 		Target: targetURL,
 	}
 
-	// FIX: Updated NewAnalyzer call signature.
 	analyzer, err := NewAnalyzer(config, nil, nil, zaptest.NewLogger(t))
 	require.NoError(t, err)
 	require.NotNil(t, analyzer)
@@ -275,7 +296,6 @@ func TestGenerateShim(t *testing.T) {
 		{Name: "eval", Type: schemas.SinkEval, ArgIndex: 0},
 		{Name: "Element.prototype.innerHTML", Type: schemas.SinkInnerHTML, Setter: true, ConditionID: "COND_TEST"},
 	}
-	// FIX: Updated setupAnalyzer usage
 	analyzer, _, _ := setupAnalyzer(t, func(c *Config) {
 		c.Sinks = sinks
 	}, false)
@@ -296,7 +316,6 @@ func TestGenerateShim(t *testing.T) {
 
 // TestInstrument_Success verifies the sequence of calls to instrument the browser session.
 func TestInstrument_Success(t *testing.T) {
-	// FIX: Updated setupAnalyzer usage
 	analyzer, _, _ := setupAnalyzer(t, nil, false)
 	mockSession := NewMockSessionContext()
 	ctx := context.Background()
@@ -316,7 +335,6 @@ func TestInstrument_Success(t *testing.T) {
 
 // TestInstrument_Failure_ExposeFunction verifies error handling during instrumentation.
 func TestInstrument_Failure_ExposeFunction(t *testing.T) {
-	// FIX: Updated setupAnalyzer usage
 	analyzer, _, _ := setupAnalyzer(t, nil, false)
 	mockSession := NewMockSessionContext()
 	ctx := context.Background()
@@ -337,7 +355,6 @@ func TestInstrument_Failure_ExposeFunction(t *testing.T) {
 // Test Cases: Probing Mechanics (Unit Tests)
 
 func TestGenerateCanary(t *testing.T) {
-	// FIX: Updated setupAnalyzer usage
 	analyzer, _, _ := setupAnalyzer(t, nil, false)
 
 	canary1 := analyzer.generateCanary("P", schemas.ProbeTypeXSS)
@@ -355,7 +372,6 @@ func TestGenerateCanary(t *testing.T) {
 // TestPreparePayload verifies placeholder replacement logic, including OAST scenarios.
 func TestPreparePayload(t *testing.T) {
 	// Setup analyzers with and without OAST
-	// FIX: Updated setupAnalyzer usage
 	analyzerNoOAST, _, _ := setupAnalyzer(t, nil, false)
 	analyzerWithOAST, _, mockOAST := setupAnalyzer(t, nil, true)
 
@@ -400,7 +416,6 @@ func TestPreparePayload(t *testing.T) {
 
 // TestRegisterProbe_Concurrency verifies thread-safe registration of probes.
 func TestRegisterProbe_Concurrency(t *testing.T) {
-	// FIX: Updated setupAnalyzer usage
 	analyzer, _, _ := setupAnalyzer(t, nil, false)
 
 	// Concurrently register many probes
@@ -440,7 +455,6 @@ func TestProbePersistentSources(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// FIX: Updated setupAnalyzer usage
 			analyzer, _, _ := setupAnalyzer(t, func(c *Config) {
 				c.Probes = probes
 				c.Target, _ = url.Parse(tt.targetURL)
@@ -450,14 +464,12 @@ func TestProbePersistentSources(t *testing.T) {
 			ctx := context.Background()
 
 			var capturedScript string
-			// FIX: Updated mock for ExecuteScript to include the third 'options' argument.
 			mockSession.On("ExecuteScript", ctx, mock.AnythingOfType("string"), mock.Anything).Run(func(args mock.Arguments) {
 				capturedScript = args.String(1)
-			}).Return(nil).Once()
+			}).Return(json.RawMessage("null"), nil).Once()
 
 			mockSession.On("Navigate", ctx, tt.targetURL).Return(nil).Once()
 
-			// FIX: Pass nil for the new humanoid and browserCtx arguments.
 			err := analyzer.probePersistentSources(ctx, mockSession, nil, nil)
 			require.NoError(t, err)
 
@@ -485,7 +497,6 @@ func TestProbeURLSources(t *testing.T) {
 		{Type: schemas.ProbeTypeXSS, Payload: "<XSS&={{.Canary}}"},
 		{Type: schemas.ProbeTypeGeneric, Payload: "GENERIC={{.Canary}}"},
 	}
-	// FIX: Updated setupAnalyzer usage
 	analyzer, _, _ := setupAnalyzer(t, func(c *Config) {
 		c.Probes = probes
 		c.Target, _ = url.Parse("http://example.com/page?existing=1")
@@ -505,7 +516,6 @@ func TestProbeURLSources(t *testing.T) {
 		}
 	})
 
-	// FIX: Pass nil for the new humanoid and browserCtx arguments.
 	err := analyzer.probeURLSources(ctx, mockSession, nil, nil)
 	require.NoError(t, err)
 
@@ -540,14 +550,12 @@ func TestProbeURLSources(t *testing.T) {
 // Setup/Teardown helpers for correlation tests.
 func setupCorrelationTest(t *testing.T) (*Analyzer, *MockResultsReporter) {
 	t.Helper()
-	// FIX: Updated setupAnalyzer usage
 	analyzer, reporter, _ := setupAnalyzer(t, func(c *Config) {
 		c.CleanupInterval = time.Hour
 	}, false)
 
 	analyzer.backgroundCtx, analyzer.backgroundCancel = context.WithCancel(context.Background())
 	analyzer.wg.Add(1)
-	// FIX: Call the correct worker method instead of the non-existent 'correlate'.
 	go analyzer.correlateWorker(0)
 	return analyzer, reporter
 }
@@ -584,7 +592,6 @@ func TestProcessSinkEvent_ValidFlow(t *testing.T) {
 
 	canary := analyzer.generateCanary("T", schemas.ProbeTypeXSS)
 	payload := fmt.Sprintf("<img src=x onerror=%s>", canary)
-	// FIX: Use schemas.SourceURLParam
 	probe := ActiveProbe{Type: schemas.ProbeTypeXSS, Canary: canary, Value: payload, Source: schemas.SourceURLParam}
 	analyzer.registerProbe(probe)
 
@@ -601,7 +608,6 @@ func TestProcessSinkEvent_ValidFlow(t *testing.T) {
 
 	assert.Equal(t, canary, finding.Canary)
 	assert.Equal(t, schemas.SinkInnerHTML, finding.Sink)
-	// FIX: Use schemas.SourceURLParam
 	assert.Equal(t, schemas.SourceURLParam, finding.Origin)
 	assert.False(t, finding.IsConfirmed)
 	assert.Equal(t, SanitizationNone, finding.SanitizationLevel)
@@ -613,14 +619,12 @@ func TestProcessOASTInteraction_Valid(t *testing.T) {
 
 	// Setup: Register an OAST probe
 	canary := analyzer.generateCanary("T", schemas.ProbeTypeOAST)
-	// FIX: Use schemas.SourceHeader
 	probe := ActiveProbe{Type: schemas.ProbeTypeOAST, Canary: canary, Source: schemas.SourceHeader}
 	analyzer.registerProbe(probe)
 
 	// Simulate OAST Interaction event
 	interactionTime := time.Now().UTC()
 
-	// FIX: Use the local taint.OASTInteraction type which implements Event interface.
 	oastEvent := OASTInteraction{
 		Canary:          canary,
 		Protocol:        "DNS",
@@ -630,7 +634,6 @@ func TestProcessOASTInteraction_Valid(t *testing.T) {
 
 	reporter.On("Report", mock.Anything).Return().Once()
 
-	// FIX: Send the local type which implements Event interface.
 	analyzer.eventsChan <- oastEvent
 	finalizeCorrelationTest(t, analyzer)
 
@@ -648,7 +651,6 @@ func TestProcessOASTInteraction_Valid(t *testing.T) {
 // Test Cases: False Positive Reduction Logic (Unit Tests)
 
 func TestIsContextValid(t *testing.T) {
-	// FIX: Updated setupAnalyzer usage
 	analyzer, _, _ := setupAnalyzer(t, nil, false)
 
 	tests := []struct {
@@ -661,7 +663,6 @@ func TestIsContextValid(t *testing.T) {
 		// Valid Flows
 		{"XSS -> innerHTML", schemas.ProbeTypeXSS, schemas.SinkInnerHTML, "<svg...>", true},
 		{"SSTI -> Eval", schemas.ProbeTypeSSTI, schemas.SinkEval, "{{7*7}}", true},
-		// FIX: Use SinkFetchURL (no underscore)
 		{"Generic -> Fetch URL", schemas.ProbeTypeGeneric, schemas.SinkFetchURL, "http://...", true},
 		{"XSS -> Navigation (javascript:)", schemas.ProbeTypeXSS, schemas.SinkNavigation, "javascript:alert(1)", true},
 
@@ -683,7 +684,6 @@ func TestIsContextValid(t *testing.T) {
 
 // TestCheckSanitization tests the heuristics for detecting payload modification.
 func TestCheckSanitization(t *testing.T) {
-	// FIX: Updated setupAnalyzer usage
 	analyzer, _, _ := setupAnalyzer(t, nil, false)
 	canary := "CANARY123"
 
@@ -733,7 +733,6 @@ func TestCheckSanitization(t *testing.T) {
 // Test Cases: Background Workers (State Management)
 
 func TestPollOASTInteractions_CanaryFiltering(t *testing.T) {
-	// FIX: Updated setupAnalyzer usage
 	analyzer, _, mockOAST := setupAnalyzer(t, func(c *Config) {
 		c.OASTPollingInterval = 10 * time.Millisecond
 	}, true)
@@ -769,7 +768,6 @@ func TestPollOASTInteractions_CanaryFiltering(t *testing.T) {
 // Test Cases: Overall Analysis Flow (Analyze Method Integration)
 
 func TestAnalyze_HappyPath(t *testing.T) {
-	// FIX: Updated setupAnalyzer usage (removed mockBrowser)
 	analyzer, reporter, mockOAST := setupAnalyzer(t, func(c *Config) {
 		// Ensure an OAST probe is present.
 		c.Probes = []ProbeDefinition{{Type: schemas.ProbeTypeOAST, Payload: "http://{{.OASTServer}}/{{.Canary}}"}}
@@ -780,14 +778,12 @@ func TestAnalyze_HappyPath(t *testing.T) {
 
 	// --- Mock Expectations (Simplified for brevity) ---
 	mockSession.On("ID").Return("mock-session-id").Maybe()
-	// FIX: Add the missing expectation for the GetContext() call.
 	mockSession.On("GetContext").Return(nil).Maybe()
 	mockSession.On("ExposeFunction", mock.Anything, mock.Anything, mock.Anything).Return(nil).Times(3)
 	mockSession.On("InjectScriptPersistently", mock.Anything, mock.Anything).Return(nil).Once()
 	mockSession.On("Navigate", mock.Anything, mock.Anything).Return(nil).Times(4) // Initial, Refresh, Query, Hash
-	mockSession.On("ExecuteScript", mock.Anything, mock.Anything, mock.Anything).Return(nil).Once()
-	mockSession.On("CollectArtifacts").Return(&schemas.Artifacts{}, nil).Maybe()
-
+	mockSession.On("ExecuteScript", mock.Anything, mock.Anything, mock.Anything).Return(json.RawMessage("null"), nil).Once()
+	mockSession.On("CollectArtifacts", mock.Anything).Return(&schemas.Artifacts{}, nil).Maybe()
 
 	// Interaction Phase
 	mockSession.On("Interact", mock.Anything, mock.Anything).Return(nil).Once().Run(func(args mock.Arguments) {
@@ -803,11 +799,9 @@ func TestAnalyze_HappyPath(t *testing.T) {
 		analyzer.probesMutex.RUnlock()
 		require.NotEmpty(t, activeCanary)
 
-		// FIX: Use SinkFetchURL
 		mockSession.SimulateCallback(t, JSCallbackSinkEvent, SinkEvent{Type: schemas.SinkFetchURL, Value: "http://oast.example.com/" + activeCanary})
 
 		reporter.On("Report", mock.MatchedBy(func(f CorrelatedFinding) bool {
-			// FIX: Use SinkFetchURL
 			return f.Canary == activeCanary && f.Sink == schemas.SinkFetchURL
 		})).Once()
 	})
@@ -816,7 +810,6 @@ func TestAnalyze_HappyPath(t *testing.T) {
 	mockOAST.On("GetInteractions", mock.Anything, mock.Anything).Return([]schemas.OASTInteraction{}, nil).Maybe()
 
 	// --- Execute Analysis ---
-	// FIX: Pass the session context to Analyze.
 	err := analyzer.Analyze(ctx, mockSession)
 	assert.NoError(t, err)
 
@@ -826,3 +819,4 @@ func TestAnalyze_HappyPath(t *testing.T) {
 	mockOAST.AssertCalled(t, "GetInteractions", mock.Anything, mock.Anything)
 	assert.Error(t, analyzer.backgroundCtx.Err())
 }
+

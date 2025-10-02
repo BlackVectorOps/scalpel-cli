@@ -4,7 +4,6 @@ package timeslip
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -19,12 +18,11 @@ func ExecuteH1Concurrent(ctx context.Context, candidate *RaceCandidate, config *
 	startTime := time.Now()
 
 	// 1. Configure the client.
-	clientConfig := network.NewDefaultClientConfig()
-	clientConfig.ForceHTTP2 = false
+	// FIX: Renamed function, updated fields, and removed obsolete settings.
+	clientConfig := network.NewBrowserClientConfig()
 	clientConfig.RequestTimeout = config.Timeout
-	clientConfig.IgnoreTLSErrors = config.IgnoreTLSErrors
-	clientConfig.DisableKeepAlives = true
-	clientConfig.IdleConnTimeout = 0
+	clientConfig.InsecureSkipVerify = config.InsecureSkipVerify
+	clientConfig.IdleConnTimeout = 0 // Disable idle connection pooling for this strategy.
 
 	client := network.NewClient(clientConfig)
 
@@ -94,6 +92,8 @@ func ExecuteH1Concurrent(ctx context.Context, candidate *RaceCandidate, config *
 				return
 			}
 			req.Header = mutatedHeaders
+			// Setting req.Close hints to the transport to close the connection after,
+			// which is the desired behavior for this "dogpile" strategy.
 			req.Close = true
 
 			resp, err := client.Do(req)
@@ -110,18 +110,17 @@ func ExecuteH1Concurrent(ctx context.Context, candidate *RaceCandidate, config *
 
 			// Use pooled buffer for reading the response body to reduce GC pressure.
 			buf := getBuffer()
+			defer putBuffer(buf)
 
 			// Read body with limit to prevent OOM. Read +1 to detect overflow.
 			n, err := io.CopyN(buf, resp.Body, maxResponseBodyBytes+1)
 
 			if err != nil && err != io.EOF {
-				putBuffer(buf)
 				resultsChan <- &RaceResponse{Error: fmt.Errorf("failed to read response body: %w", err)}
 				return
 			}
 
 			if n > maxResponseBodyBytes {
-				putBuffer(buf)
 				resultsChan <- &RaceResponse{Error: fmt.Errorf("response body exceeded limit of %d bytes", maxResponseBodyBytes)}
 				return
 			}
@@ -130,7 +129,6 @@ func ExecuteH1Concurrent(ctx context.Context, candidate *RaceCandidate, config *
 			// Use the actual number of bytes read (n).
 			body := make([]byte, n)
 			copy(body, buf.Bytes()[:n])
-			putBuffer(buf)
 
 			// Generate the composite fingerprint.
 			fingerprint := GenerateFingerprint(resp.StatusCode, resp.Header, body)

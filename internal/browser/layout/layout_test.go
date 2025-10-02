@@ -9,29 +9,66 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/xkilldash9x/scalpel-cli/internal/browser/parser"
+	"github.com/xkilldash9x/scalpel-cli/internal/browser/style"
+	"golang.org/x/net/html"
 )
+
+// -- Mock for Style Engine Dependency --
+
+// mockShadowDOMProcessor is a dummy implementation of the style.ShadowDOMProcessor
+// interface, required to instantiate a style.Engine for our tests. It does nothing.
+type mockShadowDOMProcessor struct{}
+
+func (m *mockShadowDOMProcessor) DetectShadowHost(node *html.Node) bool { return false }
+func (m *mockShadowDOMProcessor) InstantiateShadowRoot(host *html.Node) (*html.Node, []parser.StyleSheet) {
+	return nil, nil
+}
+func (m *mockShadowDOMProcessor) AssignSlots(host *style.StyledNode) {}
 
 // -- Test Helpers --
 
 // setupLayoutTest is a convenience function to parse HTML and CSS, and run the layout engine.
+// It now correctly reflects the two-engine architecture (style and layout).
 func setupLayoutTest(t *testing.T, htmlString, cssString string, viewportWidth, viewportHeight float64) (*Engine, *LayoutBox) {
 	t.Helper()
 
+	// 1. Parse the HTML document.
 	doc, err := htmlquery.Parse(strings.NewReader(htmlString))
 	require.NoError(t, err, "Failed to parse test HTML")
 
-	engine := NewEngine()
+	// The style engine expects the root element (<html>), not the document node.
+	var rootNode *html.Node
+	for n := doc.FirstChild; n != nil; n = n.NextSibling {
+		if n.Type == html.ElementNode {
+			rootNode = n
+			break
+		}
+	}
+	require.NotNil(t, rootNode, "Could not find root HTML element in parsed document")
+
+	// 2. Set up the Style Engine.
+	styleEngine := style.NewEngine(&mockShadowDOMProcessor{})
+	styleEngine.SetViewport(viewportWidth, viewportHeight)
+
+	// 3. Parse and add the CSS stylesheet.
 	if cssString != "" {
 		p := parser.NewParser(cssString)
 		stylesheet := p.Parse()
-		// FIX: Use the new public field `authorSheets` instead of the old method.
-		engine.authorSheets = append(engine.authorSheets, stylesheet)
+		styleEngine.AddAuthorSheet(stylesheet)
 	}
 
-	layoutRoot := engine.Render(doc, viewportWidth, viewportHeight)
+	// 4. Build the Style Tree.
+	styleRoot := styleEngine.BuildTree(rootNode, nil)
+	require.NotNil(t, styleRoot, "Style root should not be nil")
+
+	// 5. Set up the Layout Engine.
+	layoutEngine := NewEngine(viewportWidth, viewportHeight)
+
+	// 6. Build the Layout Tree from the Style Tree.
+	layoutRoot := layoutEngine.BuildAndLayoutTree(styleRoot)
 	require.NotNil(t, layoutRoot, "Layout root should not be nil")
 
-	return engine, layoutRoot
+	return layoutEngine, layoutRoot
 }
 
 // -- Test Cases --
@@ -50,7 +87,8 @@ func TestFlexboxLayout_JustifyAndAlign(t *testing.T) {
 		width: 500px;
 		height: 100px;
 		display: flex;
-		padding: 10px; /* Affects content width */
+		box-sizing: border-box; /* FIX: Added to make padding inclusive of width/height. */
+		padding: 10px; /* Affects content area */
 		justify-content: space-between;
 		align-items: center;
 	}
@@ -61,8 +99,7 @@ func TestFlexboxLayout_JustifyAndAlign(t *testing.T) {
 	engine, root := setupLayoutTest(t, html, css, 600, 400)
 
 	// -- Assertions --
-	// Container content width is 500px, so items are laid out within that.
-	// The container itself is at X=10 due to padding.
+	// Grab the geometry for each flex item.
 	geo1, err1 := engine.GetElementGeometry(root, "//*[@id='item1']")
 	geo2, err2 := engine.GetElementGeometry(root, "//*[@id='item2']")
 	geo3, err3 := engine.GetElementGeometry(root, "//*[@id='item3']")
@@ -71,23 +108,32 @@ func TestFlexboxLayout_JustifyAndAlign(t *testing.T) {
 	require.NoError(t, err2)
 	require.NoError(t, err3)
 
-	// Verify justify-content: space-between
-	// Item 1 should be at the start of the content box (x=10).
-	assert.InDelta(t, 10.0, geo1.Vertices[0], 0.1, "Item 1 X position")
-	// Item 3 should be at the end (500 - 50 + 10 padding = 460).
-	assert.InDelta(t, 460.0, geo3.Vertices[0], 0.1, "Item 3 X position")
-	// Item 2 should be in the middle of the remaining space.
-	// (500 - 150) / 2 + 50 + 10 padding = 175 + 50 + 10 = 235
-	assert.InDelta(t, 235.0, geo2.Vertices[0], 0.1, "Item 2 X position")
+	// -- Verify justify-content: space-between --
+	// Calculations are based on the container's CONTENT BOX.
+	// Content Box Width: 500px (width) - 10px (p-left) - 10px (p-right) = 480px.
+	// Content Box Starts at X=10 due to left padding.
+	// Total item width is 150px. Free space is 480 - 150 = 330px.
+	// With 2 gaps, each gap is 330 / 2 = 165px.
 
-	// Verify align-items: center
-	// Container content height is 100px. Y starts at 10.
-	// Item 1 (50px high): (100 - 50)/2 + 10 = 35
-	assert.InDelta(t, 35.0, geo1.Vertices[1], 0.1, "Item 1 Y position")
-	// Item 2 (80px high): (100 - 80)/2 + 10 = 20
-	assert.InDelta(t, 20.0, geo2.Vertices[1], 0.1, "Item 2 Y position")
-	// Item 3 (30px high): (100 - 30)/2 + 10 = 45
-	assert.InDelta(t, 45.0, geo3.Vertices[1], 0.1, "Item 3 Y position")
+	// Item 1 should be at the start of the content box.
+	assert.InDelta(t, 10.0, geo1.Vertices[0], 0.1, "Item 1 X position")
+	// Item 2 should be after item 1 and one gap: 10 (start) + 50 (item1) + 165 (gap) = 225.
+	assert.InDelta(t, 225.0, geo2.Vertices[0], 0.1, "Item 2 X position")
+	// Item 3 should be at the very end of the content box.
+	// Start pos: 10 (start) + 480 (content width) - 50 (item3) = 440.
+	assert.InDelta(t, 440.0, geo3.Vertices[0], 0.1, "Item 3 X position")
+
+	// -- Verify align-items: center --
+	// Calculations are based on the container's CONTENT BOX.
+	// Content Box Height: 100px (height) - 10px (p-top) - 10px (p-bottom) = 80px.
+	// Content Box Starts at Y=10 due to top padding.
+
+	// Item 1 (50px high): 10 (start) + (80 - 50)/2 = 25.
+	assert.InDelta(t, 25.0, geo1.Vertices[1], 0.1, "Item 1 Y position")
+	// Item 2 (80px high): 10 (start) + (80 - 80)/2 = 10.
+	assert.InDelta(t, 10.0, geo2.Vertices[1], 0.1, "Item 2 Y position")
+	// Item 3 (30px high): 10 (start) + (80 - 30)/2 = 35.
+	assert.InDelta(t, 35.0, geo3.Vertices[1], 0.1, "Item 3 Y position")
 }
 
 // TestAbsolutePositioning verifies an element is positioned relative to its containing block.
@@ -217,5 +263,3 @@ func TestTransforms(t *testing.T) {
 	assert.Equal(t, int64(100), geo.Width)
 	assert.Equal(t, int64(100), geo.Height)
 }
-
-

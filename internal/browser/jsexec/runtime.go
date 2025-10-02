@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/dop251/goja"
+	"github.com/dop251/goja_nodejs/eventloop" // <-- CORRECTED IMPORT
 	"go.uber.org/zap"
 
 	"github.com/xkilldash9x/scalpel-cli/internal/browser/jsbind"
@@ -25,7 +26,8 @@ const DefaultTimeout = 30 * time.Second
 
 // NewRuntime creates a new, initialized JavaScript runtime and its associated DOM bridge.
 // This is called once per session.
-func NewRuntime(logger *zap.Logger) *Runtime {
+// FIX: Updated the function signature to accept the new dependencies required by the DOMBridge.
+func NewRuntime(logger *zap.Logger, eventLoop *eventloop.EventLoop, browserEnv jsbind.BrowserEnvironment) *Runtime {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
@@ -35,14 +37,14 @@ func NewRuntime(logger *zap.Logger) *Runtime {
 	vm := goja.New()
 
 	// Ensure basic global utilities like JSON are available.
-	// Goja automatically provides JSON object, but explicitly ensuring it helps clarity.
 	if vm.Get("JSON") == nil {
 		// Should typically not happen in modern Goja, but safe fallback if necessary.
 		vm.Set("JSON", vm.NewObject())
 	}
 
 	// 2. Initialize the DOM Bridge. This configures the VM with DOM bindings (window, document, console, etc.).
-	bridge := jsbind.NewDOMBridge(vm, logger)
+	// FIX: Updated the call to use the new signature.
+	bridge := jsbind.NewDOMBridge(log, eventLoop, browserEnv)
 
 	return &Runtime{
 		vm:     vm,
@@ -69,7 +71,6 @@ func (r *Runtime) ExecuteScript(ctx context.Context, script string, args []inter
 	}
 
 	// 2. Set up timeout/cancellation handling using vm.Interrupt().
-	// The VM is shared, so we must manage interrupts carefully.
 	done := make(chan struct{})
 	interruptHandler := make(chan struct{})
 
@@ -83,7 +84,6 @@ func (r *Runtime) ExecuteScript(ctx context.Context, script string, args []inter
 			r.logger.Warn("JavaScript execution timeout", zap.Duration("timeout", timeout))
 			r.vm.Interrupt(fmt.Sprintf("Execution timeout exceeded (%v)", timeout))
 		case <-ctx.Done():
-			// Interrupt the VM execution upon context cancellation.
 			r.logger.Debug("JavaScript execution context canceled")
 			r.vm.Interrupt(ctx.Err().Error())
 		case <-done:
@@ -95,11 +95,9 @@ func (r *Runtime) ExecuteScript(ctx context.Context, script string, args []inter
 	var result goja.Value
 	var err error
 
-	// Check if the script is intended to be executed as a function wrapper (common in automation).
 	if r.isFunctionWrapper(script) {
 		result, err = r.executeFunctionWrapper(script, args)
 	} else {
-		// Execute as a plain script snippet.
 		if len(args) > 0 {
 			r.logger.Debug("Arguments provided to ExecuteScript in snippet mode are ignored.")
 		}
@@ -111,21 +109,12 @@ func (r *Runtime) ExecuteScript(ctx context.Context, script string, args []inter
 	<-interruptHandler
 
 	if err != nil {
-		// Check if the error was due to the interruption.
 		if _, ok := err.(*goja.InterruptedError); ok {
-			// Check if the context associated with this specific execution was canceled.
-			// This handles the race condition where a session-wide interrupt (like "session closing"
-			// triggered by the deferred Close() call in the caller) might race with the specific
-			// context cancellation interrupt (e.g., timeout). If the context was canceled, that
-			// is the definitive reason for the interruption.
 			if ctx.Err() != nil {
 				return nil, fmt.Errorf("javascript execution interrupted by context: %w", ctx.Err())
 			}
-			// If the context is fine, report the actual interrupt reason provided by Goja.
-			// We use %w to wrap the original error which contains the Goja interrupt message.
 			return nil, fmt.Errorf("javascript execution interrupted: %w", err)
 		}
-		// Handle general JavaScript errors.
 		if jsErr, ok := err.(*goja.Exception); ok {
 			return nil, fmt.Errorf("javascript exception: %s", jsErr.String())
 		}
@@ -148,7 +137,6 @@ func (r *Runtime) isFunctionWrapper(script string) bool {
 		return false
 	}
 
-	// Check for (function, (async function, function, async function, arrow functions.
 	if strings.HasPrefix(s, "(function") || strings.HasPrefix(s, "(async function") ||
 		strings.HasPrefix(s, "function") || strings.HasPrefix(s, "async function") ||
 		strings.HasPrefix(s, "(()=>") || strings.HasPrefix(s, "(async (") {
@@ -159,40 +147,31 @@ func (r *Runtime) isFunctionWrapper(script string) bool {
 
 // executeFunctionWrapper attempts to evaluate the script and call it as a function.
 func (r *Runtime) executeFunctionWrapper(script string, args []interface{}) (goja.Value, error) {
-	// Compile the script.
 	prog, err := goja.Compile("", script, false)
 	if err != nil {
 		return nil, fmt.Errorf("failed to compile function wrapper script: %w", err)
 	}
 
-	// Run the program to get the evaluated value (expected to be a function).
 	val, err := r.vm.RunProgram(prog)
 	if err != nil {
 		return nil, err
 	}
 
-	// Assert that the result is a callable function.
 	fn, ok := goja.AssertFunction(val)
 	if !ok {
-		// If the script evaluates to something else (e.g., undefined for a plain function declaration), it's not an immediately callable wrapper.
 		return nil, fmt.Errorf("script did not evaluate to a callable function wrapper")
 	}
 
-	// Convert Go arguments to Goja values.
 	gojaArgs := make([]goja.Value, len(args))
 	for i, arg := range args {
 		gojaArgs[i] = r.vm.ToValue(arg)
 	}
 
-	// Call the function. 'this' context is the global object (window).
 	return fn(r.vm.GlobalObject(), gojaArgs...)
 }
 
 // waitForPromise waits for a Goja promise to resolve or reject.
 func (r *Runtime) waitForPromise(ctx context.Context, promise *goja.Promise) (interface{}, error) {
-	// (CRITICAL LIMITATION: Goja requires an event loop for asynchronous promise resolution).
-	// Without a full event loop, we can only handle promises that are already settled.
-
 	state := promise.State()
 	switch state {
 	case goja.PromiseStateFulfilled:
@@ -200,9 +179,7 @@ func (r *Runtime) waitForPromise(ctx context.Context, promise *goja.Promise) (in
 	case goja.PromiseStateRejected:
 		return nil, fmt.Errorf("javascript promise rejected: %v", promise.Result().Export())
 	case goja.PromiseStatePending:
-		// Pending promises will never resolve without an event loop.
 		r.logger.Warn("JavaScript returned a pending Promise. Asynchronous operations are not fully supported without an event loop.")
-		// Return the promise object itself.
 		return promise, nil
 	}
 	return nil, fmt.Errorf("unknown promise state")

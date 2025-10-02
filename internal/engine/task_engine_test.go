@@ -4,10 +4,11 @@ package engine
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
-	"fmt"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -65,12 +66,14 @@ func (m *mockStore) GetPersistedCount() int {
 // mockBrowserManager is a minimal mock to satisfy the interface dependency.
 type mockBrowserManager struct{}
 
+// FIX: Updated the method signature to match the schemas.BrowserManager interface.
 func (m *mockBrowserManager) NewAnalysisContext(
 	sessionCtx context.Context,
 	cfg interface{},
 	persona schemas.Persona,
 	taintTemplate string,
 	taintConfig string,
+	findingsChan chan<- schemas.Finding, // Added this missing parameter.
 ) (schemas.SessionContext, error) {
 	return nil, nil
 }
@@ -175,7 +178,7 @@ func TestTaskEngine_NoResults(t *testing.T) {
 	logger := zap.NewNop()
 	store := newMockStore()
 	worker := &mockWorker{
-		// Default processFunc returns success with no findings.
+	// Default processFunc returns success with no findings.
 	}
 
 	engine, err := New(cfg, logger, store, &mockBrowserManager{}, &mockKGClient{})

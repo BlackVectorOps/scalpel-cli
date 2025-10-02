@@ -38,13 +38,13 @@ func setupTestCA(t *testing.T) (*security.CA, []byte, []byte) {
 }
 
 // setupTestProxy initializes and starts an InterceptionProxy for testing.
-// It returns the running proxy instance, its URL, and a cleanup function.
 func setupTestProxy(t *testing.T, caCert, caKey []byte) (*InterceptionProxy, string, func()) {
 	t.Helper()
 	logger := zap.NewNop()
-	clientCfg := NewDefaultClientConfig()
-	// Important for tests using httptest.NewTLSServer
-	clientCfg.IgnoreTLSErrors = true
+	// FIX: Use the new constructor name NewBrowserClientConfig.
+	clientCfg := NewBrowserClientConfig()
+	// FIX: Use the new field name InsecureSkipVerify.
+	clientCfg.InsecureSkipVerify = true
 
 	proxy, err := NewInterceptionProxy(caCert, caKey, clientCfg, logger)
 	require.NoError(t, err, "Failed to create interception proxy")
@@ -52,9 +52,7 @@ func setupTestProxy(t *testing.T, caCert, caKey []byte) (*InterceptionProxy, str
 	proxyServer := httptest.NewServer(proxy.proxy)
 	t.Cleanup(proxyServer.Close)
 
-	return proxy, proxyServer.URL, func() {
-		// Cleanup is handled by t.Cleanup(proxyServer.Close)
-	}
+	return proxy, proxyServer.URL, func() {}
 }
 
 // createTestClient configures an http.Client to use the test proxy.
@@ -64,11 +62,10 @@ func createTestClient(t *testing.T, proxyURLStr string, ca *security.CA) *http.C
 	require.NoError(t, err)
 
 	tlsConfig := &tls.Config{
-		// Needed for httptest.NewTLSServer's self-signed cert
 		InsecureSkipVerify: true,
 	}
 
-	if ca != nil {
+	if ca != nil && ca.CertPool != nil {
 		tlsConfig.RootCAs = ca.CertPool
 	}
 
@@ -92,7 +89,6 @@ func TestProxy_HTTP_Forwarding(t *testing.T) {
 	}))
 	defer targetServer.Close()
 
-	// No MITM
 	_, proxyURL, cleanup := setupTestProxy(t, nil, nil)
 	defer cleanup()
 
@@ -118,11 +114,9 @@ func TestProxy_HTTPS_TunnelingMode(t *testing.T) {
 	}))
 	defer targetServer.Close()
 
-	// No MITM
 	_, proxyURL, cleanup := setupTestProxy(t, nil, nil)
 	defer cleanup()
 
-	// Client does not trust proxy CA
 	client := createTestClient(t, proxyURL, nil)
 
 	resp, err := client.Get(targetServer.URL)
@@ -157,7 +151,6 @@ func TestProxy_HTTPS_MITMMode(t *testing.T) {
 		return r
 	})
 
-	// Client trusts the proxy's CA
 	client := createTestClient(t, proxyURL, ca)
 
 	resp, err := client.Get(targetServer.URL)

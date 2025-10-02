@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,6 +17,14 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"go.uber.org/zap"
 )
+
+// flexibleSQLMatcher creates a regex that is insensitive to whitespace for more robust SQL mock testing.
+func flexibleSQLMatcher(sql string) string {
+	// Trim leading/trailing space
+	trimmed := strings.TrimSpace(sql)
+	// Replace all sequences of whitespace characters (spaces, tabs, newlines) with the regex `\s+`
+	return regexp.MustCompile(`\s+`).ReplaceAllString(trimmed, `\s+`)
+}
 
 // -- Test Cases --
 
@@ -48,7 +57,7 @@ func TestPersistData(t *testing.T) {
 		require.NoError(t, err)
 
 		scanID := uuid.NewString()
-		finding := schemas.Finding{ID: "finding-1", Vulnerability: schemas.Vulnerability{Name: "XSS"}, Evidence: "{}"}
+		finding := schemas.Finding{ID: "finding-1", Vulnerability: schemas.Vulnerability{Name: "XSS"}, Evidence: json.RawMessage("{}")}
 		node := schemas.NodeInput{ID: "node-1", Type: schemas.NodeURL}
 		edge := schemas.EdgeInput{ID: "edge-1", From: "node-1", To: "node-2", Type: "LINKS_TO"}
 
@@ -68,7 +77,6 @@ func TestPersistData(t *testing.T) {
 		mockPool.ExpectCopyFrom(pgx.Identifier{"findings"}, findingColumns).WillReturnResult(1)
 
 		// -- nodes (Uses Exec loop) --
-		// SIMPLIFIED: We now just expect a simple Exec call.
 		sqlNodes := `
 		INSERT INTO kg_nodes (id, type, properties, created_at, updated_at)
 		VALUES ($1, $2, $3, $4, $5)
@@ -77,7 +85,7 @@ func TestPersistData(t *testing.T) {
 			properties = kg_nodes.properties || EXCLUDED.properties,
 			updated_at = EXCLUDED.updated_at;
 	`
-		mockPool.ExpectExec(regexp.QuoteMeta(sqlNodes)).
+		mockPool.ExpectExec(flexibleSQLMatcher(sqlNodes)).
 			WithArgs(node.ID, string(node.Type), json.RawMessage("{}"), pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnResult(pgxmock.NewResult("INSERT", 1))
 
@@ -88,7 +96,7 @@ func TestPersistData(t *testing.T) {
 		ON CONFLICT (source_id, target_id, relationship) DO UPDATE SET
 			properties = kg_edges.properties || EXCLUDED.properties;
 	`
-		mockPool.ExpectExec(regexp.QuoteMeta(sqlEdges)).
+		mockPool.ExpectExec(flexibleSQLMatcher(sqlEdges)).
 			WithArgs(edge.From, edge.To, string(edge.Type), json.RawMessage("{}"), pgxmock.AnyArg()).
 			WillReturnResult(pgxmock.NewResult("INSERT", 1))
 
@@ -128,7 +136,7 @@ func TestPersistData(t *testing.T) {
 		require.NoError(t, err)
 
 		copyErr := errors.New("copy from failed")
-		envelope := &schemas.ResultEnvelope{Findings: []schemas.Finding{{ID: "f-1", Vulnerability: schemas.Vulnerability{Name: "Test"}, Evidence: "{}"}}}
+		envelope := &schemas.ResultEnvelope{Findings: []schemas.Finding{{ID: "f-1", Vulnerability: schemas.Vulnerability{Name: "Test"}, Evidence: json.RawMessage("{}")}}}
 
 		mockPool.ExpectBegin()
 		findingColumns := []string{"id", "scan_id", "task_id", "target", "module", "vulnerability", "severity", "description", "evidence", "recommendation", "cwe", "observed_at"}
@@ -170,10 +178,8 @@ func TestGetFindingsByScanID(t *testing.T) {
 		rows := pgxmock.NewRows(columns).
 			AddRow("finding-123", "task-abc", now, "https://example.com", "SQLAnalyzer", "SQLi", "High", "desc", evidenceJSON, "reco", []string{"CWE-89"})
 
-		// Use a flexible regex for the query
-		sqlRegex := regexp.QuoteMeta(sqlGetFindings)
-		sqlRegex = regexp.MustCompile(`\s+`).ReplaceAllString(sqlRegex, `\s+`)
-		mockPool.ExpectQuery(sqlRegex).
+		// Use the flexible SQL matcher for a robust test.
+		mockPool.ExpectQuery(flexibleSQLMatcher(sqlGetFindings)).
 			WithArgs(scanID).
 			WillReturnRows(rows)
 
@@ -181,9 +187,11 @@ func TestGetFindingsByScanID(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, findings, 1)
 
+		// Assertions for the retrieved finding.
 		assert.Equal(t, "finding-123", findings[0].ID)
 		assert.Equal(t, "SQLi", findings[0].Vulnerability.Name)
-		assert.Equal(t, json.RawMessage(`{"detail": "some evidence"}`), findings[0].Evidence)
+		// Note: When comparing json.RawMessage, it's a byte slice. Direct comparison is fine.
+		assert.Equal(t, evidenceJSON, findings[0].Evidence)
 		assert.NoError(t, mockPool.ExpectationsWereMet())
 	})
 }

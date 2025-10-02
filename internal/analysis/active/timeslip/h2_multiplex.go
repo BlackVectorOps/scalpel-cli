@@ -24,10 +24,11 @@ func ExecuteH2Multiplexing(ctx context.Context, candidate *RaceCandidate, config
 	}
 
 	// 1. Configure the client for H2.
-	clientConfig := network.NewDefaultClientConfig()
+	// FIX: Renamed function and updated field names for consistency with network package refactor.
+	clientConfig := network.NewBrowserClientConfig()
 	clientConfig.RequestTimeout = config.Timeout
-	clientConfig.IgnoreTLSErrors = config.IgnoreTLSErrors
-	clientConfig.ForceHTTP2 = true
+	clientConfig.InsecureSkipVerify = config.InsecureSkipVerify
+	// The new transport automatically attempts H2, so ForceHTTP2 is no longer needed.
 	// Optimize for single connection reuse.
 	clientConfig.MaxIdleConnsPerHost = 1
 	clientConfig.MaxConnsPerHost = 1
@@ -103,15 +104,14 @@ func ExecuteH2Multiplexing(ctx context.Context, candidate *RaceCandidate, config
 			// -- Response Processing Phase --
 			// Use pooled buffer for reading the response body.
 			buf := getBuffer()
+			defer putBuffer(buf)
 
 			n, err := io.CopyN(buf, resp.Body, maxResponseBodyBytes+1)
 			if err != nil && err != io.EOF {
-				putBuffer(buf)
 				resultsChan <- &RaceResponse{Error: fmt.Errorf("failed to read response body: %w", err)}
 				return
 			}
 			if n > maxResponseBodyBytes {
-				putBuffer(buf)
 				resultsChan <- &RaceResponse{Error: fmt.Errorf("response body exceeded limit of %d bytes", maxResponseBodyBytes)}
 				return
 			}
@@ -119,7 +119,6 @@ func ExecuteH2Multiplexing(ctx context.Context, candidate *RaceCandidate, config
 			// Copy the bytes from the buffer.
 			body := make([]byte, n)
 			copy(body, buf.Bytes()[:n])
-			putBuffer(buf)
 
 			// Generate the composite fingerprint.
 			fingerprint := GenerateFingerprint(resp.StatusCode, resp.Header, body)

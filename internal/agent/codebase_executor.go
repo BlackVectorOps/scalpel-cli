@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	// "go/ast" // Removed unused import
 	"go/parser"
 	"go/token"
 	"os"
@@ -14,7 +13,6 @@ import (
 
 	"go.uber.org/zap"
 	"golang.org/x/mod/modfile"
-	// schemas import removed as we use internal models
 )
 
 // CodebaseExecutor is responsible for executing actions related to static code analysis.
@@ -47,25 +45,28 @@ func (e *CodebaseExecutor) Execute(ctx context.Context, action Action) (*Executi
 
 	e.logger.Info("Executing codebase analysis", zap.String("module_path", modulePath))
 
-	// Rerun the dependency mapping logic for the specified module.
 	deps, err := buildDependencyMap(e.projectRoot)
 	if err != nil {
 		e.logger.Error("Failed to build dependency map", zap.Error(err))
+		// -- FIX APPLIED HERE --
 		return &ExecutionResult{
 			Status:          "failed",
-			Error:           err.Error(),
 			ObservationType: ObservedCodebaseContext,
-		}, err
+			ErrorCode:       ErrCodeExecutionFailure,
+			ErrorDetails:    map[string]interface{}{"message": err.Error()},
+		}, nil // Return nil for the error since it's now handled in the result.
 	}
 
 	depsJSON, err := json.Marshal(deps)
 	if err != nil {
 		e.logger.Error("Failed to marshal dependencies to JSON", zap.Error(err))
+		// -- FIX APPLIED HERE --
 		return &ExecutionResult{
 			Status:          "failed",
-			Error:           err.Error(),
 			ObservationType: ObservedCodebaseContext,
-		}, err
+			ErrorCode:       ErrCodeJSONMarshalFailed,
+			ErrorDetails:    map[string]interface{}{"message": err.Error()},
+		}, nil // Return nil for the error since it's now handled in the result.
 	}
 
 	// The result payload contains the dependency graph as a JSON string.
@@ -105,7 +106,7 @@ func buildDependencyMap(projectDir string) (map[string][]string, error) {
 			}
 
 			for _, importSpec := range node.Imports {
-				importPath := strings.Trim(importSpec.Path.Value, `"`)
+				importPath := strings.Trim(importSpec.Path.Value, "\"")
 				if !strings.HasPrefix(importPath, goModuleName) && !strings.HasPrefix(importPath, ".") && !strings.HasPrefix(importPath, "..") {
 					continue
 				}

@@ -25,6 +25,7 @@ type GlobalContext struct {
 	// The OASTProvider now uses the canonical interface from schemas.
 	OASTProvider schemas.OASTProvider
 	// Add other global services like HTTPClient, LLMClient, etc.
+	FindingsChan     chan<- schemas.Finding 
 }
 
 // AnalysisContext provides the specific context for a single analysis task.
