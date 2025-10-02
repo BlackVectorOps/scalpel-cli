@@ -11,7 +11,9 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync" // Import sync
 	"testing"
+	"time" // Import time
 
 	"github.com/elazarl/goproxy"
 	"github.com/stretchr/testify/assert"
@@ -218,4 +220,75 @@ func TestProxy_Hooks_ShortCircuit(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	assert.Equal(t, http.StatusTeapot, resp.StatusCode)
 	assert.Equal(t, "I'm a teapot", string(body))
+}
+
+// TestProxy_ConcurrentRequests validates the proxy's ability to handle
+// multiple simultaneous connections (both HTTP and HTTPS MITM).
+// This aligns with the report's mandate that integration tests must validate
+// behavior under parallel load to detect deadlocks or logical races.
+func TestProxy_ConcurrentRequests(t *testing.T) {
+	// Setup HTTP Target
+	httpTarget := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(5 * time.Millisecond) // Simulate minor work
+		fmt.Fprintf(w, "http response %s", r.URL.Path)
+	}))
+	defer httpTarget.Close()
+
+	// Setup HTTPS Target (requires MITM)
+	httpsTarget := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(5 * time.Millisecond)
+		fmt.Fprintf(w, "https response %s", r.URL.Path)
+	}))
+	defer httpsTarget.Close()
+
+	// Setup Proxy with CA for MITM
+	ca, caCertPEM, caKeyPEM := setupTestCA(t)
+	proxy, proxyURL, cleanup := setupTestProxy(t, caCertPEM, caKeyPEM)
+	defer cleanup()
+
+	// Add a simple hook to ensure MITM logic is exercised and count requests safely.
+	requestCount := 0
+	var countMu sync.Mutex
+	proxy.AddRequestHook(func(r *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
+		countMu.Lock()
+		requestCount++
+		countMu.Unlock()
+		return r, nil
+	})
+
+	client := createTestClient(t, proxyURL, ca)
+
+	const concurrency = 50
+	var wg sync.WaitGroup
+
+	// Launch concurrent requests
+	for i := 0; i < concurrency; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+
+			targetURL := httpTarget.URL
+			expectedBody := fmt.Sprintf("http response /req%d", i)
+			// Alternate between HTTP and HTTPS to stress different code paths
+			if i%2 == 0 {
+				targetURL = httpsTarget.URL
+				expectedBody = fmt.Sprintf("https response /req%d", i)
+			}
+
+			req, _ := http.NewRequest("GET", fmt.Sprintf("%s/req%d", targetURL, i), nil)
+			resp, err := client.Do(req)
+
+			// Use assert.NoError to allow the test to continue and potentially find more issues.
+			if assert.NoError(t, err) && resp != nil {
+				defer resp.Body.Close()
+				body, _ := io.ReadAll(resp.Body)
+				assert.Equal(t, http.StatusOK, resp.StatusCode)
+				assert.Equal(t, expectedBody, string(body))
+			}
+		}(i)
+	}
+
+	wg.Wait()
+	// Verify all requests were processed
+	assert.Equal(t, concurrency, requestCount, "All requests should have passed through the hook")
 }

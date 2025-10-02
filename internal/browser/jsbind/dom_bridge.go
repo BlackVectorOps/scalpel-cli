@@ -1089,7 +1089,7 @@ func (b *DOMBridge) QuerySelector(selector string) (*html.Node, error) {
 	defer b.mu.RUnlock()
 	node := htmlquery.FindOne(b.document, selector)
 	if node == nil {
-		return nil, fmt.Errorf("element not found for selector: %s", selector)
+		return nil, NewElementNotFoundError(selector)
 	}
 	return node, nil
 }

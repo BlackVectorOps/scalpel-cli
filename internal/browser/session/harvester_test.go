@@ -16,17 +16,8 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/internal/browser/session"
 )
 
-// Mock transport to simulate network behavior
-type mockTransport struct {
-	handler func(req *http.Request) (*http.Response, error)
-}
-
-func (m *mockTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	if m.handler != nil {
-		return m.handler(req)
-	}
-	return nil, http.ErrNotSupported
-}
+// Note: The 'mockTransport' and 'delayCloseBody' helpers have been moved to 'helpers_test.go'
+// to prevent redeclaration errors and improve test organization.
 
 func TestHarvester_RoundTrip_Capture(t *testing.T) {
 	logger := zap.NewNop()
@@ -35,7 +26,7 @@ func TestHarvester_RoundTrip_Capture(t *testing.T) {
 
 	transport := &mockTransport{
 		handler: func(req *http.Request) (*http.Response, error) {
-			// Verify request body is still readable by the transport (ensures Harvester restores it)
+			// Verifies the request body is still readable by the transport.
 			reqBodyBytes, _ := io.ReadAll(req.Body)
 			assert.Equal(t, requestBody, string(reqBodyBytes))
 
@@ -59,7 +50,8 @@ func TestHarvester_RoundTrip_Capture(t *testing.T) {
 	resp, err := client.Do(req)
 	require.NoError(t, err)
 
-	// 2. Consume Response Body (Crucial for Harvester wrapper to finalize recording)
+	// 2. Consume the response body, which is crucial for the Harvester
+	// wrapper to finalize its recording process.
 	respBodyBytes, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 	resp.Body.Close()
@@ -85,7 +77,7 @@ func TestHarvester_RoundTrip_Capture(t *testing.T) {
 
 func TestHarvester_RoundTrip_BinaryEncoding(t *testing.T) {
 	logger := zap.NewNop()
-	// Binary data (e.g., PNG header)
+	// Binary data representing a PNG header
 	responseData := []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A}
 	expectedBase64 := "iVBORw0KGgo="
 
@@ -105,7 +97,7 @@ func TestHarvester_RoundTrip_BinaryEncoding(t *testing.T) {
 
 	resp, err := client.Get("http://example.com/image.png")
 	require.NoError(t, err)
-	// Consume and close the body
+	// Consume and close the body.
 	io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
 
@@ -113,35 +105,24 @@ func TestHarvester_RoundTrip_BinaryEncoding(t *testing.T) {
 	require.Len(t, har.Log.Entries, 1)
 	entry := har.Log.Entries[0]
 
-	// Verify encoding for binary content
+	// Verify encoding for binary content.
 	assert.Equal(t, "base64", entry.Response.Content.Encoding)
 	assert.Equal(t, expectedBase64, entry.Response.Content.Text)
 }
 
-// Helper struct for testing WaitNetworkIdle synchronization
-type delayCloseBody struct {
-	io.Reader
-	closeSignal chan struct{}
-}
-
-func (d *delayCloseBody) Close() error {
-	<-d.closeSignal // Wait for the signal before closing
-	return nil
-}
-
 func TestHarvester_WaitNetworkIdle(t *testing.T) {
 	logger := zap.NewNop()
-	// Use channels to precisely control the timing of the mock transport and body consumption
+	// Use channels to precisely control the timing of the mock transport and body consumption.
 	startTransport := make(chan struct{})
 	finishBodyRead := make(chan struct{})
 
 	transport := &mockTransport{
 		handler: func(req *http.Request) (*http.Response, error) {
-			<-startTransport // Wait until signaled to start the transport phase
-			// Simulate network latency
+			<-startTransport // Wait until signaled to start the transport phase.
+			// Simulate network latency.
 			time.Sleep(50 * time.Millisecond)
 
-			// Return a response with a body that waits before closing (body consumption phase)
+			// Return a response with a body that waits before closing.
 			body := &delayCloseBody{
 				Reader:      strings.NewReader("data"),
 				closeSignal: finishBodyRead,
@@ -153,17 +134,17 @@ func TestHarvester_WaitNetworkIdle(t *testing.T) {
 	harvester := session.NewHarvester(transport, logger, false)
 	client := &http.Client{Transport: harvester}
 
-	// 1. Start the request lifecycle in a goroutine
+	// 1. Start the request lifecycle in a goroutine.
 	go func() {
 		resp, err := client.Get("http://example.com/async")
 		if err == nil {
-			// Consume the body
+			// Consume the body.
 			io.ReadAll(resp.Body)
-			resp.Body.Close() // This will block until finishBodyRead is signaled
+			resp.Body.Close() // This will block until finishBodyRead is signaled.
 		}
 	}()
 
-	// 2. Setup WaitNetworkIdle monitoring
+	// 2. Setup WaitNetworkIdle monitoring.
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
@@ -174,35 +155,35 @@ func TestHarvester_WaitNetworkIdle(t *testing.T) {
 		idleDone <- harvester.WaitNetworkIdle(ctx, quietPeriod)
 	}()
 
-	// Ensure it's waiting (Harvester knows about the request, but transport hasn't started)
+	// Ensures the test is waiting before the request transport phase has started.
 	select {
 	case <-idleDone:
 		t.Fatal("WaitNetworkIdle returned before the request transport phase started")
 	case <-time.After(50 * time.Millisecond):
-		// Expected: still waiting
+		// Expected: still waiting.
 	}
 
-	// 3. Signal transport to start processing
+	// 3. Signal transport to start processing.
 	close(startTransport)
 
-	// Ensure it's waiting while the request is in flight (transport phase and body consumption phase)
+	// Ensures the test is waiting while the request is in flight.
 	select {
 	case <-idleDone:
 		t.Fatal("WaitNetworkIdle returned while request was in flight")
-	case <-time.After(100 * time.Millisecond): // Wait longer than the simulated transport latency
-		// Expected: still waiting
+	case <-time.After(100 * time.Millisecond): // Wait longer than the simulated transport latency.
+		// Expected: still waiting.
 	}
 
-	// 4. Signal body consumption to finish (request lifecycle truly ends)
+	// 4. Signal body consumption to finish, truly ending the request lifecycle.
 	close(finishBodyRead)
 
-	// 5. WaitNetworkIdle should now wait for the quiet period (100ms) and then return
+	// 5. WaitNetworkIdle should now wait for the quiet period (100ms) and then return.
 	startTime := time.Now()
 	select {
 	case err := <-idleDone:
 		require.NoError(t, err)
 		duration := time.Since(startTime)
-		// It should take at least the quiet period time after the request finished
+		// It should take at least the quiet period time after the request finished.
 		assert.GreaterOrEqual(t, duration, quietPeriod, "WaitNetworkIdle returned too quickly")
 	case <-ctx.Done():
 		t.Fatal("WaitNetworkIdle timed out waiting for completion")
