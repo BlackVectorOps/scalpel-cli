@@ -26,8 +26,8 @@ func newTestParser() *HTTPParser {
 // TestParseResponseHeaders verifies that headers are correctly extracted and mapped
 // from the net/http Header type, focusing on extracting only the first value for simplicity.
 func TestParseResponseHeaders(t *testing.T) {
-    // A hypothetical parsing function is implemented inline for demonstration, 
-    // but the test confirms the expected behavior for external use of the response headers.
+	// A hypothetical parsing function is implemented inline for demonstration,
+	// but the test confirms the expected behavior for external use of the response headers.
 
 	// A table of test cases for our parsing function.
 	testCases := []struct {
@@ -61,7 +61,7 @@ func TestParseResponseHeaders(t *testing.T) {
 			name: "header with multiple values (only first matters)",
 			headers: http.Header{
 				// In HTTP headers, multiple values are common (e.g., Set-Cookie).
-                // We assume the parser should only expose the first one in the simplified map.
+				// We assume the parser should only expose the first one in the simplified map.
 				"Set-Cookie": {"session=abc", "locale=en-US"},
 			},
 			expected: map[string]string{
@@ -151,14 +151,14 @@ func TestParsePipelinedResponses_Basic(t *testing.T) {
 	assert.Equal(t, http.StatusOK, responses[0].StatusCode)
 	assert.Equal(t, http.StatusCreated, responses[1].StatusCode)
 
-	// The body should have been consumed by the parser internally to advance the reader.
+	// The parser reads the body to advance the stream, but replaces it so the caller can still read it.
 	body1, err := io.ReadAll(responses[0].Body)
 	require.NoError(t, err)
-	assert.Empty(t, body1, "The body stream for response 1 should be exhausted after parsing")
+	assert.Equal(t, resp1Body, string(body1), "The body for response 1 should be readable and correct")
 
 	body2, err := io.ReadAll(responses[1].Body)
 	require.NoError(t, err)
-	assert.Empty(t, body2, "The body stream for response 2 should be exhausted after parsing")
+	assert.Equal(t, resp2Body, string(body2), "The body for response 2 should be readable and correct")
 }
 
 // TestParsePipelinedResponses_ConnectionClose verifies that parsing stops when a "Connection: close" header is encountered.
@@ -187,12 +187,12 @@ func TestParsePipelinedResponses_Compressed(t *testing.T) {
 	originalBody := "This is a compressed body that must be handled transparently."
 	var buf bytes.Buffer
 	gz := gzip.NewWriter(&buf)
-	gz.Write([]byte(originalBody))
-	gz.Close()
-	compressedBody := buf.String()
+	_, _ = gz.Write([]byte(originalBody))
+	_ = gz.Close()
+	compressedBodyBytes := buf.Bytes()
 
 	// 2. Generate Response with Gzip encoding
-	resp1 := fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: %d\r\n\r\n%s", len(compressedBody), compressedBody)
+	resp1 := fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: %d\r\n\r\n%s", len(compressedBodyBytes), string(compressedBodyBytes))
 	reader := strings.NewReader(resp1)
 
 	// 3. Parse
@@ -204,10 +204,10 @@ func TestParsePipelinedResponses_Compressed(t *testing.T) {
 	assert.Empty(t, responses[0].Header.Get("Content-Encoding"), "Content-Encoding header should be cleared after decompression handling")
 	assert.Equal(t, int64(-1), responses[0].ContentLength, "Content-Length should be set to -1 for the decompressed stream")
 
-	// The parser consumes the body internally (io.Copy(io.Discard, resp.Body)). 
-    // We verify success by checking if the returned Body is empty.
-	body, _ := io.ReadAll(responses[0].Body)
-	assert.Empty(t, body, "Expected body to be fully consumed (and decompressed) by the parser")
+	// The parser consumes the compressed body but should return a response with a readable, decompressed body.
+	body, err := io.ReadAll(responses[0].Body)
+	require.NoError(t, err)
+	assert.Equal(t, originalBody, string(body), "Expected body to be fully decompressed and readable")
 }
 
 // TestParsePipelinedResponses_Malformed verifies robustness against bad responses in the pipeline.
@@ -230,31 +230,31 @@ func TestParsePipelinedResponses_Malformed(t *testing.T) {
 
 // TestDecompressBody_NoCompression verifies that an uncompressed body is returned as is.
 func TestDecompressBody_NoCompression(t *testing.T) {
-    parser := newTestParser()
-    resp := &http.Response{
-        Body:   io.NopCloser(strings.NewReader("uncompressed")),
-        Header: http.Header{}, // No Content-Encoding
-    }
+	parser := newTestParser()
+	resp := &http.Response{
+		Body:   io.NopCloser(strings.NewReader("uncompressed")),
+		Header: http.Header{}, // No Content-Encoding
+	}
 
-    decompressedBody, err := parser.decompressBody(resp)
-    require.NoError(t, err)
-    
-    // Should return the original body reader
-    assert.Equal(t, resp.Body, decompressedBody)
+	decompressedBody, err := parser.decompressBody(resp)
+	require.NoError(t, err)
+
+	// Should return the original body reader
+	assert.Equal(t, resp.Body, decompressedBody)
 }
 
 // TestDecompressBody_GzipError verifies decompression failure handling.
 func TestDecompressBody_GzipError(t *testing.T) {
-    parser := newTestParser()
-    // Body is too short/malformed to be valid Gzip
-    resp := &http.Response{
-        Body:   io.NopCloser(strings.NewReader("not gzip data")),
-        Header: http.Header{"Content-Encoding": {"gzip"}}, 
-    }
+	parser := newTestParser()
+	// Body is too short/malformed to be valid Gzip
+	resp := &http.Response{
+		Body:   io.NopCloser(strings.NewReader("not gzip data")),
+		Header: http.Header{"Content-Encoding": {"gzip"}},
+	}
 
-    decompressedBody, err := parser.decompressBody(resp)
-    
-    // Expect a decompression error
-    assert.Error(t, err)
-    assert.Nil(t, decompressedBody)
+	decompressedBody, err := parser.decompressBody(resp)
+
+	// Expect a decompression error
+	assert.Error(t, err)
+	assert.Nil(t, decompressedBody)
 }

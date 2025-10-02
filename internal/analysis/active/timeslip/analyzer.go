@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"net/http"
 	"sort"
 	"time"
 	"unicode/utf8"
@@ -15,7 +14,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
-	"github.com/xkilldash9x/scalpel-cli/internal/browser/network"
 	"github.com/xkilldash9x/scalpel-cli/internal/observability"
 	"go.uber.org/zap"
 )
@@ -489,3 +487,4 @@ func checkTimingAnomalies(result *RaceResult, config *Config, analysis *Analysis
 	}
 	return false
 }
+

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"hash"
 	"hash/fnv"
-	"io"
 	"math/rand"
 	"sort"
 	"strconv"
@@ -15,6 +14,8 @@ import (
 	"time"
 
 	"github.com/antchfx/htmlquery"
+	"github.com/xkilldash9x/scalpel-cli/api/schemas"
+	"github.com/xkilldash9x/scalpel-cli/internal/browser/layout"
 	"golang.org/x/net/html"
 )
 
@@ -53,8 +54,10 @@ type SelectOptionData struct {
 }
 
 // discoveryResult holds the raw node and extracted data during the discovery phase.
+// This is now augmented with the layout box to check for visibility.
 type discoveryResult struct {
 	Node *html.Node
+	Box  *layout.LayoutBox
 	Data ElementData
 }
 
@@ -81,9 +84,13 @@ func NewInteractor(logger Logger, hCfg HumanoidConfig, stabilizeFn Stabilization
 // -- Orchestration Logic --
 
 // RecursiveInteract is the main entry point for the interaction logic.
-func (i *Interactor) RecursiveInteract(ctx context.Context, config InteractionConfig) error {
+// It now accepts the root of the layout tree to perform visibility checks.
+func (i *Interactor) RecursiveInteract(ctx context.Context, config schemas.InteractionConfig, layoutRoot *layout.LayoutBox) error {
 	if i.page == nil {
 		return fmt.Errorf("interactor page primitives are not initialized")
+	}
+	if layoutRoot == nil {
+		return fmt.Errorf("layout root cannot be nil for interaction")
 	}
 
 	interactedElements := make(map[string]bool)
@@ -95,15 +102,16 @@ func (i *Interactor) RecursiveInteract(ctx context.Context, config InteractionCo
 			return err
 		}
 	}
-	return i.interactDepth(ctx, config, 0, interactedElements)
+	return i.interactDepth(ctx, config, 0, interactedElements, layoutRoot)
 }
 
 // interactDepth handles the interaction logic for a specific depth using DFS.
 func (i *Interactor) interactDepth(
 	ctx context.Context,
-	config InteractionConfig,
+	config schemas.InteractionConfig,
 	depth int,
 	interactedElements map[string]bool,
+	layoutRoot *layout.LayoutBox,
 ) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -113,14 +121,15 @@ func (i *Interactor) interactDepth(
 		return nil
 	}
 
-	// 1. Discover new elements based on the current DOM state.
-	newElements, err := i.discoverElements(ctx, interactedElements)
+	// 1. Discover new elements based on the current layout tree.
+	// This now uses the layout tree to find visible elements.
+	newElements, err := i.discoverElements(ctx, layoutRoot, interactedElements)
 	if err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 		i.logger.Warn(fmt.Sprintf("Failed to discover elements at depth %d: %v", depth, err))
-		return nil // Stop this branch if discovery fails (e.g., parsing error).
+		return nil // Stop this branch if discovery fails.
 	}
 	if len(newElements) == 0 {
 		i.logger.Debug(fmt.Sprintf("No new interactive elements found at depth %d.", depth))
@@ -159,7 +168,7 @@ func (i *Interactor) interactDepth(
 		interactedElements[element.Fingerprint] = true
 
 		if err != nil {
-			// Log failnure but continue exploration with other elements.
+			// Log failure but continue exploration with other elements.
 			if actionCtx.Err() == nil {
 				i.logger.Debug(fmt.Sprintf("Interaction failed: %v", err))
 			}
@@ -174,32 +183,15 @@ func (i *Interactor) interactDepth(
 				return err
 			}
 		}
-
-		// Strategy: Assume any successful interaction might cause a significant DOM change or navigation.
-		// Therefore, we break the loop and proceed to stabilization and re-discovery at the next depth.
-		i.logger.Debug("Interaction successful. Proceeding to stabilization and next depth.")
+		
+		// Strategy: Any successful interaction may change the DOM.
+		// We'll need a new layout tree, so we break to let the caller re-render and recurse.
+		i.logger.Debug("Interaction successful. Breaking to allow re-render and next depth.")
 		break
-	}
 
-	// 4. Stabilize and recurse.
-	if interactions > 0 {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		// Wait for potential asynchronous updates or navigation.
-		if err := i.stabilizeFn(ctx); err != nil && ctx.Err() == nil {
-			// Stabilization might be interrupted by navigation, which is often expected.
-			i.logger.Debug(fmt.Sprintf("Stabilization finished (potentially interrupted): %v", err))
-		}
-
-		// Final wait before the next discovery phase.
-		if config.PostInteractionWaitMs > 0 && i.humanoidCfg.Enabled {
-			if err := i.hesitate(ctx, time.Duration(config.PostInteractionWaitMs)*time.Millisecond); err != nil {
-				return err
-			}
-		}
-		return i.interactDepth(ctx, config, depth+1, interactedElements)
 	}
+	// Since we break on the first success, we no longer stabilize and recurse here.
+	// The calling process is now responsible for re-rendering and calling interactDepth again.
 	return nil
 }
 
@@ -207,48 +199,40 @@ func (i *Interactor) interactDepth(
 
 // A broader XPath to find candidates, with refined filtering done in Go.
 const interactiveXPath = `
-    //a[@href] | //button | //input | //textarea | //select | //summary | //details |
+    //a[@href] | //button | //input | //textarea | //select |
+    //summary | //details |
     //*[normalize-space(@contenteditable)='true' or normalize-space(@contenteditable)=''] |
     //*[(@role='button' or @role='link' or @role='tab' or @role='menuitem' or @role='checkbox' or @role='radio')]
 `
 
-// discoverElements finds, analyzes, and fingerprints interactive elements in the current DOM.
-func (i *Interactor) discoverElements(ctx context.Context, interacted map[string]bool) ([]interactiveElement, error) {
-	// 1. Get the current DOM snapshot.
-	domReader, err := i.page.GetDOMSnapshot(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get DOM snapshot: %w", err)
-	}
-	// Ensure the reader is closed if applicable.
-	if closer, ok := domReader.(io.Closer); ok {
-		defer closer.Close()
-	}
-
-	// 2. Parse the HTML body.
-	root, err := htmlquery.Parse(domReader)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse HTML: %w", err)
-	}
-
-	// 3. Query the DOM for candidates.
-	candidates, err := htmlquery.QueryAll(root, interactiveXPath)
-	if err != nil {
-		return nil, fmt.Errorf("XPath query failed: %w", err)
-	}
-
+// discoverElements finds, analyzes, and fingerprints interactive elements from the layout tree.
+func (i *Interactor) discoverElements(ctx context.Context, layoutRoot *layout.LayoutBox, interacted map[string]bool) ([]interactiveElement, error) {
 	var results []discoveryResult
-	for _, node := range candidates {
-		// NOTE: Checking CSS visibility (display:none) requires a Layout Engine, which is out of scope here.
+	var findInteractable func(*layout.LayoutBox)
 
-		data := extractElementData(node)
-		results = append(results, discoveryResult{
-			Node: node,
-			Data: data,
-		})
+	// Traverse the layout tree to find visible nodes.
+	findInteractable = func(box *layout.LayoutBox) {
+		if box == nil || box.StyledNode == nil || box.StyledNode.Node == nil {
+			return
+		}
+		// The core improvement: check visibility based on computed styles from the layout engine.
+		if box.StyledNode.IsVisible() {
+			data := extractElementData(box.StyledNode.Node)
+			results = append(results, discoveryResult{
+				Node: box.StyledNode.Node,
+				Box:  box,
+				Data: data,
+			})
+		}
+		for _, child := range box.Children {
+			findInteractable(child)
+		}
 	}
 
+	findInteractable(layoutRoot)
 	return i.filterAndFingerprint(results, interacted), nil
 }
+
 
 // extractElementData pulls relevant information from an html.Node.
 func extractElementData(node *html.Node) ElementData {
@@ -513,7 +497,6 @@ func generateNodeFingerprint(data ElementData) (string, string) {
 	if cls, ok := attrs["class"]; ok && cls != "" {
 		classes := strings.Fields(cls)
 		sort.Strings(classes) // Ensure consistent ordering.
-
 		var stableClasses []string
 		for _, c := range classes {
 			// Heuristic: avoid classes that look like generated CSS-in-JS hashes (e.g., short, containing numbers)
@@ -589,7 +572,6 @@ func isTextInputElement(data ElementData) bool {
 	}
 
 	// SELECT is handled separately (Select action).
-
 	// Supports rich text editing areas.
 	// contenteditable can be "true", "false", or "" (empty string often implies true).
 	if val, ok := attrs["contenteditable"]; ok {
@@ -598,4 +580,3 @@ func isTextInputElement(data ElementData) bool {
 	}
 	return false
 }
-

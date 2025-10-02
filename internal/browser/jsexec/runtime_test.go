@@ -2,17 +2,46 @@ package jsexec_test
 
 import (
 	"context"
+	"net/url"
 	"testing"
 	"time"
 
+	"github.com/dop251/goja_nodejs/eventloop"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
+	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/browser/jsexec"
+	"go.uber.org/zap"
 )
 
+// mockBrowserEnvironment is a stub implementation for testing purposes.
+type mockBrowserEnvironment struct{}
+
+func (m *mockBrowserEnvironment) JSNavigate(targetURL string)                                     {}
+func (m *mockBrowserEnvironment) NotifyURLChange(targetURL string)                                {}
+func (m *mockBrowserEnvironment) ExecuteFetch(ctx context.Context, req schemas.FetchRequest) (*schemas.FetchResponse, error) {
+	return nil, nil
+}
+func (m *mockBrowserEnvironment) AddCookieFromString(cookieStr string) error          { return nil }
+func (m *mockBrowserEnvironment) GetCookieString() (string, error)                    { return "", nil }
+func (m *mockBrowserEnvironment) PushHistory(state *schemas.HistoryState) error       { return nil }
+func (m *mockBrowserEnvironment) ReplaceHistory(state *schemas.HistoryState) error    { return nil }
+func (m *mockBrowserEnvironment) GetHistoryLength() int                               { return 0 }
+func (m *mockBrowserEnvironment) GetCurrentHistoryState() interface{}                 { return nil }
+func (m *mockBrowserEnvironment) ResolveURL(targetURL string) (*url.URL, error) {
+	return url.Parse(targetURL)
+}
+
+// newTestRuntime is a helper to set up a runtime with mock dependencies for each test.
+func newTestRuntime() *jsexec.Runtime {
+	eventLoop := eventloop.NewEventLoop()
+	eventLoop.Start()
+	// In a real scenario, you'd stop the event loop. For these simple tests, it's okay.
+	return jsexec.NewRuntime(zap.NewNop(), eventLoop, &mockBrowserEnvironment{})
+}
+
 func TestExecuteScript_Basic(t *testing.T) {
-	runtime := jsexec.NewRuntime()
+	runtime := newTestRuntime()
 	ctx := context.Background()
 
 	script := `(5 + 5) * 2`
@@ -24,14 +53,13 @@ func TestExecuteScript_Basic(t *testing.T) {
 }
 
 func TestExecuteScript_WithArgs(t *testing.T) {
-	runtime := jsexec.NewRuntime()
+	runtime := newTestRuntime()
 	ctx := context.Background()
 
-	script := `prefix + message`
-	args := map[string]interface{}{
-		"prefix":  "Log: ",
-		"message": "Hello World",
-	}
+	// FIX: The script must be a function wrapper to accept arguments.
+	script := `(function(prefix, message) { return prefix + message; })`
+	// FIX: The arguments must be a slice, not a map.
+	args := []interface{}{"Log: ", "Hello World"}
 
 	result, err := runtime.ExecuteScript(ctx, script, args)
 	require.NoError(t, err)
@@ -39,7 +67,7 @@ func TestExecuteScript_WithArgs(t *testing.T) {
 }
 
 func TestExecuteScript_ReturnObject(t *testing.T) {
-	runtime := jsexec.NewRuntime()
+	runtime := newTestRuntime()
 	ctx := context.Background()
 	script := `({status: "success", code: 200})`
 
@@ -53,7 +81,7 @@ func TestExecuteScript_ReturnObject(t *testing.T) {
 }
 
 func TestExecuteScript_Exception(t *testing.T) {
-	runtime := jsexec.NewRuntime()
+	runtime := newTestRuntime()
 	ctx := context.Background()
 	script := `throw new Error("Intentional Error");`
 
@@ -64,7 +92,7 @@ func TestExecuteScript_Exception(t *testing.T) {
 }
 
 func TestExecuteScript_Timeout(t *testing.T) {
-	runtime := jsexec.NewRuntime()
+	runtime := newTestRuntime()
 	// Context with a short deadline
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
@@ -77,14 +105,15 @@ func TestExecuteScript_Timeout(t *testing.T) {
 	duration := time.Since(startTime)
 
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "javascript execution interrupted:")
+	// FIX: The error message changed slightly in the implementation.
+	assert.Contains(t, err.Error(), "javascript execution interrupted by context:")
 
 	// Ensure it didn't run excessively long (allowing buffer)
 	assert.Less(t, duration, 500*time.Millisecond)
 }
 
 func TestExecuteScript_Cancellation(t *testing.T) {
-	runtime := jsexec.NewRuntime()
+	runtime := newTestRuntime()
 	ctx, cancel := context.WithCancel(context.Background())
 
 	script := `while(true) {}`
@@ -102,7 +131,7 @@ func TestExecuteScript_Cancellation(t *testing.T) {
 	select {
 	case err := <-done:
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "javascript execution interrupted:")
+		assert.Contains(t, err.Error(), "javascript execution interrupted by context:")
 		assert.Contains(t, err.Error(), context.Canceled.Error())
 	case <-time.After(1 * time.Second):
 		t.Fatal("Execution did not stop after cancellation")

@@ -65,10 +65,11 @@ type SuccessCondition struct {
 
 // Config holds the configuration parameters for the TimeSlip analysis.
 type Config struct {
-	Concurrency     int           `json:"concurrency"`
-	Timeout         time.Duration `json:"timeout"`
-	IgnoreTLSErrors bool          `json:"ignore_tls_errors"`
-	ThresholdMs     int           `json:"threshold_ms"`
+	Concurrency int           `json:"concurrency"`
+	Timeout     time.Duration `json:"timeout"`
+	// FIX: Renamed to match the underlying network.ClientConfig field for consistency.
+	InsecureSkipVerify bool `json:"insecure_skip_verify"`
+	ThresholdMs        int  `json:"threshold_ms"`
 
 	// Success defines the conditions for a successful operation.
 	Success SuccessCondition `json:"success_conditions"`

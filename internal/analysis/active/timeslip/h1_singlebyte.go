@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -29,9 +30,9 @@ func ExecuteH1SingleByteSend(ctx context.Context, candidate *RaceCandidate, conf
 	// Configure dialer.
 	dialerConfig := network.NewDialerConfig()
 	dialerConfig.Timeout = config.Timeout
-	dialerConfig.ForceNoDelay = true // Disable Nagle's algorithm.
+	dialerConfig.NoDelay = true // Disable Nagle's algorithm.
 
-	address, err := setupConnectionDetails(targetURL, dialerConfig, config.IgnoreTLSErrors)
+	address, err := setupConnectionDetails(targetURL, dialerConfig, config.InsecureSkipVerify)
 	if err != nil {
 		return nil, err
 	}
@@ -81,18 +82,17 @@ func ExecuteH1SingleByteSend(ctx context.Context, candidate *RaceCandidate, conf
 	}
 
 	// 5. Read and parse all the responses.
-	// FIX: Updated the call to match the new signature of ParsePipelinedResponses(conn io.Reader, expectedTotal int).
-	// Removed candidate.Method.
-	parsedResponses, err := network.ParsePipelinedResponses(conn, config.Concurrency)
+	parser := network.NewHTTPParser(logger)
+	httpResponses, err := parser.ParsePipelinedResponses(conn, config.Concurrency)
 	duration := time.Since(startTime)
 
 	if err != nil {
 		logger.Warn("Warning: failed to parse all pipelined responses",
-			zap.Int("parsed", len(parsedResponses)),
+			zap.Int("parsed", len(httpResponses)),
 			zap.Error(err))
 	}
 
-	if len(parsedResponses) == 0 {
+	if len(httpResponses) == 0 {
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse any responses: %w", err)
 		}
@@ -102,18 +102,38 @@ func ExecuteH1SingleByteSend(ctx context.Context, candidate *RaceCandidate, conf
 	// 6. Package the results.
 	result := &RaceResult{
 		Strategy:  H1SingleByteSend,
-		Responses: make([]*RaceResponse, 0, len(parsedResponses)),
+		Responses: make([]*RaceResponse, 0, len(httpResponses)),
 		Duration:  duration,
 	}
 
-	for _, pResp := range parsedResponses {
-		// Generate the composite fingerprint.
-		fingerprint := GenerateFingerprint(pResp.StatusCode, pResp.Headers, pResp.Body)
+	for _, httpResp := range httpResponses {
+		// FIX: Convert the standard *http.Response from the parser into our
+		// local *ParsedResponse type for analysis.
+
+		bodyBytes, readErr := io.ReadAll(httpResp.Body)
+		if readErr != nil {
+			logger.Error("failed to read body from parsed pipelined response", zap.Error(readErr))
+			result.Responses = append(result.Responses, &RaceResponse{Error: readErr})
+			continue
+		}
+		httpResp.Body.Close()
+
+		// Create the local ParsedResponse. Individual duration isn't available here.
+		localParsedResp := &ParsedResponse{
+			StatusCode: httpResp.StatusCode,
+			Headers:    httpResp.Header,
+			Body:       bodyBytes,
+			Duration:   0, // Individual duration is not meaningful in pipelining.
+			Raw:        httpResp,
+		}
+
+		// Generate the composite fingerprint using the now-correct types.
+		fingerprint := GenerateFingerprint(localParsedResp.StatusCode, localParsedResp.Headers, localParsedResp.Body)
 
 		raceResp := &RaceResponse{
-			ParsedResponse: pResp,
+			ParsedResponse: localParsedResp,
 			Fingerprint:    fingerprint,
-			SpecificBody:   pResp.Body,
+			SpecificBody:   localParsedResp.Body,
 		}
 
 		// Determine success using the SuccessOracle.
@@ -134,16 +154,12 @@ func setupConnectionDetails(targetURL *url.URL, dialerConfig *network.DialerConf
 		if port == "" {
 			port = "443"
 		}
-		// Ensure TLSConfig is initialized (NewDialerConfig should handle this).
 		if dialerConfig.TLSConfig != nil {
 			dialerConfig.TLSConfig = dialerConfig.TLSConfig.Clone()
 			dialerConfig.TLSConfig.InsecureSkipVerify = ignoreTLS
 			// Force HTTP/1.1 for pipelining via ALPN.
 			dialerConfig.TLSConfig.NextProtos = []string{"http/1.1"}
 		}
-		// If TLSConfig is nil, the network.DialContext will handle the default TLS setup, 
-		// but we might lose the specific ALPN setting if not handled globally.
-
 	} else if scheme == "http" {
 		if port == "" {
 			port = "80"
@@ -185,23 +201,22 @@ func preparePipelinedRequests(candidate *RaceCandidate, count int, host string) 
 
 		// 3. Serialize the request using a pooled buffer.
 		buf := getBuffer()
+		defer putBuffer(buf)
 
 		if err := req.Write(buf); err != nil {
-			putBuffer(buf)
 			return nil, fmt.Errorf("failed to serialize request %d: %w", i, err)
 		}
 
 		if buf.Len() == 0 {
-			putBuffer(buf)
 			return nil, fmt.Errorf("%w: serialized request %d is empty", ErrConfigurationError, i)
 		}
 
 		// Copy bytes from the buffer, as the buffer will be reused.
 		reqBytes := make([]byte, buf.Len())
 		copy(reqBytes, buf.Bytes())
-		putBuffer(buf)
 
 		preparedRequests = append(preparedRequests, reqBytes)
 	}
 	return preparedRequests, nil
 }
+

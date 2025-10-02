@@ -59,10 +59,17 @@ func (a *JWTAnalyzer) Analyze(ctx context.Context, analysisCtx *core.AnalysisCon
 		return nil // Nothing to analyze
 	}
 
+	// FIX #1: Unmarshal the raw JSON HAR data before using it.
+	var harData schemas.HAR
+	if err := json.Unmarshal(*analysisCtx.Artifacts.HAR, &harData); err != nil {
+		a.logger.Error("Failed to unmarshal HAR data for JWT analysis", zap.Error(err))
+		return fmt.Errorf("failed to unmarshal HAR data: %w", err)
+	}
+
 	analyzedTokens := make(map[string]bool)
 
-	// Iterate through the HAR log entries, which contain both request and response data.
-	for _, entry := range analysisCtx.Artifacts.HAR.Log.Entries {
+	// FIX #1: Iterate through the unmarshaled harData.
+	for _, entry := range harData.Log.Entries {
 		a.extractAndAnalyze(analysisCtx, &entry.Request, &entry.Response, analyzedTokens)
 	}
 
@@ -78,7 +85,6 @@ func (a *JWTAnalyzer) extractAndAnalyze(analysisCtx *core.AnalysisContext, req *
 
 	// A. Request Headers & Cookies
 	extractFromNVPairs(req.Headers, tokens, "Request Header")
-	// FIX: Convert []schemas.Cookie to []schemas.NVPair before passing.
 	extractFromNVPairs(convertCookiesToNVPairs(req.Cookies), tokens, "Request Cookie")
 
 	// B. Request URL
@@ -102,7 +108,6 @@ func (a *JWTAnalyzer) extractAndAnalyze(analysisCtx *core.AnalysisContext, req *
 	// D. Response Headers & Body (if available)
 	if resp != nil {
 		extractFromNVPairs(resp.Headers, tokens, "Response Header")
-		// FIX: Convert []schemas.Cookie to []schemas.NVPair before passing.
 		extractFromNVPairs(convertCookiesToNVPairs(resp.Cookies), tokens, "Response Cookie")
 		if strings.Contains(resp.Content.MimeType, "application/json") {
 			extractFromJSONBody([]byte(resp.Content.Text), tokens, "Response Body")
@@ -135,7 +140,8 @@ func (a *JWTAnalyzer) extractAndAnalyze(analysisCtx *core.AnalysisContext, req *
 }
 
 // convertCookiesToNVPairs is a new helper function to fix the type mismatch.
-func convertCookiesToNVPairs(cookies []schemas.Cookie) []schemas.NVPair {
+// FIX #2: The function parameter must be []schemas.HARCookie to match the type in the HAR request/response structs.
+func convertCookiesToNVPairs(cookies []schemas.HARCookie) []schemas.NVPair {
 	if cookies == nil {
 		return nil
 	}

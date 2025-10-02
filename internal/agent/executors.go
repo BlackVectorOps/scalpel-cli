@@ -139,7 +139,7 @@ func (e *BrowserExecutor) registerHandlers() {
 // This function is now exported (ParseBrowserError) so it can be shared and used
 // by the Agent's `executeHumanoidAction` method. This centralizes error parsing logic.
 // It uses more specific error codes and checks for more nuanced failure conditions.
-func ParseBrowserError(err error, action Action) (string, map[string]interface{}) {
+func ParseBrowserError(err error, action Action) (ErrorCode, map[string]interface{}) {
 	errStr := err.Error()
 	details := map[string]interface{}{
 		"message": errStr,
@@ -157,9 +157,8 @@ func ParseBrowserError(err error, action Action) (string, map[string]interface{}
 		details["selector"] = action.Selector
 		return ErrCodeHumanoidGeometryInvalid, details
 	}
-	if strings.Contains(errStr, "timeout") {
-		return ErrCodeTimeoutError, details
-	}
+if strings.Contains(errStr, "timeout") || strings.Contains(errStr, "context deadline exceeded") {
+    return ErrCodeTimeoutError, details	}
 	if strings.Contains(errStr, "net::ERR") {
 		return ErrCodeNavigationError, details
 	}
@@ -192,8 +191,10 @@ func (e *BrowserExecutor) Execute(ctx context.Context, action Action) (*Executio
 		errorCode, errorDetails := ParseBrowserError(err, action)
 		result.ErrorCode = errorCode
 		result.ErrorDetails = errorDetails
-		e.logger.Warn("Browser action execution failed", zap.String("action", string(action.Type)), zap.String("error_code", errorCode), zap.Error(err))
-	}
+e.logger.Warn("Browser action execution failed",
+    zap.String("action", string(action.Type)),
+    zap.String("error_code", string(errorCode)), // <-- Corrected
+    zap.Error(err))	}
 
 	return result, nil
 }

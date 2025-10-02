@@ -560,5 +560,3 @@ func isValidIdentifierStart(ch byte) bool {
 func isValidIdentifierChar(ch byte) bool {
 	return isValidIdentifierStart(ch) || (ch >= '0' && ch <= '9')
 }
-
-

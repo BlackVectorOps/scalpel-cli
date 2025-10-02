@@ -24,9 +24,10 @@ func ExecuteGraphQLAsync(ctx context.Context, candidate *RaceCandidate, config *
 	}
 
 	// 2. Send the single batched request.
-	clientConfig := network.NewDefaultClientConfig()
+	// FIX: Renamed function and updated field names.
+	clientConfig := network.NewBrowserClientConfig()
 	clientConfig.RequestTimeout = config.Timeout
-	clientConfig.IgnoreTLSErrors = config.IgnoreTLSErrors
+	clientConfig.InsecureSkipVerify = config.InsecureSkipVerify
 	client := network.NewClient(clientConfig)
 
 	reqStart := time.Now()
