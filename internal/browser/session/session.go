@@ -1,4 +1,4 @@
-// Pa// Package session implements a functional, headless browser engine in pure Go.
+// Package session implements a functional, headless browser engine in pure Go.
 // It integrates a robust network stack, a Go based DOM representation (golang.org/x/net/html),
 // and the Goja JavaScript runtime, synchronized via an event loop and a custom DOM bridge (jsbind).
 //
@@ -120,24 +120,39 @@ type Session struct {
 
 // acquireOpLock grabs the operation lock if it's not already held by the current goroutine.
 // This is tracked via context to enable re-entrancy without deadlocking.
-// It returns a context marked as locked and a function to release the lock.
+// It returns a context marked as locked and a function to release the lock (which may be a no-op).
 func (s *Session) acquireOpLock(ctx context.Context) (context.Context, func()) {
+	// 1. Check for re-entrancy.
 	if ctx.Value(operationLockKey) != nil {
-		// Lock is already held by this operation chain. Return existing context and a no op unlock function.
+		// Lock is already held by this operation chain.
 		return ctx, func() {}
 	}
 
-	// Check if the session is already closing before attempting to lock.
+	// 2. Check contexts before attempting to lock.
+	// This prevents blocking on the lock if the operation or session is already cancelled.
+	select {
+	case <-s.ctx.Done():
+		// Session is closing/closed. Return session context (Done) and no-op unlock.
+		return s.ctx, func() {}
+	case <-ctx.Done():
+		// Operation context is cancelled/timed out. Return it (Done) and no-op unlock.
+		return ctx, func() {}
+	default:
+		// Contexts are fine, proceed to acquire the lock.
+	}
+
+	// 3. Acquire the lock. This might block.
+	s.opMu.Lock()
+
+	// 4. CRITICAL: Re-validate session state after acquiring the lock.
+	// If the session was closed (s.ctx cancelled) while we were waiting for the lock,
+	// the Close() function might be waiting for the event loop to drain. We must release the lock immediately.
 	if s.ctx.Err() != nil {
-		// If closed, return the session context (which is Done) and a no op unlock.
-		// The subsequent operation will fail quickly when checking the context.
+		s.opMu.Unlock()
 		return s.ctx, func() {}
 	}
 
-	// Acquire the lock.
-	s.opMu.Lock()
-
-	// Return a new context marked as locked, and the actual unlock function.
+	// 5. Lock acquired successfully and session is alive.
 	lockedCtx := context.WithValue(ctx, operationLockKey, true)
 	return lockedCtx, s.opMu.Unlock
 }
@@ -200,6 +215,7 @@ func NewSession(
 		consoleLogs:       make([]schemas.ConsoleLog, 0),
 	}
 
+	// Initialize JS Engine. This now respects the context during synchronous waits.
 	if err := s.initializeJSEngine(log); err != nil {
 		cancel()
 		return nil, fmt.Errorf("failed to initialize JS engine: %w", err)
@@ -242,7 +258,14 @@ func NewSession(
 	s.initializeDOMBridge(log)
 
 	// Initialize the state for the initial (empty) document.
-	s.resetStateForNewDocument(nil, nil, log, make(map[string]interface{}), make([]string, 0))
+	// Use s.ctx for the initial setup.
+	if err := s.resetStateForNewDocument(s.ctx, nil, nil, log, make(map[string]interface{}), make([]string, 0)); err != nil {
+		// Handle error during initialization, ensuring resources are cleaned up.
+		// Use a background context for cleanup if the main context is potentially already cancelled.
+		s.Close(context.Background())
+		// cancel() is implicitly called by Close() or if s.ctx was done.
+		return nil, fmt.Errorf("failed to reset state for initial document: %w", err)
+	}
 
 	return s, nil
 }
@@ -275,6 +298,7 @@ func (s *Session) initializeDOMBridge(log *zap.Logger) {
 	s.mu.Unlock()
 }
 
+// initializeJSEngine sets up the Goja runtime and event loop.
 func (s *Session) initializeJSEngine(log *zap.Logger) error {
 	s.jsRegistry = new(require.Registry)
 	printer := &sessionConsolePrinter{s: s}
@@ -297,7 +321,16 @@ func (s *Session) initializeJSEngine(log *zap.Logger) error {
 		_ = navigator.Set("languages", s.persona.Languages)
 		_ = vm.Set("navigator", navigator)
 	})
-	<-initDone
+
+	// Wait for initialization, but respect the session context in case of early termination.
+	select {
+	case <-initDone:
+	// Success
+	case <-s.ctx.Done():
+		// Session context cancelled before initialization finished.
+		el.Stop()
+		return fmt.Errorf("session closed before JS engine initialized: %w", s.ctx.Err())
+	}
 
 	s.mu.Lock()
 	s.eventLoop = el
@@ -332,13 +365,14 @@ func (s *Session) captureConsoleLog(logLevel string, message string) {
 // resetStateForNewDocument prepares the session (DOM and JS context) for a new page load.
 // It must be called without holding the main state lock (s.mu).
 // It assumes the operation lock (s.opMu) is held if called as part of an operation.
-func (s *Session) resetStateForNewDocument(doc *html.Node, layoutRoot *layout.LayoutBox, log *zap.Logger, exposedFunctions map[string]interface{}, persistentScripts []string) {
+// It now accepts a context (ctx) to allow cancellation during the synchronous wait for the event loop.
+func (s *Session) resetStateForNewDocument(ctx context.Context, doc *html.Node, layoutRoot *layout.LayoutBox, log *zap.Logger, exposedFunctions map[string]interface{}, persistentScripts []string) error {
 	if doc == nil {
 		var err error
 		doc, err = html.Parse(strings.NewReader("<html><head></head><body></body></html>"))
 		if err != nil {
 			log.Error("Critical error: Failed to parse empty HTML document.", zap.Error(err))
-			return
+			return err
 		}
 	}
 
@@ -353,13 +387,15 @@ func (s *Session) resetStateForNewDocument(doc *html.Node, layoutRoot *layout.La
 
 	bridge := s.getDOMBridge()
 	if bridge == nil {
-		return // Session closing
+		// Session closing or not fully initialized
+		return errors.New("session closed or DOM bridge unavailable")
 	}
 	bridge.UpdateDOM(doc)
 
 	loop := s.getEventLoop()
 	if loop == nil {
-		return // Session closing
+		// Session closing
+		return errors.New("session closed: event loop unavailable")
 	}
 
 	// Reset the JavaScript context synchronously on the event loop.
@@ -401,8 +437,16 @@ func (s *Session) resetStateForNewDocument(doc *html.Node, layoutRoot *layout.La
 			}
 		}, 1*time.Millisecond)
 	})
-	// Wait for the reset to complete.
-	<-done
+
+	// Wait for the reset to complete, respecting the operation context.
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		// The operation was cancelled while waiting for the event loop.
+		s.logger.Warn("Context canceled while waiting for state reset.", zap.Error(ctx.Err()))
+		return fmt.Errorf("context canceled during JS context reset: %w", ctx.Err())
+	}
 }
 
 func (s *Session) initializeNetworkStack(log *zap.Logger) error {
@@ -441,11 +485,11 @@ func (s *Session) GetContext() context.Context { return s.ctx }
 func (s *Session) Close(ctx context.Context) error {
 	// Use atomic flag to ensure shutdown logic runs only once.
 	if !atomic.CompareAndSwapInt32(&s.closeStatus, 0, 1) {
-		s.logger.Debug("Close called on an already closing session.", zap.String("stack", string(debug.Stack())))
+		s.logger.Debug("Close called on an already closing session.")
 		return nil
 	}
 
-	s.logger.Info("-- Close called for the FIRST time --", zap.String("stack", string(debug.Stack())))
+	s.logger.Debug("-- Close initiated --")
 
 	var returnErr error
 
@@ -456,7 +500,7 @@ func (s *Session) Close(ctx context.Context) error {
 		s.cancel()
 
 		// 2. Acquire the operation lock. This waits for any currently running operation
-		// (which should finish quickly due to context cancellation) to complete.
+		// (which should finish quickly due to context cancellation and fixed synchronous waits) to complete.
 		s.opMu.Lock()
 		s.opMu.Unlock() // Unlock immediately, we just needed synchronization.
 
@@ -510,7 +554,6 @@ func (s *Session) SetOnClose(fn func()) {
 }
 
 // stabilize waits for the session to become idle (network activity ceased and JS event loop clear).
-// It assumes the operation lock (s.opMu) is held if called as part of an operation.
 func (s *Session) stabilize(ctx context.Context) error {
 	// Combine session context with the operation context.
 	stabCtx, stabCancel := CombineContext(s.ctx, ctx)
@@ -524,14 +567,18 @@ func (s *Session) stabilize(ctx context.Context) error {
 	// Wait for network activity to cease.
 	if s.harvester != nil {
 		if err := s.harvester.WaitNetworkIdle(stabCtx, quietPeriod); err != nil {
-			// Non critical error, proceed anyway.
-			s.logger.Debug("Network stabilization finished with potential pending requests.", zap.Error(err))
+			// FIX: If WaitNetworkIdle fails (due to cancellation), we must return the error immediately.
+			s.logger.Debug("Network stabilization interrupted.", zap.Error(err))
+			return err
 		}
 	}
 
+	// Optimization: Wait a shorter, fixed duration for JS execution/timers to settle after network idle.
+	jsSettleTime := 100 * time.Millisecond
+
 	// Wait for a short duration after network idle for JS execution.
 	select {
-	case <-time.After(quietPeriod):
+	case <-time.After(jsSettleTime): // Changed from quietPeriod
 	case <-stabCtx.Done():
 		return stabCtx.Err()
 	}
@@ -547,6 +594,7 @@ func (s *Session) stabilize(ctx context.Context) error {
 		close(done)
 	})
 
+	// Wait for the loop to drain, respecting the context.
 	select {
 	case <-done:
 	case <-stabCtx.Done():
@@ -607,6 +655,7 @@ func (s *Session) navigateInternal(ctx context.Context, targetURL string) error 
 		}
 		close(done)
 	})
+	// Wait for the event dispatch, respecting the base context.
 	select {
 	case <-done:
 	case <-baseNavCtx.Done():
@@ -622,6 +671,7 @@ func (s *Session) navigateInternal(ctx context.Context, targetURL string) error 
 
 	// Execute the request (handles state updates). Lock is held.
 	// Pass requestCtx which includes the timeout.
+	// executeRequest handles the full request/response cycle, including processing the response and updating state.
 	if err := s.executeRequest(requestCtx, req); err != nil {
 		return err
 	}
@@ -635,11 +685,13 @@ func (s *Session) navigateInternal(ctx context.Context, targetURL string) error 
 	return nil
 }
 
-// executeRequest handles the HTTP request/response cycle.
+// executeRequest handles the HTTP request/response cycle, including redirects and final response processing.
 // Assumes s.opMu is held.
+// Updated signature to accept context.Context (ctx) to propagate it to processResponse.
 func (s *Session) executeRequest(ctx context.Context, req *http.Request) error {
 	const maxRedirects = 10
 	currentReq := req
+	// The context passed here (ctx) governs the entire chain of requests and the final response processing.
 	for i := 0; i < maxRedirects; i++ {
 		s.logger.Debug("Executing request", zap.String("method", currentReq.Method), zap.String("url", currentReq.URL.String()))
 		resp, err := s.client.Do(currentReq)
@@ -656,7 +708,8 @@ func (s *Session) executeRequest(ctx context.Context, req *http.Request) error {
 			currentReq = nextReq
 			continue
 		}
-		return s.processResponse(resp)
+		// Process the final response.
+		return s.processResponse(ctx, resp)
 	}
 	return fmt.Errorf("maximum number of redirects (%d) exceeded", maxRedirects)
 }
@@ -698,7 +751,8 @@ func (s *Session) handleRedirect(ctx context.Context, resp *http.Response, origi
 
 // processResponse handles the response body, parsing, layout, state updates, and script execution.
 // Assumes s.opMu is held.
-func (s *Session) processResponse(resp *http.Response) error {
+// It now accepts the context (ctx) governing the operation.
+func (s *Session) processResponse(ctx context.Context, resp *http.Response) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 400 {
@@ -712,6 +766,7 @@ func (s *Session) processResponse(resp *http.Response) error {
 
 	if isHTML {
 		// Read the entire body (io.ReadAll reads until EOF), crucial for connection reuse.
+		// The context used for the request (passed in ctx) also covers the body reading.
 		bodyBytes, err := io.ReadAll(resp.Body)
 		if err != nil {
 			return fmt.Errorf("failed to read response body: %w", err)
@@ -719,14 +774,18 @@ func (s *Session) processResponse(resp *http.Response) error {
 		doc, err = htmlquery.Parse(bytes.NewReader(bodyBytes))
 		if err != nil {
 			s.logger.Error("Failed to parse HTML response.", zap.Error(err), zap.String("url", resp.Request.URL.String()))
-			s.updateState(resp.Request.URL, nil, nil, true)
-			return nil
+			// Update state even on parse failure, but check for errors from updateState.
+			if updateErr := s.updateState(ctx, resp.Request.URL, nil, nil, true); updateErr != nil {
+				return fmt.Errorf("failed to update state after parse error: %w", updateErr)
+			}
+			return nil // Parsing failed, but state updated successfully.
 		}
 
 		// Build Style and Layout trees.
 		styleEngine := style.NewEngine(s.shadowEngine)
 		styleEngine.SetViewport(float64(s.persona.Width), float64(s.persona.Height))
-		s.buildAndAddStylesheets(styleEngine, doc, resp.Request.URL)
+		// Pass the context to stylesheet fetching for cancellation support.
+		s.buildAndAddStylesheets(ctx, styleEngine, doc, resp.Request.URL)
 		styleTree := styleEngine.BuildTree(doc, nil)
 
 		layoutRoot = s.layoutEngine.BuildAndLayoutTree(styleTree)
@@ -736,7 +795,10 @@ func (s *Session) processResponse(resp *http.Response) error {
 	}
 
 	// Update the session state and reset the JS context.
-	s.updateState(resp.Request.URL, doc, layoutRoot, true)
+	// Pass the context to handle potential cancellation during synchronous waits in updateState/resetState.
+	if err := s.updateState(ctx, resp.Request.URL, doc, layoutRoot, true); err != nil {
+		return fmt.Errorf("failed to update session state: %w", err)
+	}
 
 	// Execute page scripts after the JS context is ready.
 	if isHTML && doc != nil {
@@ -746,7 +808,8 @@ func (s *Session) processResponse(resp *http.Response) error {
 }
 
 // buildAndAddStylesheets fetches and parses external stylesheets concurrently.
-func (s *Session) buildAndAddStylesheets(styleEngine *style.Engine, doc *html.Node, baseURL *url.URL) {
+// It now accepts a context (ctx) to allow cancellation of fetches.
+func (s *Session) buildAndAddStylesheets(ctx context.Context, styleEngine *style.Engine, doc *html.Node, baseURL *url.URL) {
 	styleTags := htmlquery.Find(doc, "//style")
 	for _, tag := range styleTags {
 		p := parser.NewParser(htmlquery.InnerText(tag))
@@ -760,6 +823,11 @@ func (s *Session) buildAndAddStylesheets(styleEngine *style.Engine, doc *html.No
 
 	var wg sync.WaitGroup
 	stylesheetChan := make(chan parser.StyleSheet, len(linkTags))
+
+	// Combine session context with the operation context for the fetches.
+	fetchCtx, fetchCancel := CombineContext(s.ctx, ctx)
+	defer fetchCancel()
+
 	for _, tag := range linkTags {
 		href := htmlquery.SelectAttr(tag, "href")
 		if href == "" {
@@ -774,11 +842,16 @@ func (s *Session) buildAndAddStylesheets(styleEngine *style.Engine, doc *html.No
 		// Fetch concurrently.
 		go func(url string) {
 			defer wg.Done()
-			// Use session context for cancellation.
-			req, _ := http.NewRequestWithContext(s.ctx, "GET", url, nil)
+			// Use the combined context for cancellation.
+			req, err := http.NewRequestWithContext(fetchCtx, "GET", url, nil)
+			if err != nil {
+				return
+			}
+
 			s.prepareRequestHeaders(req)
 			resp, err := s.client.Do(req)
 			if err != nil || resp.StatusCode != http.StatusOK {
+				// Check for cancellation errors specifically if needed, otherwise just return.
 				return
 			}
 			defer resp.Body.Close()
@@ -798,9 +871,68 @@ func (s *Session) buildAndAddStylesheets(styleEngine *style.Engine, doc *html.No
 	}
 }
 
+// reRender updates the style and layout trees based on the current DOM state.
+// This is necessary after interactions where JavaScript might have modified the DOM.
+// Assumes s.opMu is held.
+func (s *Session) reRender(ctx context.Context) error {
+	s.logger.Debug("Initiating re-render.")
+	bridge := s.getDOMBridge()
+	if bridge == nil {
+		return errors.New("session closed: DOM bridge unavailable during re-render")
+	}
+
+	// 1. Get the current DOM snapshot (serialized HTML).
+	htmlContent, err := bridge.GetOuterHTML()
+	if err != nil {
+		return fmt.Errorf("failed to get outer HTML for re-render: %w", err)
+	}
+
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+
+	// 2. Parse the HTML back into a node structure.
+	doc, err := htmlquery.Parse(strings.NewReader(htmlContent))
+	if err != nil {
+		return fmt.Errorf("failed to parse HTML during re-render: %w", err)
+	}
+
+	// 3. Run the rendering pipeline (Style -> Layout).
+	s.mu.RLock()
+	currentURL := s.currentURL
+	persona := s.persona
+	s.mu.RUnlock()
+
+	// Initialize engines for the new render pass.
+	styleEngine := style.NewEngine(s.shadowEngine)
+	styleEngine.SetViewport(float64(persona.Width), float64(persona.Height))
+
+	// Fetch and apply stylesheets.
+	if currentURL != nil {
+		// Use the context provided for potential network fetches.
+		s.buildAndAddStylesheets(ctx, styleEngine, doc, currentURL)
+	}
+
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+
+	styleTree := styleEngine.BuildTree(doc, nil)
+	layoutRoot := s.layoutEngine.BuildAndLayoutTree(styleTree)
+
+	// 4. Update the session's layout root.
+	s.mu.Lock()
+	s.layoutRoot = layoutRoot
+	s.mu.Unlock()
+
+	s.logger.Debug("Re-render complete.")
+	return nil
+}
+
 // updateState updates the session's internal state and triggers the JS context reset.
 // Assumes s.opMu is held.
-func (s *Session) updateState(newURL *url.URL, doc *html.Node, layoutRoot *layout.LayoutBox, resetContext bool) {
+// It now accepts the context (ctx) governing the operation and returns an error.
+func (s *Session) updateState(ctx context.Context, newURL *url.URL, doc *html.Node, layoutRoot *layout.LayoutBox, resetContext bool) error {
 	s.mu.Lock()
 	s.currentURL = newURL
 	title := ""
@@ -835,10 +967,14 @@ func (s *Session) updateState(newURL *url.URL, doc *html.Node, layoutRoot *layou
 	s.mu.Unlock()
 
 	if resetContext {
-		s.resetStateForNewDocument(doc, layoutRoot, s.logger, exposedFunctionsCopy, persistentScriptsCopy)
+		// Pass the context to resetStateForNewDocument to handle cancellation during synchronous waits.
+		if err := s.resetStateForNewDocument(ctx, doc, layoutRoot, s.logger, exposedFunctionsCopy, persistentScriptsCopy); err != nil {
+			return err
+		}
 	}
 
 	s.logger.Debug("Session state updated", zap.String("url", newURL.String()), zap.String("title", title), zap.Bool("context_reset", resetContext))
+	return nil
 }
 
 // executePageScripts executes inline and external scripts.
@@ -951,65 +1087,181 @@ func (s *Session) GetDOMSnapshot(ctx context.Context) (io.Reader, error) {
 	return strings.NewReader(htmlContent), nil
 }
 
-// Interact performs a sequence of interactions using the humanoid controller.
-// This is now the primary entry point for complex, multi step actions.
+// Interact performs interactions based on the configuration.
+// It supports both explicit steps and automated recursive exploration.
 func (s *Session) Interact(ctx context.Context, config schemas.InteractionConfig) error {
 	lockedCtx, unlock := s.acquireOpLock(ctx)
 	defer unlock()
 
-	if s.ctx.Err() != nil {
-		return s.ctx.Err()
+	// Check context after acquiring lock.
+	if lockedCtx.Err() != nil {
+		return lockedCtx.Err()
 	}
 
-	for _, step := range config.Steps {
-		if lockedCtx.Err() != nil {
-			return lockedCtx.Err()
+	// Handle Explicit Steps
+	if len(config.Steps) > 0 {
+		return s.executeStepsInternal(lockedCtx, config.Steps)
+	}
+
+	// Handle Recursive Exploration
+	// Use defaults if parameters are not set.
+	if config.MaxDepth <= 0 && config.MaxInteractionsPerDepth <= 0 {
+		config = dom.NewDefaultInteractionConfig()
+	}
+
+	if config.MaxDepth > 0 {
+		return s.recursiveInteractInternal(lockedCtx, config)
+	}
+
+	return nil // No steps or depth specified.
+}
+
+// executeStepsInternal handles the explicit interaction steps.
+// Assumes s.opMu is held.
+func (s *Session) executeStepsInternal(ctx context.Context, steps []schemas.InteractionStep) error {
+	for _, step := range steps {
+		if ctx.Err() != nil {
+			return ctx.Err()
 		}
 
 		s.logger.Info("Executing interaction step", zap.String("action", string(step.Action)), zap.String("selector", step.Selector))
 
+		// Flags to track if stabilization/rendering is needed.
+		needsStabilization := true
+		needsRendering := true
+
 		switch step.Action {
 		case schemas.ActionClick:
-			if err := s.humanoidController.IntelligentClick(lockedCtx, step.Selector, nil); err != nil {
+			if err := s.humanoidController.IntelligentClick(ctx, step.Selector, nil); err != nil {
 				return fmt.Errorf("failed to execute click on '%s': %w", step.Selector, err)
 			}
 		case schemas.ActionType:
-			if err := s.humanoidController.Type(lockedCtx, step.Selector, step.Value, nil); err != nil {
+			if err := s.humanoidController.Type(ctx, step.Selector, step.Value, nil); err != nil {
 				return fmt.Errorf("failed to execute type on '%s': %w", step.Selector, err)
 			}
 		case schemas.ActionNavigate:
-			if err := s.navigateInternal(lockedCtx, step.Value); err != nil {
+			// Use navigateInternal as lock is held.
+			if err := s.navigateInternal(ctx, step.Value); err != nil {
 				return fmt.Errorf("failed to navigate to '%s': %w", step.Value, err)
 			}
+			// navigateInternal -> processResponse handles rendering.
+			needsRendering = false
 		case schemas.ActionWait:
 			if step.Milliseconds > 0 {
-				if err := s.Sleep(lockedCtx, time.Duration(step.Milliseconds)*time.Millisecond); err != nil {
+				if err := s.Sleep(ctx, time.Duration(step.Milliseconds)*time.Millisecond); err != nil {
 					return err
 				}
+				needsStabilization = false
 			} else {
-				if err := s.stabilize(lockedCtx); err != nil {
+				// Wait for stabilization.
+				if err := s.stabilize(ctx); err != nil {
 					return err
 				}
+				needsStabilization = false
 			}
 		case schemas.ActionSelect:
-			if err := s.executeSelectInternal(lockedCtx, step.Selector, step.Value); err != nil {
+			// Use executeSelectInternal as lock is held.
+			if err := s.executeSelectInternal(ctx, step.Selector, step.Value); err != nil {
 				return fmt.Errorf("failed to execute select on '%s': %w", step.Selector, err)
 			}
 		case schemas.ActionSubmit:
-			// A "submit" is just a click on a submit button or element within a form.
-			if err := s.humanoidController.IntelligentClick(lockedCtx, step.Selector, nil); err != nil {
+			// A "submit" is typically achieved via a click.
+			if err := s.humanoidController.IntelligentClick(ctx, step.Selector, nil); err != nil {
 				return fmt.Errorf("failed to execute submit (via click) on '%s': %w", step.Selector, err)
 			}
+			// Form submission leads to navigation (executeRequest -> processResponse).
+			needsRendering = false
+			// Note: ActionScroll is missing from the schemas.InteractionAction constants provided, but handled if implemented.
 		default:
 			return fmt.Errorf("unsupported interaction action: %s", step.Action)
 		}
 
-		// Always stabilize after an action to wait for consequences.
-		if err := s.stabilize(lockedCtx); err != nil {
-			return err
+		// Stabilization and Re-rendering lifecycle management:
+
+		if needsStabilization {
+			if err := s.stabilize(ctx); err != nil {
+				return err
+			}
+		}
+
+		if needsRendering {
+			if err := s.reRender(ctx); err != nil {
+				// Log the error but don't fail the entire interaction sequence if rendering fails.
+				s.logger.Warn("Failed to re-render after interaction step, proceeding with potentially stale layout.", zap.Error(err))
+			}
+		}
+	}
+	return nil
+}
+
+// recursiveInteractInternal manages the loop for automated exploration.
+// Assumes s.opMu is held.
+func (s *Session) recursiveInteractInternal(ctx context.Context, config schemas.InteractionConfig) error {
+	s.logger.Info("Starting recursive interaction loop.", zap.Int("MaxDepth", config.MaxDepth), zap.Int("MaxInteractionsPerDepth", config.MaxInteractionsPerDepth))
+
+	interactedElements := make(map[string]bool)
+
+	// Calculate the maximum number of total interactions allowed as a budget.
+	maxTotalInteractions := config.MaxDepth * config.MaxInteractionsPerDepth
+	// Basic protection against zero/negative values if defaults weren't applied correctly.
+	if maxTotalInteractions <= 0 {
+		if config.MaxDepth > 0 {
+			maxTotalInteractions = config.MaxDepth
+		} else if config.MaxInteractionsPerDepth > 0 {
+			maxTotalInteractions = config.MaxInteractionsPerDepth
+		} else {
+			return nil
 		}
 	}
 
+	interactionsCount := 0
+
+	// Loop until we hit the limit or run out of things to do.
+	for interactionsCount < maxTotalInteractions {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
+		s.mu.RLock()
+		layoutRoot := s.layoutRoot
+		s.mu.RUnlock()
+
+		if layoutRoot == nil {
+			s.logger.Warn("Layout root is nil before exploration step, stopping.")
+			break
+		}
+
+		// Execute one step of exploration.
+		interacted, err := s.interactor.ExploreStep(ctx, config, layoutRoot, interactedElements)
+		if err != nil {
+			// If the error is context cancellation, return immediately.
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || ctx.Err() != nil {
+				return err
+			}
+			s.logger.Warn("Error during exploration step, stopping.", zap.Error(err))
+			break
+		}
+
+		if !interacted {
+			s.logger.Info("No new interactions found, stopping exploration.")
+			break
+		}
+
+		interactionsCount++
+		s.logger.Debug("Interaction successful, proceeding to stabilization and re-render.", zap.Int("count", interactionsCount))
+
+		// If an interaction happened, we must stabilize and re-render.
+		if err := s.stabilize(ctx); err != nil {
+			return err
+		}
+
+		if err := s.reRender(ctx); err != nil {
+			s.logger.Warn("Failed to re-render during recursive interaction, stopping.", zap.Error(err))
+			break // Cannot continue if rendering fails
+		}
+	}
+
+	s.logger.Info("Recursive interaction loop finished.", zap.Int("total_interactions", interactionsCount))
 	return nil
 }
 
@@ -1021,7 +1273,12 @@ func (s *Session) Click(ctx context.Context, selector string) error {
 	if err := s.humanoidController.IntelligentClick(lockedCtx, selector, nil); err != nil {
 		return err
 	}
-	return s.stabilize(lockedCtx)
+	// Stabilize the session
+	if err := s.stabilize(lockedCtx); err != nil {
+		return err
+	}
+	// Re-render the layout as the DOM might have changed.
+	return s.reRender(lockedCtx)
 }
 
 // Type simulates human like typing by delegating to the humanoid controller.
@@ -1032,7 +1289,12 @@ func (s *Session) Type(ctx context.Context, selector string, text string) error 
 	if err := s.humanoidController.Type(lockedCtx, selector, text, nil); err != nil {
 		return err
 	}
-	return s.stabilize(lockedCtx)
+	// Stabilize the session
+	if err := s.stabilize(lockedCtx); err != nil {
+		return err
+	}
+	// Re-render the layout.
+	return s.reRender(lockedCtx)
 }
 
 // Submit submits a form by clicking on a submit element within it.
@@ -1106,6 +1368,7 @@ func (s *Session) exposeFunctionInternal(ctx context.Context, name string, funct
 		errChan <- vm.Set(name, function)
 	})
 
+	// Wait for completion, respecting the context.
 	select {
 	case err := <-errChan:
 		return err
@@ -1156,7 +1419,12 @@ func (s *Session) executeScriptInternal(ctx context.Context, script string, args
 		return json.RawMessage("null"), nil
 	}
 
-	return json.Marshal(result)
+	// Marshal the result into JSON.
+	jsonData, err := json.Marshal(result)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal javascript result: %w", err)
+	}
+	return json.RawMessage(jsonData), nil
 }
 
 // executeScriptLowLevel handles the low level interaction with the Goja event loop.
@@ -1178,11 +1446,10 @@ func (s *Session) executeScriptLowLevel(ctx context.Context, script string, res 
 	resultChan := make(chan struct {
 		Value goja.Value
 		Error error
-	}, 1)
+	}, 1) // Buffer of 1 to prevent the callback from blocking if the receiver is cancelled.
 
 	loop.RunOnLoop(func(vm *goja.Runtime) {
-		// This defer/recover block is critical. It prevents a panic inside Goja
-		// (e.g., from a badly written script) from killing the event loop goroutine.
+		// This defer/recover block is critical. It runs LAST (LIFO order for defers).
 		defer func() {
 			// Since this function is the only thing running on the event loop's goroutine
 			// at this moment, we can safely restore the global interrupt handler here.
@@ -1191,10 +1458,14 @@ func (s *Session) executeScriptLowLevel(ctx context.Context, script string, res 
 				err := fmt.Errorf("panic in javascript execution: %v", r)
 				s.logger.Error("Recovered from panic in event loop", zap.Error(err), zap.String("stack", string(debug.Stack())))
 				// Send the panic as an error to the calling function.
-				resultChan <- struct {
+				// Use select to avoid blocking if the receiver is already gone due to context cancellation.
+				select {
+				case resultChan <- struct {
 					Value goja.Value
 					Error error
-				}{nil, err}
+				}{nil, err}:
+				default:
+				}
 			}
 		}()
 
@@ -1203,32 +1474,44 @@ func (s *Session) executeScriptLowLevel(ctx context.Context, script string, res 
 		vm.Interrupt(execInterruptHandle)
 
 		executionDone := make(chan struct{})
+
+		// Ensure the monitoring goroutine is always signaled to stop, even on panic.
+		// This defer runs BEFORE the panic recovery defer.
+		defer close(executionDone)
+
 		// Monitor the context. If canceled, signal the interrupt handler.
 		go func() {
 			select {
 			case <-execCtx.Done():
+				// The context was canceled. Signal the interrupt handler.
 				close(execInterruptHandle)
 			case <-executionDone:
+			// The script finished (or panicked), exit the monitoring goroutine.
 			}
 		}()
 
 		val, err := vm.RunString(script)
-		close(executionDone) // Signal monitor goroutine to exit
 
 		// Send the result back.
+		// Use select to avoid blocking if the receiver is already gone due to context cancellation.
 		select {
 		case resultChan <- struct {
 			Value goja.Value
 			Error error
 		}{val, err}:
 		case <-execCtx.Done():
-			// If context is done, don't block.
+		// If context is done, don't block.
 		}
 	})
 
-	// Wait for the result or cancellation.
-	result := <-resultChan
-	return s.processScriptResult(execCtx, result.Value, result.Error, res)
+	// Wait for the result or cancellation. This prevents deadlocks if the context is cancelled.
+	select {
+	case result := <-resultChan:
+		return s.processScriptResult(execCtx, result.Value, result.Error, res)
+	case <-execCtx.Done():
+		// Context was cancelled while waiting for the event loop to process the job.
+		return fmt.Errorf("javascript execution cancelled while waiting for event loop: %w", execCtx.Err())
+	}
 }
 
 func (s *Session) waitForPromise(ctx context.Context, promise *goja.Promise) (goja.Value, error) {
@@ -1335,6 +1618,7 @@ func (s *Session) processScriptResult(ctx context.Context, value goja.Value, err
 			exportErrChan <- vm.ExportTo(value, res)
 		})
 
+		// Wait for export, respecting the context.
 		select {
 		case exportErr := <-exportErrChan:
 			return exportErr
@@ -1363,7 +1647,8 @@ func (s *Session) ExecuteClick(ctx context.Context, selector string, minMs, maxM
 
 // executeClickInternal performs the click action. Assumes s.opMu is held.
 func (s *Session) executeClickInternal(ctx context.Context, selector string, minMs, maxMs int) error {
-	element, err := s.findElementNode(selector)
+	// Pass the context to findElementNode to allow cancellation during synchronous wait.
+	element, err := s.findElementNode(ctx, selector)
 	if err != nil {
 		return err
 	}
@@ -1402,7 +1687,8 @@ func (s *Session) ExecuteType(ctx context.Context, selector string, text string,
 
 // executeTypeInternal performs the typing action. Assumes s.opMu is held.
 func (s *Session) executeTypeInternal(ctx context.Context, selector string, text string, holdMeanMs float64) error {
-	element, err := s.findElementNode(selector)
+	// Pass the context to findElementNode.
+	element, err := s.findElementNode(ctx, selector)
 	if err != nil {
 		return err
 	}
@@ -1429,7 +1715,12 @@ func (s *Session) executeTypeInternal(ctx context.Context, selector string, text
 	}
 	var currentValue string
 	if err := json.Unmarshal(result, &currentValue); err != nil {
-		return fmt.Errorf("could not decode element value: %w", err)
+		// Handle cases where the result might not be a string (e.g., null)
+		if result == nil || string(result) == "null" {
+			currentValue = ""
+		} else {
+			return fmt.Errorf("could not decode element value: %w", err)
+		}
 	}
 
 	for _, char := range text {
@@ -1484,7 +1775,8 @@ func (s *Session) ExecuteSelect(ctx context.Context, selector string, value stri
 
 // executeSelectInternal performs the select logic. Assumes s.opMu is held.
 func (s *Session) executeSelectInternal(ctx context.Context, selector string, value string) error {
-	selectNode, err := s.findElementNode(selector)
+	// Pass the context to findElementNode.
+	selectNode, err := s.findElementNode(ctx, selector)
 	if err != nil {
 		return err
 	}
@@ -1504,6 +1796,7 @@ func (s *Session) executeSelectInternal(ctx context.Context, selector string, va
 		}
 	})
 
+	// Wait for completion, respecting the context.
 	select {
 	case <-done:
 	case <-ctx.Done():
@@ -1797,15 +2090,30 @@ func (s *Session) DispatchMouseEvent(ctx context.Context, data schemas.MouseEven
 		}
 
 		// 1. Perform a "hit test" to find the element at the cursor.
-		// Note: FindNodeAtPoint is a temporary implementation.
 		hitNode := bridge.FindNodeAtPoint(data.X, data.Y)
 
 		if hitNode != nil {
-			// 2. Lock the DOM and perform the default action.
-			// The PerformDefaultClickAction function expects the lock to be held by the caller.
-			bridge.Lock()
-			defer bridge.Unlock()
-			bridge.PerformDefaultClickAction(hitNode)
+			// FIX: Replaced the problematic bridge.PerformDefaultClickAction.
+
+			// 2. Handle the consequences (navigation, state change).
+			// We use the internal handler as opMu is held. This avoids the deadlock.
+			err := s.handleClickConsequenceInternal(lockedCtx, hitNode)
+
+			// 3. Dispatch the JavaScript 'click' event on the event loop (Asynchronously).
+			loop := s.getEventLoop()
+			if loop != nil {
+				// Capture hitNode for the closure
+				targetNode := hitNode
+				loop.RunOnLoop(func(vm *goja.Runtime) {
+					// Ensure bridge is still valid when the loop runs
+					if currentBridge := s.getDOMBridge(); currentBridge != nil {
+						currentBridge.DispatchEventOnNode(targetNode, "click")
+					}
+				})
+			}
+
+			// Return the result of the consequence handler.
+			return err
 		}
 	}
 	return nil
@@ -1864,11 +2172,13 @@ func (s *Session) collectArtifactsInternal(ctx context.Context) (*schemas.Artifa
 		artifacts.HAR = (*json.RawMessage)(&rawHar)
 	}
 
-	// Get DOM snapshot.
-	domSnapshot, _ := s.GetDOMSnapshot(ctx)
-	if domSnapshot != nil {
-		snapshotBytes, _ := io.ReadAll(domSnapshot)
-		artifacts.DOM = string(snapshotBytes)
+	// Get DOM snapshot. Use the internal logic directly as we hold the lock.
+	bridge := s.getDOMBridge()
+	if bridge != nil {
+		htmlContent, err := bridge.GetOuterHTML()
+		if err == nil {
+			artifacts.DOM = htmlContent
+		}
 	}
 
 	if ctx.Err() != nil {
@@ -1914,7 +2224,8 @@ func (s *Session) prepareRequestHeaders(req *http.Request) {
 
 // findElementNode queries the DOM bridge synchronously on the event loop.
 // Assumes s.opMu is held.
-func (s *Session) findElementNode(selector string) (*html.Node, error) {
+// It now accepts the context (ctx) to allow cancellation during the wait.
+func (s *Session) findElementNode(ctx context.Context, selector string) (*html.Node, error) {
 	bridge := s.getDOMBridge()
 	if bridge == nil {
 		return nil, fmt.Errorf("DOM bridge is not initialized or session is closed")
@@ -1947,8 +2258,14 @@ func (s *Session) findElementNode(selector string) (*html.Node, error) {
 		resultNode, resultErr = bridge.QuerySelector(selector)
 	})
 
-	// Wait for the query to complete.
-	<-done
+	// Wait for the query to complete, respecting the context.
+	select {
+	case <-done:
+	// Proceed as before.
+	case <-ctx.Done():
+		// The operation was cancelled while waiting for the event loop.
+		return nil, fmt.Errorf("context canceled while waiting for element '%s': %w", selector, ctx.Err())
+	}
 
 	if resultErr != nil {
 		// Provide a more informative error if it was a specific XPath panic.
@@ -1975,23 +2292,28 @@ func (s *Session) handleClickConsequenceInternal(ctx context.Context, element *h
 		return errors.New("session closed")
 	}
 
-	// Use the bridge's locking mechanism to ensure safe DOM manipulation.
-	bridge.Lock()
-	defer bridge.Unlock()
+	// REFACTORED: We must not use defer bridge.Unlock() because navigation/submission
+	// might wait synchronously for the event loop, causing a deadlock if the event loop needs the bridge lock.
+	// We lock only when performing local DOM modifications.
+
+	tagName := strings.ToLower(element.Data)
 
 	// 1. Handle form input elements (checkboxes, radios)
-	if strings.ToLower(element.Data) == "input" {
+	if tagName == "input" {
 		inputType := strings.ToLower(htmlquery.SelectAttr(element, "type"))
 		if inputType == "checkbox" {
+			bridge.Lock() // Lock for DOM modification
 			// Toggle the "checked" attribute.
 			if _, isChecked := getAttr(element, "checked"); isChecked {
 				removeAttr(element, "checked")
 			} else {
 				addAttr(element, "checked", "checked")
 			}
-			return nil // No further action for a checkbox click.
+			bridge.Unlock() // Unlock immediately
+			return nil      // No further action for a checkbox click.
 		}
 		if inputType == "radio" {
+			bridge.Lock() // Lock for DOM modification
 			// Uncheck all other radios in the same group and check this one.
 			radioName := htmlquery.SelectAttr(element, "name")
 			if radioName != "" {
@@ -2008,32 +2330,35 @@ func (s *Session) handleClickConsequenceInternal(ctx context.Context, element *h
 			}
 			// Check the clicked radio button.
 			addAttr(element, "checked", "checked")
-			return nil // No further action.
+			bridge.Unlock() // Unlock immediately
+			return nil      // No further action.
 		}
 	}
 
 	// 2. Handle navigation links (<a>)
-	if strings.ToLower(element.Data) == "a" {
+	// Must NOT hold bridge.Lock() here.
+	if tagName == "a" {
 		if href := htmlquery.SelectAttr(element, "href"); href != "" {
-			// CRITICAL: Call navigateInternal, not Navigate, as the lock is already held.
+			// CRITICAL: Call navigateInternal, not Navigate, as the lock (s.opMu) is already held.
 			return s.navigateInternal(ctx, href)
 		}
 	}
 
 	// 3. Handle form submissions
-	// If the element is a submit button or is inside a form, find the parent form.
+	// Finding the parent form is safe without the bridge lock if we assume DOM structure is stable under s.opMu.
 	form := findParentForm(element)
 	if form != nil {
-		// Check if the clicked element is a submit button, which is the default for buttons inside forms.
+		// Check if the clicked element is a submit button.
 		isSubmitButton := false
-		if strings.ToLower(element.Data) == "button" && strings.ToLower(htmlquery.SelectAttr(element, "type")) != "reset" {
+		if tagName == "button" && strings.ToLower(htmlquery.SelectAttr(element, "type")) != "reset" {
 			isSubmitButton = true
 		}
-		if strings.ToLower(element.Data) == "input" && strings.ToLower(htmlquery.SelectAttr(element, "type")) == "submit" {
+		if tagName == "input" && strings.ToLower(htmlquery.SelectAttr(element, "type")) == "submit" {
 			isSubmitButton = true
 		}
 
 		if isSubmitButton {
+			// Must NOT hold bridge.Lock() here.
 			return s.submitFormInternal(ctx, form)
 		}
 	}
@@ -2108,6 +2433,7 @@ func (s *Session) submitFormInternal(ctx context.Context, form *html.Node) error
 		}
 	})
 
+	// Wait for completion, respecting the context.
 	select {
 	case <-done:
 	case <-ctx.Done():
@@ -2229,4 +2555,3 @@ func CombineContext(parentCtx, secondaryCtx context.Context) (context.Context, c
 		cancel()
 	}
 }
-

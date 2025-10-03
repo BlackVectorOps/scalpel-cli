@@ -30,7 +30,7 @@ type Interactor struct {
 	rng         *rand.Rand
 }
 
-// interactiveElement represents a discovered element.
+// interactiveElement represents a discovered element ready for interaction.
 type interactiveElement struct {
 	// Selector is the generated unique XPath for targeting the element.
 	Selector    string
@@ -54,7 +54,7 @@ type SelectOptionData struct {
 }
 
 // discoveryResult holds the raw node and extracted data during the discovery phase.
-// This is now augmented with the layout box to check for visibility.
+// This is augmented with the layout box to check for visibility.
 type discoveryResult struct {
 	Node *html.Node
 	Box  *layout.LayoutBox
@@ -67,7 +67,7 @@ func NewInteractor(logger Logger, hCfg HumanoidConfig, stabilizeFn Stabilization
 		logger = &NopLogger{}
 	}
 	if stabilizeFn == nil {
-		// Default stabilization is a no-op.
+		// Default stabilization is a no op.
 		stabilizeFn = func(ctx context.Context) error { return nil }
 	}
 
@@ -83,57 +83,55 @@ func NewInteractor(logger Logger, hCfg HumanoidConfig, stabilizeFn Stabilization
 
 // -- Orchestration Logic --
 
-// RecursiveInteract is the main entry point for the interaction logic.
-// It now accepts the root of the layout tree to perform visibility checks.
-func (i *Interactor) RecursiveInteract(ctx context.Context, config schemas.InteractionConfig, layoutRoot *layout.LayoutBox) error {
+// ExploreStep analyzes the current layoutRoot, finds a new element, interacts with it, and returns.
+// It returns true if an interaction was successfully executed, false otherwise.
+// This is designed to be called iteratively by the session manager.
+func (i *Interactor) ExploreStep(ctx context.Context, config schemas.InteractionConfig, layoutRoot *layout.LayoutBox, interactedElements map[string]bool) (bool, error) {
 	if i.page == nil {
-		return fmt.Errorf("interactor page primitives are not initialized")
+		return false, fmt.Errorf("interactor page primitives are not initialized")
 	}
 	if layoutRoot == nil {
-		return fmt.Errorf("layout root cannot be nil for interaction")
+		return false, fmt.Errorf("layout root cannot be nil for interaction")
 	}
 
-	interactedElements := make(map[string]bool)
-	i.logger.Info(fmt.Sprintf("Starting recursive interaction. Max Depth: %d", config.MaxDepth))
+	// Note: Depth tracking is managed by the caller (Session).
 
-	// Initial pause (simulating reading the page).
-	if i.humanoidCfg.Enabled {
+	i.logger.Debug("Starting exploration step.")
+
+	// Initial pause (simulating reading the page), only if this is the first interaction overall (approximation).
+	if i.humanoidCfg.Enabled && len(interactedElements) == 0 {
 		if err := i.cognitivePause(ctx, 800, 300); err != nil {
-			return err
+			return false, err
 		}
 	}
-	return i.interactDepth(ctx, config, 0, interactedElements, layoutRoot)
+
+	return i.interact(ctx, config, interactedElements, layoutRoot)
 }
 
-// interactDepth handles the interaction logic for a specific depth using DFS.
-func (i *Interactor) interactDepth(
+// interact handles the discovery and execution of a single interaction.
+// This implements the single step logic for the iterative exploration model.
+func (i *Interactor) interact(
 	ctx context.Context,
 	config schemas.InteractionConfig,
-	depth int,
 	interactedElements map[string]bool,
 	layoutRoot *layout.LayoutBox,
-) error {
+) (bool, error) {
 	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if depth >= config.MaxDepth {
-		i.logger.Debug(fmt.Sprintf("Reached max depth (%d).", depth))
-		return nil
+		return false, err
 	}
 
 	// 1. Discover new elements based on the current layout tree.
-	// This now uses the layout tree to find visible elements.
 	newElements, err := i.discoverElements(ctx, layoutRoot, interactedElements)
 	if err != nil {
 		if ctx.Err() != nil {
-			return ctx.Err()
+			return false, ctx.Err()
 		}
-		i.logger.Warn(fmt.Sprintf("Failed to discover elements at depth %d: %v", depth, err))
-		return nil // Stop this branch if discovery fails.
+		i.logger.Warn(fmt.Sprintf("Failed to discover elements: %v", err))
+		return false, nil // Stop this step if discovery fails.
 	}
 	if len(newElements) == 0 {
-		i.logger.Debug(fmt.Sprintf("No new interactive elements found at depth %d.", depth))
-		return nil
+		i.logger.Debug("No new interactive elements found.")
+		return false, nil
 	}
 
 	// 2. Shuffle elements for randomized exploration.
@@ -141,20 +139,16 @@ func (i *Interactor) interactDepth(
 		newElements[j], newElements[k] = newElements[k], newElements[j]
 	})
 
-	// 3. Interact with elements.
-	interactions := 0
+	// 3. Interact with the first viable element.
 	for _, element := range newElements {
 		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if interactions >= config.MaxInteractionsPerDepth {
-			break
+			return false, err
 		}
 
 		// Pause before interaction.
 		if i.humanoidCfg.Enabled {
 			if err := i.cognitivePause(ctx, 150, 70); err != nil {
-				return err
+				return false, err
 			}
 		}
 
@@ -168,31 +162,37 @@ func (i *Interactor) interactDepth(
 		interactedElements[element.Fingerprint] = true
 
 		if err != nil {
-			// Log failure but continue exploration with other elements.
+			// If the parent context was cancelled, we must stop immediately and propagate the error.
+			if ctx.Err() != nil {
+				i.logger.Debug(fmt.Sprintf("Interaction stopped due to parent context cancellation: %v", ctx.Err()))
+				return false, ctx.Err()
+			}
+
+			// Log failure but continue exploration with other elements in this list.
 			if actionCtx.Err() == nil {
 				i.logger.Debug(fmt.Sprintf("Interaction failed: %v", err))
 			}
 			continue
 		}
 
-		interactions++
+		// Interaction successful.
 
 		// Delay immediately after interaction.
 		if config.InteractionDelayMs > 0 && i.humanoidCfg.Enabled {
 			if err := i.hesitate(ctx, time.Duration(config.InteractionDelayMs)*time.Millisecond); err != nil {
-				return err
+				// Return true because interaction happened, but report the hesitation error.
+				return true, err
 			}
 		}
-		
-		// Strategy: Any successful interaction may change the DOM.
-		// We'll need a new layout tree, so we break to let the caller re-render and recurse.
-		i.logger.Debug("Interaction successful. Breaking to allow re-render and next depth.")
-		break
 
+		// Strategy: Any successful interaction may change the DOM.
+		// We return to the caller for stabilization and re-rendering.
+		i.logger.Debug("Interaction successful. Returning to session for stabilization and re-render.")
+		return true, nil
 	}
-	// Since we break on the first success, we no longer stabilize and recurse here.
-	// The calling process is now responsible for re-rendering and calling interactDepth again.
-	return nil
+
+	// No successful interactions occurred in this step.
+	return false, nil
 }
 
 // -- Element Discovery Logic --
@@ -212,6 +212,10 @@ func (i *Interactor) discoverElements(ctx context.Context, layoutRoot *layout.La
 
 	// Traverse the layout tree to find visible nodes.
 	findInteractable = func(box *layout.LayoutBox) {
+		// Check context at the start of the recursive function to fail fast.
+		if ctx.Err() != nil {
+			return
+		}
 		if box == nil || box.StyledNode == nil || box.StyledNode.Node == nil {
 			return
 		}
@@ -225,14 +229,21 @@ func (i *Interactor) discoverElements(ctx context.Context, layoutRoot *layout.La
 			})
 		}
 		for _, child := range box.Children {
+			// Check context before each recursive call.
+			if ctx.Err() != nil {
+				return
+			}
 			findInteractable(child)
 		}
 	}
 
 	findInteractable(layoutRoot)
+	// Final check after the traversal is complete.
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
 	return i.filterAndFingerprint(results, interacted), nil
 }
-
 
 // extractElementData pulls relevant information from an html.Node.
 func extractElementData(node *html.Node) ElementData {

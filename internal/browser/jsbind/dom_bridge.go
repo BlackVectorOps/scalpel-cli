@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/andybalholm/cascadia"
 	"github.com/antchfx/htmlquery"
 	"github.com/dop251/goja"
 	"github.com/dop251/goja_nodejs/eventloop"
@@ -22,7 +23,6 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/browser/layout"
 )
-
 
 // -- Interfaces and Core Structs --
 
@@ -237,6 +237,7 @@ func (b *DOMBridge) bindDocumentAndElementMethods(obj *goja.Object, node *html.N
 
 	_ = obj.Set("querySelector", b.jsQuerySelector(native))
 	_ = obj.Set("querySelectorAll", b.jsQuerySelectorAll(native))
+	_ = obj.Set("cloneNode", b.jsCloneNode(native))
 
 	if node.Type == html.DocumentNode {
 		_ = obj.Set("getElementById", b.jsGetElementById())
@@ -413,12 +414,22 @@ func (b *DOMBridge) defineCookieProperty(docObj *goja.Object) {
 func (b *DOMBridge) jsGetElementById() func(goja.FunctionCall) goja.Value {
 	return func(call goja.FunctionCall) goja.Value {
 		id := call.Argument(0).String()
+		if id == "" {
+			return goja.Null()
+		}
+		// Build a robust CSS attribute selector.
+		selector := fmt.Sprintf(`[id="%s"]`, strings.ReplaceAll(id, `"`, `\"`))
+
+		sel, err := cascadia.Compile(selector)
+		if err != nil {
+			b.logger.Warn("Failed to compile selector for getElementById", zap.String("selector", selector), zap.Error(err))
+			return goja.Null()
+		}
+
 		b.mu.Lock()
 		defer b.mu.Unlock()
-		// XPath does not handle all characters in IDs well, so we escape quotes.
-		escapedID := strings.ReplaceAll(id, "'", "\\'")
-		xpath := fmt.Sprintf("//*[@id='%s']", escapedID)
-		node := htmlquery.FindOne(b.document, xpath)
+
+		node := cascadia.Query(b.document, sel)
 		if node == nil {
 			return goja.Null()
 		}
@@ -462,13 +473,16 @@ func (b *DOMBridge) jsDocumentWrite() func(goja.FunctionCall) goja.Value {
 func (b *DOMBridge) jsQuerySelector(contextNative *nativeNode) func(goja.FunctionCall) goja.Value {
 	return func(call goja.FunctionCall) goja.Value {
 		selector := call.Argument(0).String()
-		b.mu.Lock()
-		defer b.mu.Unlock()
-		node, err := htmlquery.Query(contextNative.node, selector)
+
+		sel, err := cascadia.Compile(selector)
 		if err != nil {
-			b.logger.Warn("Error evaluating XPath selector in querySelector", zap.String("selector", selector), zap.Error(err))
+			b.logger.Warn("Error parsing CSS selector in querySelector", zap.String("selector", selector), zap.Error(err))
 			return goja.Null()
 		}
+
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		node := cascadia.Query(contextNative.node, sel)
 		if node == nil {
 			return goja.Null()
 		}
@@ -479,13 +493,16 @@ func (b *DOMBridge) jsQuerySelector(contextNative *nativeNode) func(goja.Functio
 func (b *DOMBridge) jsQuerySelectorAll(contextNative *nativeNode) func(goja.FunctionCall) goja.Value {
 	return func(call goja.FunctionCall) goja.Value {
 		selector := call.Argument(0).String()
-		b.mu.Lock()
-		defer b.mu.Unlock()
-		nodes, err := htmlquery.QueryAll(contextNative.node, selector)
+
+		sel, err := cascadia.Compile(selector)
 		if err != nil {
-			b.logger.Warn("Error evaluating XPath selector in querySelectorAll", zap.String("selector", selector), zap.Error(err))
+			b.logger.Warn("Error parsing CSS selector in querySelectorAll", zap.String("selector", selector), zap.Error(err))
 			return b.runtime.NewArray()
 		}
+
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		nodes := cascadia.QueryAll(contextNative.node, sel)
 		results := make([]goja.Value, len(nodes))
 		for i, node := range nodes {
 			results[i] = b.wrapNode(node)
@@ -521,6 +538,52 @@ func (b *DOMBridge) jsBlur(native *nativeNode) func(goja.FunctionCall) goja.Valu
 	return func(call goja.FunctionCall) goja.Value {
 		b.DispatchEventOnNode(native.node, "blur")
 		return goja.Undefined()
+	}
+}
+
+// cloneHTMLNode recursively clones an *html.Node.
+func cloneHTMLNode(n *html.Node, deep bool) *html.Node {
+	if n == nil {
+		return nil
+	}
+
+	// Create a shallow copy
+	newNode := &html.Node{
+		Type:      n.Type,
+		DataAtom:  n.DataAtom,
+		Data:      n.Data,
+		Namespace: n.Namespace,
+	}
+	// Copy attributes
+	if len(n.Attr) > 0 {
+		newNode.Attr = make([]html.Attribute, len(n.Attr))
+		copy(newNode.Attr, n.Attr)
+	}
+
+	if deep {
+		for child := n.FirstChild; child != nil; child = child.NextSibling {
+			newNode.AppendChild(cloneHTMLNode(child, deep))
+		}
+	}
+
+	return newNode
+}
+
+func (b *DOMBridge) jsCloneNode(native *nativeNode) func(goja.FunctionCall) goja.Value {
+	return func(call goja.FunctionCall) goja.Value {
+		deep := false
+		if len(call.Arguments) > 0 {
+			deep = call.Argument(0).ToBoolean()
+		}
+
+		b.mu.Lock()
+		defer b.mu.Unlock()
+
+		clonedNode := cloneHTMLNode(native.node, deep)
+
+		// The cloned node isn't part of the main document tree yet.
+		// We wrap it so it can be manipulated and appended by JS code.
+		return b.wrapNode(clonedNode)
 	}
 }
 
@@ -866,7 +929,8 @@ func (b *DOMBridge) PerformDefaultClickAction(node *html.Node) {
 				setAttr(node, "checked", "")
 				return
 			}
-			xpath := fmt.Sprintf("//input[@type='radio'][@name='%s']", name)
+			// Use the safe XPath literal generation for the name attribute as well.
+			xpath := fmt.Sprintf("//input[@type='radio'][@name=%s]", xpathStringLiteral(name))
 			radioGroup, _ := htmlquery.QueryAll(b.document, xpath)
 			for _, radioNode := range radioGroup {
 				if radioNode != node {
@@ -1297,6 +1361,36 @@ func (b *DOMBridge) GetOuterHTML() (string, error) {
 }
 
 // -- Internal Helper Functions --
+
+// xpathStringLiteral generates a valid XPath 1.0 string literal.
+// It handles strings containing single and/or double quotes correctly, using concat() if necessary.
+func xpathStringLiteral(s string) string {
+	// If the string does not contain single quotes, wrap it in single quotes.
+	if !strings.Contains(s, "'") {
+		return fmt.Sprintf("'%s'", s)
+	}
+	// If the string does not contain double quotes (but contains single quotes), wrap it in double quotes.
+	if !strings.Contains(s, "\"") {
+		return fmt.Sprintf("\"%s\"", s)
+	}
+
+	// If both quotes are present, use concat().
+	// Strategy: Split the string by single quotes, and reassemble using concat(),
+	// representing the single quotes themselves using double-quoted literals ("'").
+	var result strings.Builder
+	result.WriteString("concat(")
+	parts := strings.Split(s, "'")
+	for i, part := range parts {
+		if i > 0 {
+			// Insert the single quote literal.
+			result.WriteString(", \"'\", ")
+		}
+		// Insert the segment wrapped in single quotes.
+		result.WriteString(fmt.Sprintf("'%s'", part))
+	}
+	result.WriteString(")")
+	return result.String()
+}
 
 func SetObjectData(rt *goja.Runtime, obj *goja.Object, data interface{}) error {
 	wrappedData := rt.ToValue(data)
