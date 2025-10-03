@@ -20,6 +20,7 @@ const (
 	TaskTestAuthIDOR          TaskType = "TEST_AUTH_IDOR"
 	TaskAnalyzeHeaders        TaskType = "ANALYZE_HEADERS"
 	TaskAnalyzeJWT            TaskType = "ANALYZE_JWT"
+	TaskAnalyzeJSFile         TaskType = "ANALYZE_JS_FILE" // New task type for JS file analysis.
 )
 
 // Task represents a unit of work to be executed by the engine.
@@ -54,6 +55,12 @@ type JWTTaskParams struct {
 // AgentMissionParams defines parameters for the Agent mission task.
 type AgentMissionParams struct {
 	MissionBrief string `json:"mission_brief"`
+}
+
+// JSFileTaskParams defines parameters for the JavaScript file analysis task.
+type JSFileTaskParams struct {
+	FilePath string `json:"file_path"`
+	Content  string `json:"content,omitempty"`
 }
 
 // Severity defines the severity level of a finding.
@@ -190,38 +197,36 @@ const (
 type NodeType string
 
 const (
-	NodeHost            NodeType = "HOST"
-	NodeIPAddress       NodeType = "IP_ADDRESS"
-	NodeURL             NodeType = "URL"
-	NodeCookie          NodeType = "COOKIE"
-	NodeHeader          NodeType = "HEADER"
-	NodeTechnology      NodeType = "TECHNOLOGY"
-	NodeVulnerability   NodeType = "VULNERABILITY"
-	NodeAction          NodeType = "ACTION"
-	NodeObservation     NodeType = "OBSERVATION"
-	NodeTool            NodeType = "TOOL"
-	NodeFile            NodeType = "FILE"
-	NodeDomain          NodeType = "DOMAIN"
-	// A new node type for a function in a codebase.
-	NodeFunction        NodeType = "FUNCTION"
-	NodeMission         NodeType = "MISSION"
+	NodeHost          NodeType = "HOST"
+	NodeIPAddress     NodeType = "IP_ADDRESS"
+	NodeURL           NodeType = "URL"
+	NodeCookie        NodeType = "COOKIE"
+	NodeHeader        NodeType = "HEADER"
+	NodeTechnology    NodeType = "TECHNOLOGY"
+	NodeVulnerability NodeType = "VULNERABILITY"
+	NodeAction        NodeType = "ACTION"
+	NodeObservation   NodeType = "OBSERVATION"
+	NodeTool          NodeType = "TOOL"
+	NodeFile          NodeType = "FILE"
+	NodeDomain        NodeType = "DOMAIN"
+	NodeFunction      NodeType = "FUNCTION" // New node type for a function in a codebase.
+	NodeMission       NodeType = "MISSION"
 )
 
 // RelationshipType defines the type of an edge between nodes.
 type RelationshipType string
 
 const (
-	RelationshipResolvesTo       RelationshipType = "RESOLVES_TO"
-	RelationshipLinksTo          RelationshipType = "LINKS_TO"
-	RelationshipUses             RelationshipType = "USES"
-	RelationshipHas              RelationshipType = "HAS"
-	RelationshipExposes          RelationshipType = "EXPOSES"
-	RelationshipExecuted         RelationshipType = "EXECUTED"
-	RelationshipHasObservation   RelationshipType = "HAS_OBSERVATION"
-	// A new relationship type to denote that one function or file imports another.
-	RelationshipImports          RelationshipType = "IMPORTS"
-	RelationshipHostsURL         RelationshipType = "HOSTS_URL"
-	RelationshipHasSubdomain     RelationshipType = "HAS_SUBDOMAIN"
+	RelationshipResolvesTo     RelationshipType = "RESOLVES_TO"
+	RelationshipLinksTo        RelationshipType = "LINKS_TO"
+	RelationshipUses           RelationshipType = "USES"
+	RelationshipHas            RelationshipType = "HAS"
+	RelationshipExposes        RelationshipType = "EXPOSES"
+	RelationshipExecuted       RelationshipType = "EXECUTED"
+	RelationshipHasObservation RelationshipType = "HAS_OBSERVATION"
+	RelationshipImports        RelationshipType = "IMPORTS" // New relationship for imports.
+	RelationshipHostsURL       RelationshipType = "HOSTS_URL"
+	RelationshipHasSubdomain   RelationshipType = "HAS_SUBDOMAIN"
 )
 
 // NodeStatus defines the state of a node, useful for tracking analysis progress.
@@ -261,6 +266,21 @@ type Edge struct {
 type Subgraph struct {
 	Nodes []Node `json:"nodes"`
 	Edges []Edge `json:"edges"`
+}
+
+// -- Knowledge Graph Property Schemas --
+
+// FileNodeProperties defines the structured properties for a NodeFile.
+type FileNodeProperties struct {
+	FilePath string `json:"file_path"`
+	Language string `json:"language"` // e.g., "JavaScript", "TypeScript"
+}
+
+// FunctionNodeProperties defines the structured properties for a NodeFunction.
+type FunctionNodeProperties struct {
+	StartLine  int  `json:"start_line"`
+	EndLine    int  `json:"end_line"`
+	IsExported bool `json:"is_exported"`
 }
 
 // -- Input Schemas for Bulk Operations --
