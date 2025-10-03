@@ -13,6 +13,7 @@ require (
 	github.com/dop251/goja_nodejs v0.0.0-20250409162600-f7acab6894b0
 	github.com/elazarl/goproxy v1.7.2
 	github.com/golang-jwt/jwt/v5 v5.3.0
+	github.com/google/go-cmp v0.6.0
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.7.6
 	github.com/pashagolub/pgxmock/v2 v2.12.0

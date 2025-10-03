@@ -290,8 +290,8 @@ func (s *Session) initializeDOMBridge(log *zap.Logger) {
 		log.Error("Critical error: Event loop missing during DOMBridge initialization.")
 		return
 	}
-	// The DOMBridge uses 's' (jsbind.BrowserEnvironment), which implements methods safely.
-	bridge := jsbind.NewDOMBridge(log.Named("dom_bridge"), el, s)
+	// The DOMBridge uses 's' as the BrowserEnvironment and now requires the persona.
+	bridge := jsbind.NewDOMBridge(log.Named("dom_bridge"), el, s, s.persona)
 
 	s.mu.Lock()
 	s.domBridge = bridge
