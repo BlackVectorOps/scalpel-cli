@@ -27,8 +27,9 @@ func (h *Humanoid) cognitivePause(ctx context.Context, meanMs, stdDevMs float64)
 	// Call internal recoverFatigue, which does not lock.
 	h.recoverFatigue(duration)
 
-	// For longer pauses, simulate more active idling.
-	if duration > 100*time.Millisecond {
+	// For pauses, simulate active idling (hesitation/drift).
+	// We do this for most pauses now, as humans rarely stay perfectly still.
+	if duration > 20*time.Millisecond {
 		// Call the internal, non-locking version of Hesitate.
 		return h.hesitate(ctx, duration)
 	}
@@ -44,32 +45,41 @@ func (h *Humanoid) Hesitate(ctx context.Context, duration time.Duration) error {
 	return h.hesitate(ctx, duration)
 }
 
-// hesitate is the internal, non-locking implementation of cursor idling.
+// hesitate is the internal, non-locking implementation of cursor idling using smooth Perlin noise drift.
 func (h *Humanoid) hesitate(ctx context.Context, duration time.Duration) error {
 	startPos := h.currentPos
-	rng := h.rng
-	// Get the current button state to maintain it during hesitation (e.g., for dragging).
+	// Get the current button state to maintain it during hesitation (e.g., crucial for dragging/clicking).
 	currentButtons := h.calculateButtonsBitfield(h.currentButtonState)
 	startTime := time.Now()
+
+	// Define parameters for the idle drift.
+	// Use dynamic config for amplitude, influenced by fatigue.
+	driftAmplitude := h.dynamicConfig.PerlinAmplitude * 1.5 // Slightly increased amplitude for idling vs trajectory waver.
+	const driftFrequency = 0.5                               // How fast the direction changes (Hz).
+	const updateInterval = 20 * time.Millisecond             // How often we update the position (50Hz).
 
 	for time.Since(startTime) < duration {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 
-		// Calculate a small, random target nearby.
-		targetPos := startPos.Add(Vector2D{
-			X: (rng.Float64() - 0.5) * 5,
-			Y: (rng.Float64() - 0.5) * 5,
-		})
+		// Calculate drift using Perlin noise based on time elapsed since the start of hesitation.
+		timeElapsed := time.Since(startTime).Seconds()
+		drift := Vector2D{
+			X: h.noiseX.Noise1D(timeElapsed*driftFrequency) * driftAmplitude,
+			Y: h.noiseY.Noise1D(timeElapsed*driftFrequency) * driftAmplitude,
+		}
 
-		randIntVal := rng.Intn(100)
+		targetPos := startPos.Add(drift)
 
-		// Dispatch the movement event using the canonical schema type.
+		// Apply Gaussian noise (tremor) on top of the drift.
+		finalPos := h.applyGaussianNoise(targetPos)
+
+		// Dispatch the movement event.
 		eventData := schemas.MouseEventData{
 			Type:    schemas.MouseMove,
-			X:       targetPos.X,
-			Y:       targetPos.Y,
+			X:       finalPos.X,
+			Y:       finalPos.Y,
 			Button:  schemas.ButtonNone,
 			Buttons: currentButtons,
 		}
@@ -78,9 +88,10 @@ func (h *Humanoid) hesitate(ctx context.Context, duration time.Duration) error {
 			return err
 		}
 
-		h.currentPos = targetPos
-		pauseDuration := time.Duration(50+randIntVal) * time.Millisecond
+		h.currentPos = finalPos
 
+		// Determine the sleep duration for this iteration.
+		pauseDuration := updateInterval
 		// Ensure we don't overshoot the total duration.
 		if time.Since(startTime)+pauseDuration > duration {
 			pauseDuration = duration - time.Since(startTime)
@@ -106,16 +117,39 @@ func (h *Humanoid) applyGaussianNoise(point Vector2D) Vector2D {
 	return Vector2D{X: point.X + pX, Y: point.Y + pY}
 }
 
+// applyClickNoise adds small displacement noise that occurs during the physical action of clicking/grabbing.
+// This models the slight involuntary movement when muscles tense for a click, often biased downwards.
+// This is an internal helper that assumes the lock is held.
+func (h *Humanoid) applyClickNoise(point Vector2D) Vector2D {
+	// Strength is influenced by the base configuration and fatigue (via dynamicConfig).
+	strength := h.dynamicConfig.ClickNoise * (0.5 + h.rng.Float64())
+
+	pX := h.rng.NormFloat64() * strength * 0.5
+	// Use Abs() to ensure the Y bias is positive (downwards).
+	pY := math.Abs(h.rng.NormFloat64() * strength)
+
+	return Vector2D{X: point.X + pX, Y: point.Y + pY}
+}
+
 // applyFatigueEffects adjusts the dynamic configuration based on the current fatigue level.
 // This is an internal helper that assumes the lock is held.
 func (h *Humanoid) applyFatigueEffects() {
-	fatigueFactor := 1.0 + h.fatigueLevel
+	fatigueLevel := h.fatigueLevel
+	fatigueFactor := 1.0 + fatigueLevel
 
 	h.dynamicConfig.GaussianStrength = h.baseConfig.GaussianStrength * fatigueFactor
 	h.dynamicConfig.PerlinAmplitude = h.baseConfig.PerlinAmplitude * fatigueFactor
 	h.dynamicConfig.FittsA = h.baseConfig.FittsA * fatigueFactor
 
-	h.dynamicConfig.TypoRate = h.baseConfig.TypoRate * (1.0 + h.fatigueLevel*2.0)
+	// Fatigue increases click noise (less precise control).
+	h.dynamicConfig.ClickNoise = h.baseConfig.ClickNoise * fatigueFactor
+
+	// Fatigue affects motor control parameters (Omega/Zeta).
+	// When fatigued, movement is slower (lower Omega) and potentially less stable (slightly lower Zeta).
+	h.dynamicConfig.Omega = h.baseConfig.Omega * (1.0 - fatigueLevel*0.3)
+	h.dynamicConfig.Zeta = h.baseConfig.Zeta * (1.0 - fatigueLevel*0.1)
+
+	h.dynamicConfig.TypoRate = h.baseConfig.TypoRate * (1.0 + fatigueLevel*2.0)
 	h.dynamicConfig.TypoRate = math.Min(0.25, h.dynamicConfig.TypoRate)
 }
 

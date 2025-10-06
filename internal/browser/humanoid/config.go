@@ -11,14 +11,14 @@ type Config struct {
 	Enabled bool `json:"enabled" yaml:"enabled"`
 	Rng     *rand.Rand
 
-	// Fitts's Law Parameters
+	// Fitts's Law Parameters (Used primarily for terminal pauses)
 	FittsAMean, FittsAStdDev float64
 	FittsBMean, FittsBStdDev float64
 	FittsRandomness          float64
 
-	// Motor Control Dynamics
-	OmegaMean, OmegaStdDev float64
-	ZetaMean, ZetaStdDev   float64
+	// Motor Control Dynamics (Spring-Damped Model)
+	OmegaMean, OmegaStdDev float64 // Natural frequency (Speed of movement)
+	ZetaMean, ZetaStdDev   float64 // Damping ratio (Smoothness vs. Oscillation)
 
 	// Noise and Tremor
 	GaussianStrengthMean, GaussianStrengthStdDev float64
@@ -29,7 +29,7 @@ type Config struct {
 	TypoRateMean, TypoRateStdDev   float64
 	KeyHoldMeanMs, KeyHoldStdDevMs float64
 
-	// Instance Parameters
+	// Instance Parameters (Set during FinalizeSessionPersona, modified by fatigue)
 	FittsA, FittsB             float64
 	Omega, Zeta                float64
 	GaussianStrength           float64
@@ -62,6 +62,7 @@ type Config struct {
 	FatigueIncreaseRate float64
 	FatigueRecoveryRate float64
 
+	// Distance threshold (pixels) to enable micro-corrections (Optimized Submovement Model).
 	MicroCorrectionThreshold float64
 
 	// Key Pause (IKD) Parameters
@@ -72,29 +73,39 @@ type Config struct {
 	KeyPauseNgramFactor3  float64 `json:"keyPauseNgramFactor3" yaml:"keyPauseNgramFactor3"`
 	KeyPauseFatigueFactor float64 `json:"keyPauseFatigueFactor" yaml:"keyPauseFatigueFactor"`
 
+	// Advanced IKD Parameters
+	IKDHandAlternationBonus float64 `json:"ikdHandAlternationBonus" yaml:"ikdHandAlternationBonus"`
+	IKDSameFingerPenalty    float64 `json:"ikdSameFingerPenalty" yaml:"ikdSameFingerPenalty"`
+	IKDDistanceFactor       float64 `json:"ikdDistanceFactor" yaml:"ikdDistanceFactor"`
+
 	// Typo Correction Behavior (Pause scaling factors)
-	TypoCorrectionPauseMeanScale  float64 `json:"typoCorrectionPauseMeanScale" yaml:"typoCorrectionPauseMeanScale"`
+	TypoCorrectionPauseMeanScale   float64 `json:"typoCorrectionPauseMeanScale" yaml:"typoCorrectionPauseMeanScale"`
 	TypoCorrectionPauseStdDevScale float64 `json:"typoCorrectionPauseStdDevScale" yaml:"typoCorrectionPauseStdDevScale"`
 }
 
 // DefaultConfig returns a configuration representing an average user.
 func DefaultConfig() Config {
 	c := Config{
-		Rng:                            nil,
-		FittsAMean:                     100.0, FittsAStdDev: 15.0,
-		FittsBMean:                     120.0, FittsBStdDev: 20.0,
-		OmegaMean:                      28.0, OmegaStdDev: 4.0,
-		ZetaMean:                       1.0, ZetaStdDev: 0.1,
-		GaussianStrengthMean:           0.5, GaussianStrengthStdDev: 0.1,
-		PerlinAmplitudeMean:            2.5, PerlinAmplitudeStdDev: 0.5,
-		ClickNoiseMean:                 2.0, ClickNoiseStdDev: 0.5,
-		TypoRateMean:                   0.04, TypoRateStdDev: 0.01,
-		KeyHoldMeanMs:                  55.0, KeyHoldStdDevMs: 15.0,
-		ClickHoldMinMs:                 50, ClickHoldMaxMs: 120,
-		TypoNeighborRate:               0.40,
-		TypoTransposeRate:              0.25,
-		TypoOmissionRate:               0.20,
-		TypoInsertionRate:              0.15,
+		Rng:          nil,
+		FittsAMean:   100.0,
+		FittsAStdDev: 15.0,
+		FittsBMean:   120.0,
+		FittsBStdDev: 20.0,
+
+		// Motor Control Dynamics (Tuned for realistic speeds and slight overshoot)
+		OmegaMean: 30.0, OmegaStdDev: 5.0, // Higher Omega = faster movement
+		ZetaMean:  0.8, ZetaStdDev: 0.1, // Zeta < 1.0 allows slight oscillation (underdamped)
+
+		GaussianStrengthMean: 0.5, GaussianStrengthStdDev: 0.1,
+		PerlinAmplitudeMean: 2.5, PerlinAmplitudeStdDev: 0.5,
+		ClickNoiseMean:      1.5, ClickNoiseStdDev: 0.5,
+		TypoRateMean:        0.04, TypoRateStdDev: 0.01,
+		KeyHoldMeanMs:       55.0, KeyHoldStdDevMs: 15.0,
+		ClickHoldMinMs:      50, ClickHoldMaxMs: 120,
+		TypoNeighborRate:    0.40,
+		TypoTransposeRate:   0.25,
+		TypoOmissionRate:    0.20,
+		TypoInsertionRate:   0.15,
 		TypoCorrectionProbability:      0.85,
 		TypoOmissionNoticeProbability:  0.70,
 		TypoInsertionNoticeProbability: 0.80,
@@ -105,16 +116,23 @@ func DefaultConfig() Config {
 		ScrollOvershootProbability:     0.25,
 		FatigueIncreaseRate:            0.005,
 		FatigueRecoveryRate:            0.01,
-		MicroCorrectionThreshold:       50.0,
-		// New Key Pause (IKD) Parameters
+		MicroCorrectionThreshold:       100.0, // Enable corrections for movements > 100px
+
+		// Key Pause (IKD) Parameters
 		KeyPauseMean:          70.0,
 		KeyPauseStdDev:        28.0,
 		KeyPauseMin:           35.0,
 		KeyPauseNgramFactor2:  0.7,
 		KeyPauseNgramFactor3:  0.55,
 		KeyPauseFatigueFactor: 0.3,
-		// New Typo Correction Behavior
-		TypoCorrectionPauseMeanScale:  1.8,
+
+		// Advanced IKD Defaults
+		IKDHandAlternationBonus: 0.85, // 15% faster for alternating hands
+		IKDSameFingerPenalty:    1.30, // 30% slower for same finger repetition
+		IKDDistanceFactor:       0.05, // 5% slower per unit distance (key width)
+
+		// Typo Correction Behavior
+		TypoCorrectionPauseMeanScale:   1.8,
 		TypoCorrectionPauseStdDevScale: 0.6,
 	}
 	c.NormalizeTypoRates()
@@ -136,7 +154,9 @@ func (c *Config) FinalizeSessionPersona(rng *rand.Rand) {
 	c.KeyHoldStdDev = c.KeyHoldStdDevMs
 
 	// Ensure parameters are within reasonable bounds
-	c.Omega = math.Max(5.0, c.Omega)
+	c.Omega = math.Max(10.0, math.Min(60.0, c.Omega)) // Keep Omega within a realistic speed range
+	c.Zeta = math.Max(0.5, math.Min(1.5, c.Zeta))     // Keep Zeta reasonable
+
 	c.ClickNoise = math.Max(0.0, c.ClickNoise)
 	c.TypoRate = math.Max(0.0, math.Min(0.25, c.TypoRate))
 	c.KeyHoldMean = math.Max(20.0, c.KeyHoldMean)

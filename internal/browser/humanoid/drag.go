@@ -3,8 +3,9 @@ package humanoid
 import (
 	"context"
 	"fmt"
-	"github.com/xkilldash9x/scalpel-cli/api/schemas"
+
 	"go.uber.org/zap"
+	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 )
 
 // DragAndDrop is a public method that acquires a lock for the entire action.
@@ -12,117 +13,103 @@ func (h *Humanoid) DragAndDrop(ctx context.Context, startSelector, endSelector s
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	var start, end Vector2D
-	var err error
-
 	// Preparation: Increase fatigue for a complex action.
 	h.updateFatigue(1.5)
 
-	// Get the center coordinates of the start and end elements.
-	start, err = h.getCenterOfElement(ctx, startSelector, opts)
-	if err != nil {
-		h.logger.Error("DragAndDrop failed: could not get starting element position",
-			zap.String("selector", startSelector),
-			zap.Error(err),
-		)
-		return fmt.Errorf("dragdrop: could not get start position: %w", err)
-	}
-
-	end, err = h.getCenterOfElement(ctx, endSelector, opts)
-	if err != nil {
-		h.logger.Error("DragAndDrop failed: could not get ending element position",
-			zap.String("selector", endSelector),
-			zap.Error(err),
-		)
-		return fmt.Errorf("dragdrop: could not get end position: %w", err)
-	}
-
-	// Call the internal, non-locking move method.
+	// 1. Move to the starting element.
+	// moveToSelector handles visibility, movement, and targeting internally.
 	if err := h.moveToSelector(ctx, startSelector, opts); err != nil {
-		return err
+		return fmt.Errorf("dragdrop: failed to move to start: %w", err)
 	}
+	// Record the position where we ended up before the grab for potential field calculations.
+	startPos := h.currentPos
 
-	// Call the internal, non-locking pause method.
+	// 2. Pause before grabbing.
 	if err := h.cognitivePause(ctx, 80, 30); err != nil {
 		return err
 	}
 
-	// -- Mouse down (Grab) --
-	currentPos := h.currentPos
+	// 3. Mouse down (Grab).
+	// Apply click noise (physical displacement).
+	grabPos := h.applyClickNoise(h.currentPos)
+
 	mouseDownData := schemas.MouseEventData{
 		Type:       schemas.MousePress,
-		X:          currentPos.X,
-		Y:          currentPos.Y,
+		X:          grabPos.X,
+		Y:          grabPos.Y,
 		Button:     schemas.ButtonLeft,
 		ClickCount: 1,
-		Buttons:    1, // Bitfield: 1 indicates the left button is now pressed.
+		Buttons:    1,
 	}
 	if err := h.executor.DispatchMouseEvent(ctx, mouseDownData); err != nil {
 		return err
 	}
+	h.currentPos = grabPos
 	h.currentButtonState = schemas.ButtonLeft
 
-	// Pause briefly after pressing down to simulate holding the object.
+	// 4. Pause briefly after pressing down (simulating grip adjustment).
 	if err := h.cognitivePause(ctx, 100, 40); err != nil {
 		h.releaseMouse(context.Background()) // Attempt cleanup if pause fails.
 		return err
 	}
 
-	// -- Execute the drag movement --
+	// 5. Ensure the ending element is visible (Scroll if needed while dragging).
+	if err := h.ensureVisible(ctx, endSelector, opts); err != nil {
+		h.logger.Warn("Humanoid: Failed to ensure end element visibility during DragAndDrop", zap.String("selector", endSelector), zap.Error(err))
+		// Proceed if possible.
+	}
+
+	// 6. Get the coordinates of the end element (after potential scrolling).
+	geo, err := h.getElementBoxBySelector(ctx, endSelector)
+	if err != nil {
+		h.logger.Error("DragAndDrop failed: could not get ending element position", zap.String("selector", endSelector), zap.Error(err))
+		h.releaseMouse(context.Background())
+		return fmt.Errorf("dragdrop: could not get end position geometry: %w", err)
+	}
+	center, valid := boxToCenter(geo)
+	if !valid {
+		h.releaseMouse(context.Background())
+		return fmt.Errorf("dragdrop: end element has invalid geometry")
+	}
+	// Calculate the precise drop target. Estimate zero final velocity for targeting bias calculation.
+	endTarget := h.calculateTargetPoint(geo, center, Vector2D{X: 0, Y: 0})
+
+	// 7. Execute the drag movement.
+	// Setup Potential Field.
 	field := NewPotentialField()
 	if opts != nil && opts.Field != nil {
 		field = opts.Field
 	}
-	attractionStrength := h.dynamicConfig.FittsA
+	attractionStrength := h.dynamicConfig.FittsA // Reusing FittsA as a proxy for effort/strength.
 	if attractionStrength <= 0 {
 		attractionStrength = 100.0 // Safety fallback
 	}
-	field.AddSource(end, attractionStrength, 150.0)
-	field.AddSource(start, -attractionStrength*0.2, 100.0)
+	field.AddSource(endTarget, attractionStrength, 150.0)
+	// Slight repulsion from the start point.
+	field.AddSource(startPos, -attractionStrength*0.2, 100.0)
 
-	moveOpts := &InteractionOptions{Field: field, EnsureVisible: false}
-	// Call the internal, non-locking move method.
-	if err := h.moveToVector(ctx, end, moveOpts); err != nil {
+	// EnsureVisible must be disabled for the movement phase as it's already handled.
+	disableVisible := false
+	moveOpts := &InteractionOptions{Field: field, EnsureVisible: &disableVisible}
+
+	// Move to the calculated end target.
+	if err := h.moveToVector(ctx, endTarget, moveOpts); err != nil {
 		h.logger.Warn("Humanoid: Drag movement failed, attempting cleanup (mouse release)", zap.Error(err))
-		h.releaseMouse(context.Background()) // Use background context for cleanup.
+		h.releaseMouse(context.Background())
 		return err
 	}
 
-	// Short pause before releasing the mouse button.
+	// 8. Short pause before releasing (confirming drop location).
 	if err := h.cognitivePause(ctx, 70, 30); err != nil {
-		h.releaseMouse(context.Background()) // Attempt cleanup if pause fails.
+		h.releaseMouse(context.Background())
 		return err
 	}
 
-	// -- Mouse up (Drop) --
+	// 9. Mouse up (Drop).
+	// Apply click noise for release.
+	releasePos := h.applyClickNoise(h.currentPos)
+	h.currentPos = releasePos
+
+	// releaseMouse is defined in humanoid.go.
 	return h.releaseMouse(ctx)
-}
-
-// releaseMouse is an internal helper that assumes the caller holds the lock.
-func (h *Humanoid) releaseMouse(ctx context.Context) error {
-	currentPos := h.currentPos
-	// Only release if our state shows the left button is currently pressed.
-	if h.currentButtonState != schemas.ButtonLeft {
-		return nil // Nothing to do.
-	}
-
-	mouseUpData := schemas.MouseEventData{
-		Type:       schemas.MouseRelease,
-		X:          currentPos.X,
-		Y:          currentPos.Y,
-		Button:     schemas.ButtonLeft,
-		ClickCount: 1,
-		Buttons:    0, // Bitfield: 0 indicates no buttons are pressed after release.
-	}
-
-	err := h.executor.DispatchMouseEvent(ctx, mouseUpData)
-	if err != nil {
-		// Log the failure but continue to update state to prevent getting stuck.
-		h.logger.Error("Humanoid: Failed to dispatch mouse release event, but updating state anyway", zap.Error(err))
-	}
-
-	// Always update the internal state to "none".
-	h.currentButtonState = schemas.ButtonNone
-
-	return err
 }

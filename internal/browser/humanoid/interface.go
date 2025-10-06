@@ -11,9 +11,10 @@ import (
 
 // InteractionOptions provides a flexible way to configure humanoid actions.
 type InteractionOptions struct {
-	// If true, the humanoid will automatically scroll until the element is in view before interacting.
-	// This defaults to true if the options struct is nil.
-	EnsureVisible bool
+	// If set, controls whether the humanoid will automatically scroll until the element is in view.
+	// If nil (default when options are nil or the field is unset), the behavior is enabled (true).
+	// To disable, set to a pointer to false.
+	EnsureVisible *bool
 	// PotentialField can be used to influence the mouse trajectory.
 	Field *PotentialField
 	// More options like timeouts, custom scroll alignment, etc., can be added here.
@@ -47,5 +48,3 @@ const (
 	KeyTab       ControlKey = "\t"   // Tab
 	KeyEscape    ControlKey = "\x1b" // Escape
 )
-
-

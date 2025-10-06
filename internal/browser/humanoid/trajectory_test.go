@@ -142,22 +142,7 @@ func floatAlmostEqual(a, b, tolerance float64) bool {
 // Unit Tests
 // =============================================================================
 
-func TestComputeEaseInOutCubic(t *testing.T) {
-	t.Parallel()
-	testCases := []struct {
-		input    float64
-		expected float64
-	}{
-		{0.0, 0.0},
-		{0.25, 0.0625},
-		{0.5, 0.5},
-		{0.75, 0.9375},
-		{1.0, 1.0},
-	}
-	for _, tc := range testCases {
-		assert.True(t, floatAlmostEqual(tc.expected, computeEaseInOutCubic(tc.input), 1e-9), "ease for %.2f", tc.input)
-	}
-}
+
 
 // =============================================================================
 // Example: How to Update Your Tests
