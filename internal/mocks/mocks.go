@@ -4,6 +4,7 @@ package mocks
 import (
 	"context"
 	"encoding/json"
+	"sync"
 	"time"
 
 	"github.com/stretchr/testify/mock"
@@ -11,14 +12,13 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
 )
 
+// -- Browser Manager Mock --
+
 // MockBrowserManager is a mock implementation of schemas.BrowserManager.
 type MockBrowserManager struct {
 	mock.Mock
 }
 
-// Note: The implementation in agent_adapter.go seems to use a slightly different signature
-// (passing Task as cfg, and using initialURL/initialData instead of taintTemplate/taintConfig).
-// We will mock the interface as defined in schemas.go, but tests must account for how the adapter calls it.
 func (m *MockBrowserManager) NewAnalysisContext(
 	sessionCtx context.Context,
 	cfg interface{},
@@ -39,40 +39,75 @@ func (m *MockBrowserManager) Shutdown(ctx context.Context) error {
 	return args.Error(0)
 }
 
+// -- Session Context Mock --
+
 // MockSessionContext is a mock implementation of schemas.SessionContext.
+// It includes logic to store and retrieve exposed functions for testing callbacks.
 type MockSessionContext struct {
 	mock.Mock
+	exposedFunctions map[string]interface{}
+	mu               sync.RWMutex
 }
 
-// Implement all required methods of schemas.SessionContext (Stubs)
-func (m *MockSessionContext) ID() string                                     { return "mock-session" }
-func (m *MockSessionContext) Navigate(ctx context.Context, url string) error { return m.Called(ctx, url).Error(0) }
+// NewMockSessionContext creates a new mock session context, ready for use.
+func NewMockSessionContext() *MockSessionContext {
+	return &MockSessionContext{
+		exposedFunctions: make(map[string]interface{}),
+	}
+}
+
+// GetExposedFunction allows tests to retrieve a function that was "exposed"
+// to the mock browser context, so the test can simulate the callback.
+func (m *MockSessionContext) GetExposedFunction(name string) (interface{}, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	fn, ok := m.exposedFunctions[name]
+	return fn, ok
+}
+
+// -- Implementation of schemas.SessionContext interface --
+
+func (m *MockSessionContext) ID() string { return "mock-session" }
+
+func (m *MockSessionContext) Navigate(ctx context.Context, url string) error {
+	return m.Called(ctx, url).Error(0)
+}
+
 func (m *MockSessionContext) Click(ctx context.Context, selector string) error {
 	return m.Called(ctx, selector).Error(0)
 }
+
 func (m *MockSessionContext) Type(ctx context.Context, selector string, text string) error {
 	return m.Called(ctx, selector, text).Error(0)
 }
+
 func (m *MockSessionContext) Submit(ctx context.Context, selector string) error {
 	return m.Called(ctx, selector).Error(0)
 }
+
 func (m *MockSessionContext) ScrollPage(ctx context.Context, direction string) error {
 	return m.Called(ctx, direction).Error(0)
 }
+
 func (m *MockSessionContext) WaitForAsync(ctx context.Context, milliseconds int) error {
 	return m.Called(ctx, milliseconds).Error(0)
 }
+
 func (m *MockSessionContext) ExposeFunction(ctx context.Context, name string, function interface{}) error {
+	m.mu.Lock()
+	m.exposedFunctions[name] = function
+	m.mu.Unlock()
 	return m.Called(ctx, name, function).Error(0)
 }
+
 func (m *MockSessionContext) InjectScriptPersistently(ctx context.Context, script string) error {
 	return m.Called(ctx, script).Error(0)
 }
+
 func (m *MockSessionContext) Interact(ctx context.Context, config schemas.InteractionConfig) error {
 	return m.Called(ctx, config).Error(0)
 }
 
-// Crucial for testing resource management (defer Close())
 func (m *MockSessionContext) Close(ctx context.Context) error {
 	return m.Called(ctx).Error(0)
 }
@@ -84,15 +119,19 @@ func (m *MockSessionContext) CollectArtifacts(ctx context.Context) (*schemas.Art
 	}
 	return args.Get(0).(*schemas.Artifacts), args.Error(1)
 }
+
 func (m *MockSessionContext) AddFinding(ctx context.Context, finding schemas.Finding) error {
 	return m.Called(ctx, finding).Error(0)
 }
+
 func (m *MockSessionContext) Sleep(ctx context.Context, d time.Duration) error {
 	return m.Called(ctx, d).Error(0)
 }
+
 func (m *MockSessionContext) DispatchMouseEvent(ctx context.Context, data schemas.MouseEventData) error {
 	return m.Called(ctx, data).Error(0)
 }
+
 func (m *MockSessionContext) SendKeys(ctx context.Context, keys string) error {
 	return m.Called(ctx, keys).Error(0)
 }
@@ -104,6 +143,7 @@ func (m *MockSessionContext) GetElementGeometry(ctx context.Context, selector st
 	}
 	return args.Get(0).(*schemas.ElementGeometry), args.Error(1)
 }
+
 func (m *MockSessionContext) ExecuteScript(ctx context.Context, script string, args_ []interface{}) (json.RawMessage, error) {
 	args := m.Called(ctx, script, args_)
 	if args.Get(0) == nil {
@@ -112,34 +152,29 @@ func (m *MockSessionContext) ExecuteScript(ctx context.Context, script string, a
 	return args.Get(0).(json.RawMessage), args.Error(1)
 }
 
+// -- Analyzer Mock --
+
 // MockAnalyzer is a mock implementation of the core.Analyzer interface for isolated testing.
 type MockAnalyzer struct {
 	mock.Mock
 }
 
-// Analyze is the mock's implementation of the Analyze method.
 func (m *MockAnalyzer) Analyze(ctx context.Context, analysisCtx *core.AnalysisContext) error {
 	args := m.Called(ctx, analysisCtx)
 	return args.Error(0)
 }
 
-// Name is the mock's implementation of the Name method.
 func (m *MockAnalyzer) Name() string {
 	args := m.Called()
 	return args.String(0)
 }
 
-// Description is the mock's implementation of the Description method.
 func (m *MockAnalyzer) Description() string {
 	args := m.Called()
 	return args.String(0)
 }
 
-// Type is the mock's implementation of the Type method.
-// It now returns a core.AnalyzerType to match the updated interface.
 func (m *MockAnalyzer) Type() core.AnalyzerType {
 	args := m.Called()
-	// We get the first argument and assert its type to core.AnalyzerType.
 	return args.Get(0).(core.AnalyzerType)
 }
-

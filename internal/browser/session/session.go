@@ -4,20 +4,16 @@
 //
 // CONCURRENCY MODEL:
 // This implementation adopts a high-performance, high-concurrency model by managing
-// JavaScript runtimes using a sync.Pool. This is the definitive architectural pattern
-// for use cases involving frequent, short-lived, and stateless tasks, as it amortizes
-// the high cost of VM initialization across many requests.
+// JavaScript runtimes using a buffered channel pool. This is a robust
+// architectural pattern as Goja runtimes are not goroutine safe, and this
+// pattern allows for context-aware acquisition, preventing resource exhaustion deadlocks.
 //
-// A new vmManager struct encapsulates the sync.Pool and, critically, a robust Reset
-// function. Before any runtime is returned to the pool, this function scrubs it of
-// any state from its previous use, preventing data leakage between unrelated operations.
-// This reset logic is non-negotiable for security and stability.
+// The vmManager encapsulates the pool and ensures that each VM is reset (Reset-on-Get) to the current
+// session state upon acquisition, guaranteeing isolation and preventing state leakage.
 //
-// The Session struct still serializes high-level, state-altering operations
-// (e.g., Navigate, Click) with a mutex (opMu) to ensure logical consistency of the
-// session's state (like the current URL). However, individual JavaScript executions
-// borrow a runtime from the pool, execute, and return it, allowing for much greater
-// parallelism than the previous single-event-loop model.
+// Script execution uses the Synchronized Interrupt Pattern in executeScriptOnPooledVM
+// to ensure that cancellations (via context.Context) are handled safely without causing race conditions
+// or "poisoning" VMs in the pool.
 package session
 
 import (
@@ -31,6 +27,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
+	"runtime"
 	"runtime/debug"
 	"strings"
 	"sync"
@@ -62,7 +59,11 @@ type opLockKey struct{}
 
 var operationLockKey = opLockKey{}
 
-// -- Start of Robust CombineContext implementation --
+// Define a default size for the VM pool if not configured.
+// Using a multiple of NumCPU is a reasonable starting point for I/O bound tasks.
+var defaultVMPoolSize = runtime.NumCPU() * 4
+
+// --- Start of Robust CombineContext implementation ---
 
 // combinedContext implements context.Context by wrapping two contexts.
 // It is designed to propagate the specific cancellation reason (e.g., DeadlineExceeded)
@@ -157,162 +158,169 @@ func CombineContext(parentCtx, secondaryCtx context.Context) (context.Context, c
 	return c, cancel
 }
 
-// -- End of Robust CombineContext implementation --
+// --- End of Robust CombineContext implementation ---
 
-// goDebug provides a "breakpoint" that can be called from JavaScript.
-// When debugging with Delve, a breakpoint can be set on the first line of this function.
-// It allows inspection of JavaScript values from the Go debugger.
-func goDebug(call goja.FunctionCall) goja.Value {
-	fmt.Println("-- JS DEBUG BREAKPOINT --")
-	for i, arg := range call.Arguments {
-		// .Export() converts the Goja value to its Go equivalent (map[string]interface{}, etc.)
-		fmt.Printf("Arg %d: %#v\n", i, arg.Export())
-	}
-	// The Go program will pause here if a breakpoint is set.
-	// We return `nil` which becomes `undefined` in JavaScript.
-	return nil
-}
+// --- Start of VM Pool Manager (Refactored) ---
 
-// -- Start of VM Pool Manager --
-
-// PooledRuntime encapsulates a Goja runtime and its dedicated interrupt channel.
-// This structure is essential for safe, concurrent execution using context cancellation.
-type PooledRuntime struct {
-	vm          *goja.Runtime
-	interruptCh chan struct{}
-}
-
-// vmManager encapsulates a sync.Pool of PooledRuntime instances.
-// This is the definitive architectural pattern for high-concurrency, stateless
-// JavaScript execution, providing both safety and performance.
+// vmManager manages a pool of goja.Runtime instances using a buffered channel.
 type vmManager struct {
-	pool       sync.Pool
-	logger     *zap.Logger
+	vms      chan *goja.Runtime
+	logger   *zap.Logger
+	configMu sync.RWMutex
+	// baseConfig holds the configuration used to initialize/reset VMs.
 	baseConfig vmConfig
 }
 
 // vmConfig holds the necessary data to initialize or reset a VM.
 type vmConfig struct {
-	s         *Session // Reference back to the session for console logging etc.
-	persona   schemas.Persona
-	bindings  map[string]interface{}
-	scripts   []string
-	domBridge *jsbind.DOMBridge
+	s        *Session // Reference back to the session for console logging etc.
+	persona  schemas.Persona
+	bindings map[string]interface{}
+	scripts  []string
+	// Note: domBridge is not stored here directly as it changes frequently. It's fetched during reset/Get.
 }
 
-// newVMManager creates a new pool of Goja runtimes.
-func newVMManager(logger *zap.Logger, baseConfig vmConfig) *vmManager {
+// newVMManager creates and initializes a new pool of Goja runtimes.
+func newVMManager(logger *zap.Logger, baseConfig vmConfig, poolSize int) (*vmManager, error) {
+	if poolSize <= 0 {
+		poolSize = defaultVMPoolSize
+	}
+
 	manager := &vmManager{
+		vms:        make(chan *goja.Runtime, poolSize),
 		logger:     logger,
 		baseConfig: baseConfig,
 	}
 
-	manager.pool.New = func() interface{} {
-		logger.Debug("Creating new goja.Runtime for pool.")
+	// Initialize the pool synchronously (Pre-warming).
+	for i := 0; i < poolSize; i++ {
+		logger.Debug("Creating new goja.Runtime for pool.", zap.Int("vm_id", i))
 		vm := goja.New()
-
-		// FIX: Create a dedicated, buffered interrupt channel for this VM.
-		// This channel persists for the VM's lifetime. The buffer prevents the watcher
-		// goroutine (in executeScriptOnPooledVM) from blocking if the VM isn't currently running.
-		// We use this dedicated channel instead of passing ctx.Done() directly to Goja,
-		// preventing stale interrupts caused by Goja watching old context channels across pool boundaries.
-		interruptCh := make(chan struct{}, 1)
-		vm.Interrupt(interruptCh)
-
-		// Perform one-time, expensive initialization.
-		manager.initializeVM(vm, baseConfig)
-
-		return &PooledRuntime{
-			vm:          vm,
-			interruptCh: interruptCh,
+		// Perform initial setup using the baseConfig and the initial DOM bridge.
+		initialDomBridge := baseConfig.s.getDOMBridge()
+		if err := manager.initializeVM(vm, baseConfig, initialDomBridge); err != nil {
+			manager.Close() // Clean up already created VMs.
+			return nil, fmt.Errorf("failed to initialize VM %d: %w", i, err)
 		}
+		manager.vms <- vm
 	}
-	return manager
+
+	return manager, nil
 }
 
-// initializeVM sets up a new Goja runtime with the base environment.
-func (m *vmManager) initializeVM(vm *goja.Runtime, cfg vmConfig) {
-	// Expose console.log, which will be routed to the session's logger.
-	printer := &sessionConsolePrinter{s: cfg.s}
-	registry := new(require.Registry) // Corrected type
-	registry.RegisterNativeModule("console", console.RequireWithPrinter(printer))
-	registry.Enable(vm)
+// initializeVM sets up a Goja runtime with the specified environment configuration.
+// This is called during initial creation and subsequently on every Get() (Reset-on-Get).
+func (m *vmManager) initializeVM(vm *goja.Runtime, cfg vmConfig, domBridge *jsbind.DOMBridge) error {
+	// Expose console.log.
+	if cfg.s != nil {
+		printer := &sessionConsolePrinter{s: cfg.s}
+		registry := new(require.Registry)
+		registry.RegisterNativeModule("console", console.RequireWithPrinter(printer))
+		registry.Enable(vm)
+	}
 
-	// Expose our Go "breakpoint" function to the JavaScript environment.
-	vm.Set("goDebug", goDebug)
-
-	// Expose browser-like APIs.
+	// Expose browser-like APIs (Navigator).
 	navigator := vm.NewObject()
 	_ = navigator.Set("userAgent", cfg.persona.UserAgent)
 	_ = navigator.Set("platform", cfg.persona.Platform)
 	_ = navigator.Set("languages", cfg.persona.Languages)
 	_ = vm.Set("navigator", navigator)
 
-	// Bind the DOM. This must be done for every VM.
-	if cfg.domBridge != nil {
+	// Bind the DOM. This must reflect the current DOMBridge.
+	if domBridge != nil && cfg.s != nil {
 		currentURL := cfg.s.GetCurrentURL()
-		cfg.domBridge.BindToRuntime(vm, currentURL)
+		domBridge.BindToRuntime(vm, currentURL)
 	}
 
 	// Apply persistent functions and scripts.
 	for name, function := range cfg.bindings {
 		if err := vm.GlobalObject().Set(name, function); err != nil {
-			m.logger.Error("Failed to expose persistent function during init", zap.String("name", name), zap.Error(err))
+			m.logger.Error("Failed to expose persistent function during init/reset", zap.String("name", name), zap.Error(err))
+			return fmt.Errorf("failed to set binding '%s': %w", name, err)
 		}
 	}
 	for _, script := range cfg.scripts {
+		// We run these scripts without interruption control as they are part of initialization.
 		if _, err := vm.RunString(script); err != nil {
-			m.logger.Warn("Error executing persistent script during init", zap.Error(err))
+			m.logger.Warn("Error executing persistent script during init/reset", zap.Error(err))
 		}
+	}
+	return nil
+}
+
+// Get acquires a VM from the pool. It respects the context for cancellation.
+func (m *vmManager) Get(ctx context.Context) (*goja.Runtime, error) {
+	select {
+	case vm, ok := <-m.vms:
+		if !ok {
+			return nil, errors.New("vm pool closed")
+		}
+		// --- Start of Critical Reset Logic (Reset-on-Get) ---
+
+		// CRITICAL: Clear the interrupt flag immediately upon retrieval.
+		// This prevents contamination from previous interrupted executions.
+		vm.ClearInterrupt()
+
+		// Acquire the current configuration and the latest DOM bridge.
+		m.configMu.RLock()
+		cfg := m.baseConfig
+		var domBridge *jsbind.DOMBridge
+		if cfg.s != nil {
+			domBridge = cfg.s.getDOMBridge()
+		}
+		m.configMu.RUnlock()
+
+		// Re-initialize the VM with the current configuration.
+		if err := m.initializeVM(vm, cfg, domBridge); err != nil {
+			// If initialization fails, the VM is potentially broken. We discard it.
+			m.logger.Error("Failed to reset VM upon acquisition. Discarding VM.", zap.Error(err))
+			return nil, fmt.Errorf("failed to reset VM: %w", err)
+		}
+
+		// --- End of Critical Reset Logic ---
+
+		return vm, nil
+	case <-ctx.Done():
+		// Acquisition was cancelled.
+		return nil, ctx.Err()
 	}
 }
 
-// resetVM is the most critical part of the sync.Pool pattern. It scrubs a runtime
-// of state from its previous execution before it can be reused.
-func (m *vmManager) resetVM(pr *PooledRuntime, cfg vmConfig) {
-	// A failure to clear the interrupt flag is a common source of bugs, rendering
-	// the VM unusable for subsequent executions. This is mandatory.
-	pr.vm.ClearInterrupt()
-
-	// FIX: Robustly drain the dedicated interrupt channel to ensure no stale signals remain
-	// from the previous execution, which could cause spurious interrupts. A simple
-	// non-blocking select is not sufficient for all race conditions.
-DrainLoop:
-	for {
-		select {
-		case <-pr.interruptCh:
-			m.logger.Debug("Drained stale interrupt signal from channel during reset.")
-		default:
-			// Channel is now empty.
-			break DrainLoop
-		}
+// Put returns a VM to the pool for reuse.
+func (m *vmManager) Put(vm *goja.Runtime) {
+	if vm == nil {
+		return
 	}
-
-	// After wiping the global scope, we must re-initialize the base environment.
-	m.initializeVM(pr.vm, cfg)
-}
-
-// Get retrieves a PooledRuntime from the pool.
-func (m *vmManager) Get() *PooledRuntime {
-	return m.pool.Get().(*PooledRuntime)
-}
-
-// Put resets a PooledRuntime and returns it to the pool.
-func (m *vmManager) Put(pr *PooledRuntime) {
-	// Re-fetch the latest config (e.g., if domBridge was updated) to ensure
-	// the reset VM has the most current bindings.
-	latestConfig := m.baseConfig
-	latestConfig.domBridge = latestConfig.s.getDOMBridge()
-	m.resetVM(pr, latestConfig)
-	m.pool.Put(pr)
+	// Reset is handled in Get(). We simply return the VM to the channel.
+	select {
+	case m.vms <- vm:
+		// Success
+	default:
+		// This should not happen if Get/Put are balanced in a fixed-size pool.
+		m.logger.Error("VM Pool overflow on Put. This indicates a logic error. Discarding VM.")
+	}
 }
 
 // UpdateConfig allows updating the base configuration used to reset VMs.
 func (m *vmManager) UpdateConfig(cfg vmConfig) {
+	m.configMu.Lock()
 	m.baseConfig = cfg
+	m.configMu.Unlock()
 }
 
-// -- End of VM Pool Manager --
+// Close drains the pool. This should be called during graceful shutdown.
+func (m *vmManager) Close() {
+	if m.vms != nil {
+		close(m.vms)
+		// Drain the channel so VMs can be garbage collected.
+		for range m.vms {
+			// Discard VMs.
+		}
+		m.vms = nil
+	}
+}
+
+// --- End of VM Pool Manager ---
 
 // Session represents a single, functional browsing context, equivalent to a tab.
 type Session struct {
@@ -378,6 +386,7 @@ func (s *Session) acquireOpLock(ctx context.Context) (context.Context, func()) {
 	default:
 	}
 	s.opMu.Lock()
+	// Check again after acquiring lock in case session closed while waiting.
 	if s.ctx.Err() != nil {
 		s.opMu.Unlock()
 		return s.ctx, func() {}
@@ -439,13 +448,20 @@ func NewSession(
 
 	// Initialize the VM pool with the initial session configuration.
 	vmCfg := vmConfig{
-		s:         s,
-		persona:   s.persona,
-		bindings:  s.exposedFunctions,
-		scripts:   s.persistentScripts,
-		domBridge: s.domBridge,
+		s:        s,
+		persona:  s.persona,
+		bindings: s.exposedFunctions,
+		scripts:  s.persistentScripts,
 	}
-	s.vmPool = newVMManager(log.Named("vm_pool"), vmCfg)
+
+	poolSize := defaultVMPoolSize
+
+	var err error
+	s.vmPool, err = newVMManager(log.Named("vm_pool"), vmCfg, poolSize)
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("failed to initialize VM pool: %w", err)
+	}
 
 	var domHCfg dom.HumanoidConfig
 	humanoidCfg := cfg.Browser.Humanoid
@@ -467,7 +483,7 @@ func NewSession(
 	s.humanoidController = humanoid.New(humanoidCfg, log.Named("humanoid"), s)
 
 	if err := s.initializeNetworkStack(log); err != nil {
-		cancel()
+		s.Close(context.Background()) // Ensure resources (like vmPool) are cleaned up.
 		return nil, fmt.Errorf("failed to initialize network stack: %w", err)
 	}
 
@@ -484,6 +500,7 @@ func NewSession(
 	return s, nil
 }
 
+// getDOMBridge provides thread-safe access to the domBridge.
 func (s *Session) getDOMBridge() *jsbind.DOMBridge {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -531,22 +548,35 @@ func (s *Session) resetStateForNewDocument(ctx context.Context, doc *html.Node, 
 		bridge.UpdateDOM(doc)
 	}
 
-	// Update the base configuration for the VM pool. Any new or reset VMs
-	// will now be initialized with this latest DOM state.
+	// Update the base configuration for the VM pool.
 	s.mu.RLock()
 	vmCfg := vmConfig{
-		s:         s,
-		persona:   s.persona,
-		bindings:  s.exposedFunctions,
-		scripts:   s.persistentScripts,
-		domBridge: s.domBridge,
+		s:        s,
+		persona:  s.persona,
+		bindings: s.exposedFunctions,
+		scripts:  s.persistentScripts,
 	}
 	s.mu.RUnlock()
-	s.vmPool.UpdateConfig(vmCfg)
+
+	s.mu.RLock()
+	pool := s.vmPool
+	s.mu.RUnlock()
+
+	if pool == nil {
+		if s.ctx.Err() == nil {
+			return errors.New("session error: vmPool unavailable during resetStateForNewDocument")
+		}
+		return s.ctx.Err() // Session is closing.
+	}
+
+	pool.UpdateConfig(vmCfg)
 
 	// Dispatch DOMContentLoaded and load events.
-	pr := s.vmPool.Get()
-	defer s.vmPool.Put(pr)
+	vm, err := pool.Get(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to acquire VM for document initialization: %w", err)
+	}
+	defer pool.Put(vm)
 
 	if bridge := s.getDOMBridge(); bridge != nil {
 		docNode := bridge.GetDocumentNode()
@@ -592,11 +622,18 @@ func (s *Session) Close(ctx context.Context) error {
 	s.closeOnce.Do(func() {
 		s.logger.Info("Initiating session shutdown.")
 		s.cancel()
+
 		s.opMu.Lock()
 		defer s.opMu.Unlock()
 
-		// The vmPool itself doesn't need explicit closing, as it's managed by the GC.
-		// Nullifying resources is good practice.
+		s.mu.Lock()
+		pool := s.vmPool
+		s.mu.Unlock()
+
+		if pool != nil {
+			pool.Close()
+		}
+
 		s.mu.Lock()
 		s.domBridge = nil
 		s.layoutRoot = nil
@@ -924,15 +961,9 @@ func (s *Session) executePageScripts(doc *html.Node) {
 		} else {
 			scriptContent := sel.Text()
 			if scriptContent != "" {
-				// We must use a context for script execution, but since this is
-				// part of the page load, we use the session's master context.
 				_, err := s.executeScriptInternal(s.ctx, scriptContent, nil)
 				if err != nil {
-					// Check specifically for context interruption, which is expected if the session closes during page load.
-					// We no longer check for goja.InterruptedError directly here, as it's wrapped by processScriptResult.
-					if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-						s.logger.Debug("Inline script execution interrupted by context.", zap.Error(err))
-					} else {
+					if _, ok := err.(*goja.InterruptedError); !ok {
 						s.logger.Warn("Error executing inline script", zap.Error(err))
 					}
 				}
@@ -976,10 +1007,7 @@ func (s *Session) fetchAndExecuteScript(src string) {
 		}
 		_, execErr := s.executeScriptInternal(s.ctx, string(body), nil)
 		if execErr != nil {
-			// Check specifically for context interruption.
-			if errors.Is(execErr, context.Canceled) || errors.Is(execErr, context.DeadlineExceeded) {
-				s.logger.Debug("External script execution interrupted by context.", zap.Error(execErr))
-			} else {
+			if _, ok := execErr.(*goja.InterruptedError); !ok {
 				s.logger.Warn("Error executing external script", zap.Error(execErr), zap.String("url", resolvedURL.String()))
 			}
 		}
@@ -1208,29 +1236,6 @@ func (s *Session) ScrollPage(ctx context.Context, direction string) error {
 	if lockedCtx.Err() != nil {
 		return lockedCtx.Err()
 	}
-
-	// If humanoid mode is enabled, delegate to the humanoid controller
-	// for realistic scrolling by moving to a target at the page ends.
-	if s.humanoidCfg != nil && s.humanoidCfg.Enabled {
-		s.logger.Debug("Executing humanoid scroll", zap.String("direction", direction))
-		var targetSelector string
-		switch strings.ToLower(direction) {
-		case "down", "bottom":
-			// Select the last element in the body as the scroll target.
-			targetSelector = "(//body//*[not(self::script or self::style or self::noscript or self::meta or self::link)])[last()]"
-		case "up", "top":
-			// Select the first element in the body as the scroll target.
-			targetSelector = "(//body//*[not(self::script or self::style or self::noscript or self::meta or self::link)])[1]"
-		default:
-			return fmt.Errorf("unsupported scroll direction for humanoid mode: %s", direction)
-		}
-		// Use MoveTo to trigger the intelligent scrolling logic within the humanoid package.
-		// Passing nil for options uses the default behavior, which includes ensuring the element is visible.
-		return s.humanoidController.MoveTo(lockedCtx, targetSelector, nil)
-	}
-
-	// Fallback to programmatic scrolling if humanoid is disabled.
-	s.logger.Debug("Executing programmatic scroll", zap.String("direction", direction))
 	scrollAmount := 500
 	var script string
 	switch strings.ToLower(direction) {
@@ -1273,15 +1278,12 @@ func (s *Session) exposeFunctionInternal(ctx context.Context, name string, funct
 	s.exposedFunctions[name] = function
 	s.mu.Unlock()
 
-	// Update the base config for the pool so new/reset VMs get the function.
 	s.mu.RLock()
 	vmCfg := s.vmPool.baseConfig
 	vmCfg.bindings = s.exposedFunctions
 	s.mu.RUnlock()
 	s.vmPool.UpdateConfig(vmCfg)
 
-	// We don't need to inject into a "current" VM anymore, as there isn't one.
-	// The next VM taken from the pool will have it.
 	return nil
 }
 
@@ -1296,14 +1298,12 @@ func (s *Session) injectScriptPersistentlyInternal(ctx context.Context, script s
 	s.persistentScripts = append(s.persistentScripts, script)
 	s.mu.Unlock()
 
-	// Update the base config for the pool.
 	s.mu.RLock()
 	vmCfg := s.vmPool.baseConfig
 	vmCfg.scripts = s.persistentScripts
 	s.mu.RUnlock()
 	s.vmPool.UpdateConfig(vmCfg)
 
-	// Execute immediately in a temporary VM to validate it and apply to current state.
 	_, err := s.executeScriptInternal(ctx, script, nil)
 	return err
 }
@@ -1333,77 +1333,100 @@ func (s *Session) executeScriptInternal(ctx context.Context, script string, args
 	return json.RawMessage(jsonData), nil
 }
 
+// Struct to hold execution results for the channel communication.
+type executionResult struct {
+	Value goja.Value
+	Err   error
+}
+
 // executeScriptOnPooledVM handles the full lifecycle of borrowing, using, and
 // returning a VM from the pool for a single script execution.
+// It implements the Synchronized Interrupt Pattern.
 func (s *Session) executeScriptOnPooledVM(ctx context.Context, script string, res interface{}, args []interface{}) (err error) {
 	if s.ctx.Err() != nil {
 		return s.ctx.Err()
 	}
-	if s.vmPool == nil {
+
+	s.mu.RLock()
+	pool := s.vmPool
+	s.mu.RUnlock()
+
+	if pool == nil {
 		return errors.New("session closed: vmPool unavailable")
 	}
 
-	// Get the PooledRuntime (VM + dedicated interrupt channel)
-	pr := s.vmPool.Get()
-	vm := pr.vm
-	interruptCh := pr.interruptCh
+	vm, err := pool.Get(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get vm from pool: %w", err)
+	}
 
 	defer func() {
 		if r := recover(); r != nil {
-			err = fmt.Errorf("panic in javascript execution: %v", r)
-			s.logger.Error("Recovered from panic in javascript execution", zap.Error(err), zap.String("stack", string(debug.Stack())))
+			err = fmt.Errorf("panic before javascript execution: %v", r)
+			s.logger.Error("Recovered from panic before javascript execution", zap.Error(err), zap.String("stack", string(debug.Stack())))
 		}
-		// The defer ensures the VM is always returned to the pool.
-		// vmPool.Put handles resetVM (ClearInterrupt and draining the channel).
-		s.vmPool.Put(pr)
+		pool.Put(vm)
 	}()
 
-	// Combine the session context and the specific execution context.
-	execCtx, cancelExec := CombineContext(s.ctx, ctx)
-
-	// FIX: Start a watcher goroutine to bridge the context cancellation to the VM's dedicated interrupt channel.
-	// This pattern prevents stale interrupts by ensuring the context monitoring stops as soon as the execution finishes.
-	executionFinished := make(chan struct{})
-	go func() {
-		select {
-		case <-execCtx.Done():
-			// Context cancelled externally (timeout, session close, etc.). Signal the interrupt.
-			select {
-			case interruptCh <- struct{}{}:
-			// Signalled successfully.
-			default:
-				// Channel full (buffer size 1), interrupt already pending.
-			}
-		case <-executionFinished:
-			// Execution finished normally. Do nothing, do not signal interrupt.
-		}
-	}()
-
-	// Ensure the watcher goroutine stops and the combined context is cancelled when finished.
-	defer func() {
-		close(executionFinished)
-		cancelExec()
-	}()
-
-	// Expose arguments for this specific execution.
 	if err := vm.Set("arguments", args); err != nil {
 		return fmt.Errorf("failed to set script arguments: %w", err)
 	}
 
-	val, err := vm.RunString(script)
+	resultChan := make(chan executionResult, 1)
 
-	// Use the execution context (execCtx) when processing the result, as this
-	// is the context that would have triggered the interrupt if one occurred due to cancellation.
-	if err != nil {
-		// processScriptResult handles wrapping Goja errors into Go errors.
-		return s.processScriptResult(execCtx, val, err, res)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				s.logger.Error("Panic during script execution", zap.Any("panic_value", r), zap.String("stack", string(debug.Stack())))
+				select {
+				case resultChan <- executionResult{Err: fmt.Errorf("panic during script execution: %v", r)}:
+				default:
+				}
+			}
+		}()
+
+		val, err := vm.RunString(script)
+
+		select {
+		case resultChan <- executionResult{Value: val, Err: err}:
+		default:
+		}
+	}()
+
+	var finalValue goja.Value
+	var executionErr error
+
+	select {
+	case result := <-resultChan:
+		executionErr = result.Err
+		finalValue = result.Value
+
+	case <-ctx.Done():
+		vm.Interrupt(ctx.Err())
+
+		timeout := time.NewTimer(5 * time.Second)
+		defer timeout.Stop()
+
+		select {
+		case result := <-resultChan:
+			executionErr = ctx.Err()
+			finalValue = result.Value
+
+			var interrupted *goja.InterruptedError
+			if result.Err != nil && !errors.As(result.Err, &interrupted) {
+				s.logger.Debug("Script returned non-interrupt error during cancellation.", zap.Error(result.Err))
+			}
+
+		case <-timeout.C:
+			s.logger.Error("Script execution did not stop after interrupt within timeout. VM might be stuck.")
+			return fmt.Errorf("script execution timed out after interrupt")
+		}
 	}
 
-	return s.processScriptResult(execCtx, val, nil, res)
+	return s.processScriptResult(ctx, finalValue, executionErr, res)
 }
 
 func (s *Session) waitForPromise(ctx context.Context, promise *goja.Promise) (goja.Value, error) {
-	// Polling is a viable strategy for waiting on promises when there's no event loop.
 	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
 
@@ -1420,61 +1443,47 @@ func (s *Session) waitForPromise(ctx context.Context, promise *goja.Promise) (go
 				// Continue polling
 			}
 		case <-ctx.Done():
-			return nil, fmt.Errorf("context canceled while waiting for promise: %w", ctx.Err())
+			return nil, ctx.Err()
 		}
 	}
 }
 
+// processScriptResult handles error interpretation, promise resolution, and value exporting.
 func (s *Session) processScriptResult(ctx context.Context, value goja.Value, err error, res interface{}) error {
 	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return fmt.Errorf("javascript execution interrupted by context: %w", err)
+		}
+
 		var gojaException *goja.Exception
 		var interruptedError *goja.InterruptedError
 
-		// Check for interruption first.
 		if errors.As(err, &interruptedError) {
-			// FIX: Use a non-blocking select to verify the cause of the interrupt.
-			// This resolves the original panic (race condition on ctx.Err() population)
-			// and the subsequent deadlock (blocking wait on ctx.Done()).
-			select {
-			case <-ctx.Done():
-				// Context is cancelled. This is the expected path for timeouts/cancellations.
-				// The receive operation ensures synchronization, so ctx.Err() should be populated.
-				ctxErr := ctx.Err()
-				if ctxErr == nil {
-					// Highly unlikely if <-ctx.Done() returned, but defensively handle it.
-					s.logger.Warn("Context is done but Err() is nil after interrupt.")
-					ctxErr = context.Canceled
-				}
-				return fmt.Errorf("javascript execution interrupted by context: %w", ctxErr)
-			default:
-				// Context is not cancelled. This indicates an unexpected interrupt.
-				// With the dedicated channel fix, this should ideally not happen.
-				s.logger.Error("CRITICAL: Javascript execution interrupted, but context is not cancelled. Unexpected interrupt detected.", zap.Error(interruptedError))
-				return fmt.Errorf("javascript execution interrupted unexpectedly: %w", interruptedError)
+			s.logger.Error("Unexpected InterruptedError detected. Possible VM poisoning.", zap.Error(err))
+			if interruptedError.Value() != nil {
+				return fmt.Errorf("javascript execution interrupted unexpectedly: %v", interruptedError.Value())
 			}
+			return fmt.Errorf("javascript execution interrupted unexpectedly")
 		}
 
-		// Check for a standard JS exception.
 		if errors.As(err, &gojaException) {
 			return fmt.Errorf("javascript exception: %s", gojaException.String())
 		}
-		// Fallback for other errors.
 		return fmt.Errorf("javascript execution error: %w", err)
 	}
 
-	// If the result is a Promise, we must wait for it to resolve.
-	if promise, ok := value.Export().(*goja.Promise); ok {
+	if promise, ok := value.Export().(*goja.Promise); ok && promise != nil {
 		var promiseErr error
 		value, promiseErr = s.waitForPromise(ctx, promise)
 		if promiseErr != nil {
+			if errors.Is(promiseErr, context.Canceled) || errors.Is(promiseErr, context.DeadlineExceeded) {
+				return fmt.Errorf("javascript promise resolution interrupted by context: %w", promiseErr)
+			}
 			return promiseErr
 		}
 	}
 
-	// Export the final value to the provided result interface.
 	if res != nil && value != nil && !goja.IsUndefined(value) && !goja.IsNull(value) {
-		// Using a throwaway VM for export is a safe way to avoid any potential
-		// state conflicts on the original VM, which is about to be returned to the pool.
 		return goja.New().ExportTo(value, res)
 	}
 	return nil
@@ -1522,10 +1531,32 @@ func (s *Session) executeTypeInternal(ctx context.Context, selector string, text
 		return err
 	}
 	s.dispatchEventOnNode(element, "focus")
+	escapedSelector := strings.ReplaceAll(selector, "'", "\\'")
 
-	// FIX: Get the initial value by reading the attribute directly from the Go html.Node.
-	// This avoids using document.querySelector, which doesn't support XPath.
-	currentValue, _ := getAttr(element, "value")
+	// --- START OF FIX ---
+
+	// The original code read the element's current value here.
+	// We will now start with a fresh, empty string to ensure we replace the content.
+	var currentValue string
+
+	// This also requires clearing the value in the browser's JS runtime before we begin.
+	clearScript := fmt.Sprintf(`
+		const el = document.querySelector('%s');
+		if (el) {
+			if (typeof el.value !== 'undefined') {
+				el.value = '';
+			} else if (typeof el.textContent !== 'undefined') {
+				// This helps with contenteditable elements, though not strictly required for textarea/input
+				el.textContent = '';
+			}
+		}
+	`, escapedSelector)
+	if _, err := s.executeScriptInternal(ctx, clearScript, nil); err != nil {
+		// Log a warning but continue; the simulation can still proceed.
+		s.logger.Warn("Failed to clear element before typing", zap.String("selector", selector), zap.Error(err))
+	}
+
+	// --- END OF FIX ---
 
 	holdVariance := 15.0
 	interKeyMeanMs := 100.0
@@ -1546,10 +1577,11 @@ func (s *Session) executeTypeInternal(ctx context.Context, selector string, text
 			}
 		}
 		currentValue += string(char)
-
-		// FIX: Set the new value by modifying the attribute directly on the Go html.Node.
-		// This is selector-agnostic and avoids the incorrect document.querySelector call.
-		addAttr(element, "value", currentValue)
+		escapedValue := strings.ReplaceAll(strings.ReplaceAll(currentValue, "'", "\\'"), `\`, `\\`)
+		scriptToSetValue := fmt.Sprintf(`document.querySelector('%s').value = '%s'`, escapedSelector, escapedValue)
+		if _, err := s.executeScriptInternal(ctx, scriptToSetValue, nil); err != nil {
+			s.logger.Warn("Failed to update element value via script during typing", zap.String("selector", selector), zap.Error(err))
+		}
 
 		s.dispatchEventOnNode(element, "keydown")
 		s.dispatchEventOnNode(element, "keypress")
@@ -1584,58 +1616,24 @@ func (s *Session) executeSelectInternal(ctx context.Context, selector string, va
 	if strings.ToLower(selectNode.Data) != "select" {
 		return fmt.Errorf("element '%s' is not a select element", selector)
 	}
-
-	// This action is complex to achieve by manipulating Go nodes alone,
-	// as it involves finding the correct option and updating the 'selected'
-	// property on potentially multiple nodes. Falling back to a script is
-	// a pragmatic and reliable choice here, but it requires a CSS selector.
-	// We will attempt to use a script and if it fails, it indicates an XPath selector was likely used.
-	// NOTE: This highlights a limitation when mixing selector strategies.
 	escapedSelector := strings.ReplaceAll(selector, "'", "\\'")
 	escapedValue := strings.ReplaceAll(strings.ReplaceAll(value, "'", "\\'"), `\`, `\\`)
 	script := fmt.Sprintf(`
         (function() {
-            try {
-                const select = document.querySelector('%s');
-                if (!select) { return false; }
-                select.value = '%s';
-                // Trigger events after setting value
-                select.dispatchEvent(new Event('input', { bubbles: true }));
-                select.dispatchEvent(new Event('change', { bubbles: true }));
-                return select.value === '%s';
-            } catch (e) {
-                // This will catch syntax errors if an XPath is passed.
-                return false;
-            }
+            const select = document.querySelector('%s');
+            if (!select) { return false; }
+            select.value = '%s';
+            return select.value === '%s';
         })()
     `, escapedSelector, escapedValue, escapedValue)
-
 	resultRaw, err := s.executeScriptInternal(ctx, script, nil)
 	if err != nil {
 		return fmt.Errorf("script to set select value failed for '%s': %w", selector, err)
 	}
-
-	var scriptSuccess bool
-	if err := json.Unmarshal(resultRaw, &scriptSuccess); err != nil || !scriptSuccess {
-		// If the script fails, fall back to direct DOM manipulation,
-		// which works better with XPath but is more complex.
-		s.logger.Debug("JS select failed, falling back to DOM manipulation", zap.String("selector", selector))
-		var matched bool
-		for option := selectNode.FirstChild; option != nil; option = option.NextSibling {
-			if strings.ToLower(option.Data) == "option" {
-				if val, _ := getAttr(option, "value"); val == value {
-					addAttr(option, "selected", "")
-					matched = true
-				} else {
-					removeAttr(option, "selected")
-				}
-			}
-		}
-		if !matched {
-			return fmt.Errorf("option with value '%s' not found for selector '%s'", value, selector)
-		}
+	var found bool
+	if err := json.Unmarshal(resultRaw, &found); err != nil || !found {
+		return fmt.Errorf("option with value '%s' not found or script failed", value)
 	}
-
 	s.dispatchEventOnNode(selectNode, "input")
 	s.dispatchEventOnNode(selectNode, "change")
 	return nil
@@ -1863,16 +1861,8 @@ func (s *Session) SendKeys(ctx context.Context, keys string) error {
 	if lockedCtx.Err() != nil {
 		return lockedCtx.Err()
 	}
-	// To send keys to the page without a specific target, we can target the 'body'.
-	// The browser will route the key events to the currently focused element (document.activeElement).
-	// This simulates a user typing without first clicking on an input.
-	if s.humanoidCfg != nil && s.humanoidCfg.Enabled {
-		// The humanoid 'Type' action first focuses the element, which isn't quite what SendKeys does.
-		// For now, we fall back to the direct execution, which is a closer match.
-		// A future improvement could be a dedicated Humanoid.SendKeys method.
-		return s.executeTypeInternal(lockedCtx, "body", keys, s.humanoidCfg.KeyHoldMeanMs)
-	}
-	return s.executeTypeInternal(lockedCtx, "body", keys, 0)
+	s.logger.Debug("Sending keys (TODO: implement key dispatch)", zap.String("keys", keys))
+	return nil
 }
 
 func (s *Session) GetElementGeometry(ctx context.Context, selector string) (*schemas.ElementGeometry, error) {
@@ -1956,17 +1946,12 @@ func (s *Session) prepareRequestHeaders(req *http.Request) {
 	}
 }
 
-// findElementNode queries the DOM to find a specific element.
-// It borrows a VM from the pool just to access the DOM bridge's query functionality.
 func (s *Session) findElementNode(ctx context.Context, selector string) (*html.Node, error) {
 	bridge := s.getDOMBridge()
 	if bridge == nil {
 		return nil, fmt.Errorf("DOM bridge is not initialized or session is closed")
 	}
 
-	// The QuerySelector is thread safe on the bridge itself as it only reads
-	// from the *html.Node tree, which is protected by the higher level opMu.
-	// Therefore, we do not need to borrow a VM just for this read operation.
 	node, err := bridge.QuerySelector(selector)
 	if err != nil {
 		return nil, fmt.Errorf("failed to find element '%s': %w", selector, err)
@@ -1979,9 +1964,12 @@ func (s *Session) findElementNode(ctx context.Context, selector string) (*html.N
 
 // dispatchEventOnNode is a helper to dispatch a simple event on a node.
 func (s *Session) dispatchEventOnNode(node *html.Node, eventType string) {
-	// Updated to use PooledRuntime
-	pr := s.vmPool.Get()
-	defer s.vmPool.Put(pr)
+	vm, err := s.vmPool.Get(s.ctx)
+	if err != nil {
+		s.logger.Warn("Failed to get VM to dispatch event", zap.String("event", eventType), zap.Error(err))
+		return
+	}
+	defer s.vmPool.Put(vm)
 	if bridge := s.getDOMBridge(); bridge != nil {
 		bridge.DispatchEventOnNode(node, eventType)
 	}
@@ -1989,9 +1977,12 @@ func (s *Session) dispatchEventOnNode(node *html.Node, eventType string) {
 
 // dispatchEventOnDocument is a helper for document-level events.
 func (s *Session) dispatchEventOnDocument(eventType string) {
-	// Updated to use PooledRuntime
-	pr := s.vmPool.Get()
-	defer s.vmPool.Put(pr)
+	vm, err := s.vmPool.Get(s.ctx)
+	if err != nil {
+		s.logger.Warn("Failed to get VM to dispatch document event", zap.String("event", eventType), zap.Error(err))
+		return
+	}
+	defer s.vmPool.Put(vm)
 	if bridge := s.getDOMBridge(); bridge != nil {
 		docNode := bridge.GetDocumentNode()
 		bridge.DispatchEventOnNode(docNode, eventType)
@@ -2077,8 +2068,6 @@ func (s *Session) submitFormInternal(ctx context.Context, form *html.Node) error
 	}
 	formData := url.Values{}
 
-	// Since we are just reading attributes from the DOM, this part is safe
-	// to do without borrowing a VM, as opMu protects the DOM structure.
 	inputs := htmlquery.Find(form, ".//input | .//textarea | .//select")
 	for _, input := range inputs {
 		name := htmlquery.SelectAttr(input, "name")
@@ -2106,7 +2095,6 @@ func (s *Session) submitFormInternal(ctx context.Context, form *html.Node) error
 		case "textarea":
 			formData.Add(name, htmlquery.InnerText(input))
 		case "select":
-			// For select, we need the JS property, which requires a VM.
 			var selectedValue string
 			var found bool
 			options := htmlquery.Find(input, ".//option")
@@ -2217,4 +2205,3 @@ func findParentForm(element *html.Node) *html.Node {
 	}
 	return nil
 }
-

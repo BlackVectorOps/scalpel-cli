@@ -7,6 +7,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/net/html"
+
+	"github.com/xkilldash9x/scalpel-cli/internal/browser/parser" // <-- FIX: This import was added
 )
 
 // Helpers (reusing MockShadowDOMProcessor and parseHTMLAndFind from selectors_test.go)
@@ -22,7 +24,9 @@ func setupEngine(css string) *Engine {
 
 // Helper to find a StyledNode by ID in the built tree.
 func findStyledNodeByID(n *StyledNode, id string) *StyledNode {
-	if n == nil { return nil }
+	if n == nil {
+		return nil
+	}
 	if n.Node.Type == html.ElementNode {
 		for _, attr := range n.Node.Attr {
 			if attr.Key == "id" && attr.Val == id {
@@ -38,7 +42,6 @@ func findStyledNodeByID(n *StyledNode, id string) *StyledNode {
 	return nil
 }
 
-
 // --- Tests for The Cascade Algorithm ---
 
 func TestCSSCascade(t *testing.T) {
@@ -52,7 +55,7 @@ func TestCSSCascade(t *testing.T) {
 			p { color: tag; } /* 0,0,1 */
 		`
 		engine := setupEngine(css)
-		
+
 		// To test specificity in isolation from inline styles, we temporarily remove the style attribute.
 		originalAttrs := targetNode.Attr
 		targetNode.Attr = []html.Attribute{{Key: "id", Val: "target"}, {Key: "class", Val: "highlight"}}

@@ -133,7 +133,8 @@ func (p *Parser) Parse() StyleSheet {
 			continue
 		}
 
-		selectorGroups := p.parseSelectorGroups()
+        // FIX: Call the now-public ParseSelectorGroups method.
+		selectorGroups := p.ParseSelectorGroups()
 		if len(selectorGroups) == 0 {
 			p.skipTo('{')
 			if !p.eof() && p.currentChar() == '{' {
@@ -154,8 +155,10 @@ func (p *Parser) Parse() StyleSheet {
 	return StyleSheet{Rules: rules}
 }
 
+
+
 // parseSelectorGroups parses a comma-separated list of complex selectors.
-func (p *Parser) parseSelectorGroups() []SelectorGroup {
+func (p *Parser) ParseSelectorGroups() []SelectorGroup {
 	var selectorGroup SelectorGroup // This is []ComplexSelector
 	for {
 		p.consumeWhitespace()

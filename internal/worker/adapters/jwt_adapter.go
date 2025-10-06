@@ -9,28 +9,36 @@ import (
 	"go.uber.org/zap"
 )
 
+// JWTAdapter acts as a bridge between the worker and the specific JWT static analyzer.
 type JWTAdapter struct {
+	// embedding the BaseAnalyzer provides default implementations for Name(), etc.
 	core.BaseAnalyzer
 }
 
+// NewJWTAdapter creates a new adapter for JWT analysis.
 func NewJWTAdapter() *JWTAdapter {
 	return &JWTAdapter{
-		// FIX: Dereference the pointer returned by NewBaseAnalyzer and provide all required arguments.
-		BaseAnalyzer: *core.NewBaseAnalyzer("JWT Adapter", "Scans for common JWT vulnerabilities", core.TypeStatic, zap.NewNop()),
+		// FIX: Add the missing *zap.Logger argument to the NewBaseAnalyzer call.
+		BaseAnalyzer: *core.NewBaseAnalyzer("JWT Adapter", "Scans for common JWT vulnerabilities.", core.TypeStatic, zap.NewNop()),
 	}
 }
 
+// Analyze is the main execution method for the adapter.
 func (a *JWTAdapter) Analyze(ctx context.Context, analysisCtx *core.AnalysisContext) error {
-	analysisCtx.Logger.Info("Starting JWT static analysis via adapter.")
-
-	// This is a passive analyzer, so it doesn't need task-specific parameters.
-	// It will scan the HAR file provided in the AnalysisContext.
-
-	// FIX: Instantiate the underlying analyzer correctly. It needs a logger and the config for brute-forcing.
-	bruteForceEnabled := analysisCtx.Global.Config.Scanners.Static.JWT.BruteForceEnabled
+	// The adapter's primary role is to correctly configure and
+	// delegate the analysis task to the underlying analyzer.
+	
+	// extract the necessary configuration from the global context.
+	bruteForceEnabled := false
+	if analysisCtx.Global != nil &&
+		analysisCtx.Global.Config != nil {
+		bruteForceEnabled = analysisCtx.Global.Config.Scanners.Static.JWT.BruteForceEnabled
+	}
+	
+	// instantiate the actual analyzer with the correct logger and configuration.
 	analyzer := jwt.NewJWTAnalyzer(analysisCtx.Logger, bruteForceEnabled)
 
-	// FIX: The adapter's role is to delegate the analysis. The analyzer itself
-	// will add any findings to the analysisCtx.
+	// delegate the analysis call. the analyzer will add any findings
+	// directly to the provided analysis context.
 	return analyzer.Analyze(ctx, analysisCtx)
 }

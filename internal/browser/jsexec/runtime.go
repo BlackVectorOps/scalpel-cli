@@ -1,4 +1,3 @@
-// browser/jsexec/runtime.go
 // internal/browser/jsexec/runtime.go
 package jsexec
 
@@ -7,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/dop251/goja"
 	"github.com/dop251/goja_nodejs/eventloop"
@@ -19,9 +19,6 @@ import (
 // Runtime provides a persistent environment for executing JavaScript using Goja,
 // integrated with the browser's DOM via the DOMBridge.
 type Runtime struct {
-	// REFACTOR: The goja.Runtime (vm) has been removed from the struct.
-	// A new, clean VM is now created for every ExecuteScript call to guarantee
-	// execution isolation and prevent state poisoning from interrupted scripts.
 	bridge    *jsbind.DOMBridge
 	logger    *zap.Logger
 	eventLoop *eventloop.EventLoop
@@ -37,10 +34,8 @@ func NewRuntime(logger *zap.Logger, eventLoop *eventloop.EventLoop, browserEnv j
 	log := logger.Named("jsec")
 
 	// The DOM bridge is created once and holds the persistent state (DOM, storage).
-	// FIX: Removed the eventLoop argument from this function call to match the new signature.
 	bridge := jsbind.NewDOMBridge(log, browserEnv, persona)
 
-	// The VM is no longer created here.
 	return &Runtime{
 		bridge:    bridge,
 		logger:    log,
@@ -56,20 +51,15 @@ func (r *Runtime) GetBridge() *jsbind.DOMBridge {
 // ExecuteScript runs a JavaScript snippet within a clean, ephemeral VM environment.
 // It handles context based cancellation, timeouts, and asynchronous Promises.
 func (r *Runtime) ExecuteScript(ctx context.Context, script string, args []interface{}) (interface{}, error) {
-	// This lock protects access to the shared DOM bridge.
 	r.execMutex.Lock()
 	defer r.execMutex.Unlock()
 
-	// -- VM Isolation --
-	// Create a new Goja VM for this specific execution. This is the core of the
-	// change to prevent state poisoning. It ensures that no variables, prototypes,
-	// or other state from a previous (potentially failed or interrupted) script
-	// can affect this one.
 	vm := goja.New()
 
-	// Bind the persistent DOM bridge to the new, ephemeral VM.
-	// This injects the current state of the DOM, window, setTimeout, etc.,
-	// into our clean JavaScript environment.
+	// Call our new function to inject the timers.
+	r.injectTimers(vm)
+
+	// Bind the rest of the browser environment.
 	r.bridge.BindToRuntime(vm, "about:blank")
 
 	stopInterruptListener := make(chan struct{})
@@ -78,11 +68,8 @@ func (r *Runtime) ExecuteScript(ctx context.Context, script string, args []inter
 	go func() {
 		select {
 		case <-ctx.Done():
-			// The context was canceled or timed out.
-			// Interrupt the Goja VM with the context's error.
 			vm.Interrupt(ctx.Err())
 		case <-stopInterruptListener:
-			// The script finished normally, so we can stop listening.
 			return
 		}
 	}()
@@ -100,7 +87,6 @@ func (r *Runtime) ExecuteScript(ctx context.Context, script string, args []inter
 	}
 
 	if err != nil {
-		// If the script was interrupted, wrap the context's error for clarity.
 		if _, ok := err.(*goja.InterruptedError); ok {
 			return nil, fmt.Errorf("javascript execution interrupted by context: %w", ctx.Err())
 		}
@@ -115,6 +101,77 @@ func (r *Runtime) ExecuteScript(ctx context.Context, script string, args []inter
 	}
 
 	return result.Export(), nil
+}
+
+// injectTimers manually creates and sets timer functions (setTimeout, etc.)
+// on a given VM instance, connecting them to the runtime's event loop.
+func (r *Runtime) injectTimers(vm *goja.Runtime) {
+	// setTimeout(callback, delay)
+	vm.Set("setTimeout", func(call goja.FunctionCall) goja.Value {
+		if len(call.Arguments) < 1 {
+			return goja.Undefined()
+		}
+		callback, ok := goja.AssertFunction(call.Argument(0))
+		if !ok {
+			// Browsers do nothing if the callback isn't a function.
+			return goja.Undefined()
+		}
+
+		delay := call.Argument(1).ToInteger()
+
+		// The callback must accept a *goja.Runtime argument.
+		timer := r.eventLoop.SetTimeout(func(_ *goja.Runtime) {
+			// This func() is what the event loop executes after the delay.
+			// It calls the original JavaScript callback function.
+			callback(goja.Undefined()) // 'this' will be the global object
+		}, time.Duration(delay)*time.Millisecond)
+
+		// Return the timer object so JavaScript can pass it to clearTimeout.
+		return vm.ToValue(timer)
+	})
+
+	// clearTimeout(timer)
+	vm.Set("clearTimeout", func(call goja.FunctionCall) goja.Value {
+		if len(call.Arguments) < 1 {
+			return goja.Undefined()
+		}
+		if timer, ok := call.Argument(0).Export().(*eventloop.Timer); ok {
+			r.eventLoop.ClearTimeout(timer)
+		}
+		return goja.Undefined()
+	})
+
+	// setInterval(callback, delay)
+	vm.Set("setInterval", func(call goja.FunctionCall) goja.Value {
+		if len(call.Arguments) < 1 {
+			return goja.Undefined()
+		}
+		callback, ok := goja.AssertFunction(call.Argument(0))
+		if !ok {
+			return goja.Undefined()
+		}
+
+		delay := call.Argument(1).ToInteger()
+
+		// The callback must also accept a *goja.Runtime argument.
+		timer := r.eventLoop.SetInterval(func(_ *goja.Runtime) {
+			callback(goja.Undefined())
+		}, time.Duration(delay)*time.Millisecond)
+
+		return vm.ToValue(timer)
+	})
+
+	// clearInterval(timer)
+	vm.Set("clearInterval", func(call goja.FunctionCall) goja.Value {
+		if len(call.Arguments) < 1 {
+			return goja.Undefined()
+		}
+		// setInterval returns an *Interval, not a *Timer.
+		if timer, ok := call.Argument(0).Export().(*eventloop.Interval); ok {
+			r.eventLoop.ClearInterval(timer)
+		}
+		return goja.Undefined()
+	})
 }
 
 // isFunctionWrapper uses heuristics to detect common function wrappers.

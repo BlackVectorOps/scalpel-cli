@@ -114,14 +114,14 @@ a {
 type Engine struct {
 	userAgentSheets []parser.StyleSheet
 	authorSheets    []parser.StyleSheet
-	shadowEngine    ShadowDOMProcessor // MODIFIED: Changed from concrete type to interface.
+	shadowEngine    ShadowDOMProcessor
 	viewportWidth   float64
 	viewportHeight  float64
 }
 
 // NewEngine creates a new styling engine. It requires a ShadowDOMProcessor
 // to handle shadow DOM instantiation and slotting.
-func NewEngine(shadowEngine ShadowDOMProcessor) *Engine { // MODIFIED: Signature changed.
+func NewEngine(shadowEngine ShadowDOMProcessor) *Engine {
 	// Parse the default User Agent stylesheet.
 	p := parser.NewParser(DefaultUserAgentCSS)
 	uaSheet := p.Parse()
@@ -145,15 +145,12 @@ func (se *Engine) SetViewport(width, height float64) {
 
 // -- Canonical Data Structures --
 
-// StyledNode represents a DOM node combined with its computed styles. It is the
-// bridge between the parser's output and the layout engine's input.
+// StyledNode represents a DOM node combined with its computed styles.
 type StyledNode struct {
 	Node           *html.Node
 	ComputedStyles map[parser.Property]parser.Value
 	Children       []*StyledNode
-	// ShadowRoot holds the encapsulated style tree for this node, if it's a shadow host.
-	ShadowRoot *StyledNode
-	// SlotAssignment holds nodes from the light DOM assigned to this slot.
+	ShadowRoot     *StyledNode
 	SlotAssignment []*StyledNode
 }
 
@@ -162,23 +159,20 @@ type Color struct {
 	R, G, B, A uint8
 }
 
-// Predefined colors (simplified list).
 var cssColors = map[string]Color{
 	"black":       {0, 0, 0, 255},
 	"white":       {255, 255, 255, 255},
 	"red":         {255, 0, 0, 255},
-	"green":       {0, 128, 0, 255}, // CSS 'green' is darker than (0, 255, 0).
+	"green":       {0, 128, 0, 255},
 	"blue":        {0, 0, 255, 255},
 	"transparent": {0, 0, 0, 0},
 }
 
-// GridTrackDefinition represents a single track definition, like "1fr" or "100px".
 type GridTrackDefinition struct {
 	Size      string
 	LineNames []string
 }
 
-// GridLine represents a parsed placement value (e.g., from grid-column-start).
 type GridLine struct {
 	IsAuto      bool
 	IsNamedSpan bool
@@ -189,17 +183,14 @@ type GridLine struct {
 
 // -- Style Tree Construction (The Cascade and Inheritance) --
 
-// BuildTree constructs the StyledNode tree, integrating Shadow DOM processing.
 func (se *Engine) BuildTree(node *html.Node, parent *StyledNode) *StyledNode {
 	return se.buildTreeRecursive(node, parent, se.authorSheets)
 }
 
-// buildTreeRecursive is the internal implementation that handles scoped stylesheets for Shadow DOM.
 func (se *Engine) buildTreeRecursive(node *html.Node, parent *StyledNode, scopedSheets []parser.StyleSheet) *StyledNode {
 	if node.Type == html.CommentNode {
 		return nil
 	}
-	// Skip <head> element content.
 	if parent != nil && parent.Node != nil && parent.Node.Type == html.ElementNode && strings.ToLower(parent.Node.Data) == "html" {
 		if node.Type == html.ElementNode && strings.ToLower(node.Data) == "head" {
 			return nil
@@ -207,8 +198,6 @@ func (se *Engine) buildTreeRecursive(node *html.Node, parent *StyledNode, scoped
 	}
 
 	computedStyles := make(map[parser.Property]parser.Value)
-
-	// Calculate styles based on the cascade using the provided scoped stylesheets.
 	if node.Type == html.ElementNode {
 		computedStyles = se.CalculateStyles(node, scopedSheets)
 	}
@@ -218,28 +207,21 @@ func (se *Engine) buildTreeRecursive(node *html.Node, parent *StyledNode, scoped
 		ComputedStyles: computedStyles,
 	}
 
-	// Handle inheritance from parent styles.
 	if parent != nil {
 		se.inheritStyles(styledNode, parent)
 	} else {
 		se.applyRootDefaults(styledNode)
 	}
 
-	// Resolve relative values like 'em' or '%' into absolute pixel values.
 	se.resolveRelativeValues(styledNode, parent)
 
-	// Check if this node is a shadow host and process its shadow root.
 	if se.shadowEngine.DetectShadowHost(node) {
-		// Instantiate the shadow root and get its encapsulated stylesheets.
 		shadowRootNode, shadowScopedSheets := se.shadowEngine.InstantiateShadowRoot(node)
 		if shadowRootNode != nil {
-			// Build the shadow tree recursively with its own scoped styles.
-			// The host (styledNode) is passed as the parent for inheritance across the boundary.
 			styledNode.ShadowRoot = se.buildTreeRecursive(shadowRootNode, styledNode, shadowScopedSheets)
 		}
 	}
 
-	// Recursively style light DOM children.
 	for c := node.FirstChild; c != nil; c = c.NextSibling {
 		childStyled := se.buildTreeRecursive(c, styledNode, scopedSheets)
 		if childStyled != nil {
@@ -250,21 +232,18 @@ func (se *Engine) buildTreeRecursive(node *html.Node, parent *StyledNode, scoped
 	return styledNode
 }
 
-// applies default styles to the root element.
 func (se *Engine) applyRootDefaults(sn *StyledNode) {
 	if _, exists := sn.ComputedStyles["font-size"]; !exists {
 		sn.ComputedStyles["font-size"] = parser.Value(fmt.Sprintf("%fpx", BaseFontSize))
 	}
 }
 
-// inheritStyles applies CSS inheritance rules from a parent node to a child node.
 func (se *Engine) inheritStyles(child, parent *StyledNode) {
 	inheritableProperties := map[parser.Property]bool{
 		"color": true, "font-family": true, "font-size": true, "font-weight": true,
 		"line-height": true, "text-align": true, "visibility": true, "cursor": true,
 	}
 
-	// Handle explicit 'inherit' keyword.
 	for prop, val := range child.ComputedStyles {
 		if val == "inherit" {
 			if parentVal, parentHas := parent.ComputedStyles[prop]; parentHas {
@@ -273,7 +252,6 @@ func (se *Engine) inheritStyles(child, parent *StyledNode) {
 		}
 	}
 
-	// Handle standard inheritance for properties that do so by default.
 	for prop := range inheritableProperties {
 		if _, exists := child.ComputedStyles[prop]; !exists {
 			if val, parentHas := parent.ComputedStyles[prop]; parentHas {
@@ -283,9 +261,7 @@ func (se *Engine) inheritStyles(child, parent *StyledNode) {
 	}
 }
 
-// resolveRelativeValues computes values that depend on other computed values (e.g., em units).
 func (se *Engine) resolveRelativeValues(sn *StyledNode, parent *StyledNode) {
-	// Resolve font-size first, as other units may depend on it.
 	parentFontSize := BaseFontSize
 	if parent != nil {
 		parentFontSize = ParseAbsoluteLength(parent.Lookup("font-size", fmt.Sprintf("%fpx", BaseFontSize)))
@@ -298,30 +274,25 @@ func (se *Engine) resolveRelativeValues(sn *StyledNode, parent *StyledNode) {
 
 	currentFontSize := ParseAbsoluteLength(sn.Lookup("font-size", fmt.Sprintf("%fpx", BaseFontSize)))
 
-	// Resolve line-height.
 	if lineHeightStr, ok := sn.ComputedStyles["line-height"]; ok {
 		resolvedLineHeight := se.resolveLineHeight(string(lineHeightStr), currentFontSize)
 		sn.ComputedStyles["line-height"] = parser.Value(fmt.Sprintf("%fpx", resolvedLineHeight))
 	}
 }
 
-// resolveLineHeight handles unitless multipliers and other length values for line-height.
 func (se *Engine) resolveLineHeight(value string, fontSize float64) float64 {
 	value = strings.TrimSpace(value)
 	if value == "normal" {
 		return fontSize * DefaultLineHeight
 	}
 
-	// Check for unitless number (multiplier).
 	if val, err := parseFloat(value); err == nil && !strings.ContainsAny(value, "px%emremvwvhvminvmax") {
 		return fontSize * val
 	}
 
-	// Treat as a standard length.
 	return ParseLengthWithUnits(value, fontSize, BaseFontSize, 0, se.viewportWidth, se.viewportHeight)
 }
 
-// StyleOrigin and DeclarationWithContext are used for the CSS cascade algorithm.
 type StyleOrigin int
 
 const (
@@ -337,7 +308,6 @@ type DeclarationWithContext struct {
 	Order       int
 }
 
-// CalculateStyles determines the final computed styles for a node using the cascade algorithm.
 func (se *Engine) CalculateStyles(node *html.Node, scopedSheets []parser.StyleSheet) map[parser.Property]parser.Value {
 	var declarations []DeclarationWithContext
 	order := 0
@@ -364,19 +334,16 @@ func (se *Engine) CalculateStyles(node *html.Node, scopedSheets []parser.StyleSh
 		}
 	}
 
-	// 1. User Agent styles
 	processSheets(se.userAgentSheets, OriginUserAgent)
-	// 2. Author styles (scoped to the current DOM tree)
 	processSheets(scopedSheets, OriginAuthor)
 
-	// 3. Inline styles
 	for _, attr := range node.Attr {
 		if attr.Key == "style" {
 			inlineDecls := parseInlineStyles(attr.Val)
 			for _, decl := range inlineDecls {
 				declarations = append(declarations, DeclarationWithContext{
 					Declaration: decl,
-					Specificity: struct{ A, B, C int }{1, 0, 0}, // Inline styles have high specificity
+					Specificity: struct{ A, B, C int }{1, 0, 0},
 					Origin:      OriginInline,
 					Order:       order,
 				})
@@ -385,7 +352,6 @@ func (se *Engine) CalculateStyles(node *html.Node, scopedSheets []parser.StyleSh
 		}
 	}
 
-	// Sort declarations based on cascade priority (importance, origin, specificity, order).
 	sort.Slice(declarations, func(i, j int) bool {
 		d1, d2 := declarations[i], declarations[j]
 		p1, p2 := calculateCascadePriority(d1), calculateCascadePriority(d2)
@@ -405,7 +371,6 @@ func (se *Engine) CalculateStyles(node *html.Node, scopedSheets []parser.StyleSh
 		return d1.Order < d2.Order
 	})
 
-	// Apply the winning declarations.
 	styles := make(map[parser.Property]parser.Value)
 	for _, declCtx := range declarations {
 		styles[declCtx.Declaration.Property] = declCtx.Declaration.Value
@@ -555,7 +520,6 @@ func parseInlineStyles(styleAttr string) []parser.Declaration {
 	return decls
 }
 
-// -- Advanced Selector Matching (Combinators) --
 func (se *Engine) matches(node *html.Node, group parser.SelectorGroup) (*parser.ComplexSelector, bool) {
 	if node.Type != html.ElementNode {
 		return nil, false
@@ -663,7 +627,6 @@ func (se *Engine) matchesSimple(node *html.Node, selector parser.SimpleSelector)
 		}
 	}
 
-	// Attributes (e.g., [type="text"])
 	if len(selector.Attributes) > 0 {
 		for _, attrSel := range selector.Attributes {
 			if !matchesAttribute(node, attrSel) {
@@ -675,12 +638,10 @@ func (se *Engine) matchesSimple(node *html.Node, selector parser.SimpleSelector)
 	return true
 }
 
-// matchesAttribute checks if a node matches a specific attribute selector.
 func matchesAttribute(node *html.Node, sel parser.AttributeSelector) bool {
 	var actualValue string
 	found := false
 	for _, attr := range node.Attr {
-		// Attribute names are case-insensitive in HTML.
 		if strings.EqualFold(attr.Key, sel.Name) {
 			actualValue = attr.Val
 			found = true
@@ -689,12 +650,11 @@ func matchesAttribute(node *html.Node, sel parser.AttributeSelector) bool {
 	}
 
 	switch sel.Operator {
-	case "": // Presence: [attr]
+	case "":
 		return found
-	case "=": // Exact match: [attr="value"]
-		// Attribute values in selectors are generally case-sensitive unless specified otherwise.
+	case "=":
 		return found && actualValue == sel.Value
-	case "~=": // Contains word: [attr~="value"]
+	case "~=":
 		if !found {
 			return false
 		}
@@ -705,23 +665,19 @@ func matchesAttribute(node *html.Node, sel parser.AttributeSelector) bool {
 			}
 		}
 		return false
-	case "|=": // Prefix hyphen: [attr|="value"]
+	case "|=":
 		return found && (actualValue == sel.Value || strings.HasPrefix(actualValue, sel.Value+"-"))
-	case "^=": // Starts with: [attr^="value"]
+	case "^=":
 		return found && strings.HasPrefix(actualValue, sel.Value)
-	case "$=": // Ends with: [attr$="value"]
+	case "$=":
 		return found && strings.HasSuffix(actualValue, sel.Value)
-	case "*=": // Contains substring: [attr*="value"]
+	case "*=":
 		return found && strings.Contains(actualValue, sel.Value)
 	default:
-		// Unknown operator
 		return false
 	}
 }
 
-// -- Value Lookup and Property Parsers --
-
-// Lookup retrieves a style, falling back if not present.
 func (sn *StyledNode) Lookup(property, fallback string) string {
 	if val, ok := sn.ComputedStyles[parser.Property(property)]; ok {
 		return string(val)
@@ -729,7 +685,6 @@ func (sn *StyledNode) Lookup(property, fallback string) string {
 	return fallback
 }
 
-// ParseColor parses a CSS color string.
 func ParseColor(value string) (Color, bool) {
 	value = strings.TrimSpace(strings.ToLower(value))
 
@@ -798,24 +753,15 @@ func parseRGBColor(value string) (Color, bool) {
 	}
 
 	parts := strings.FieldsFunc(matches[1], func(r rune) bool {
-		return r == ',' || r == ' '
+		return r == ',' || r == ' ' || r == '/'
 	})
 
 	var values []string
-	for i := 0; i < len(parts); i++ {
-		p := parts[i]
-		if p == "" {
-			continue
-		}
-		if p == "/" {
-			if i+1 < len(parts) && parts[i+1] != "" {
-				values = append(values, parts[i+1])
-				i++
+	for _, p := range parts {
+		if p != "" {
+			if len(values) < 4 {
+				values = append(values, p)
 			}
-			continue
-		}
-		if len(values) < 3 {
-			values = append(values, p)
 		}
 	}
 
@@ -843,7 +789,7 @@ func parseColorComponent(value string, isAlpha bool) uint8 {
 		if err != nil {
 			return 0
 		}
-		return uint8(clamp(percent/100.0*255.0, 0, 255))
+		return uint8(clamp(percent/100.0*255.0+0.5, 0, 255))
 	}
 
 	if isAlpha {
@@ -851,7 +797,7 @@ func parseColorComponent(value string, isAlpha bool) uint8 {
 		if err != nil {
 			return 255
 		}
-		return uint8(clamp(val*255.0, 0, 255))
+		return uint8(clamp(val*255.0+0.5, 0, 255))
 	}
 
 	val, err := strconv.Atoi(value)
@@ -874,7 +820,6 @@ func clamp(v, min, max float64) float64 {
 	return v
 }
 
-// Definitions for various CSS properties.
 type DisplayType int
 
 const (
@@ -889,7 +834,6 @@ const (
 	DisplayNone
 )
 
-// Display determines the layout mode.
 func (sn *StyledNode) Display() DisplayType {
 	if sn.Node.Type == html.TextNode {
 		return DisplayInline
@@ -983,7 +927,6 @@ func (sn *StyledNode) Clear() ClearType {
 	}
 }
 
-// BoxSizingType determines how width/height are calculated.
 type BoxSizingType int
 
 const (
@@ -1039,7 +982,6 @@ func (sn *StyledNode) GetFlexWrap() FlexWrap {
 	}
 }
 
-// JustifyContent defines main-axis alignment in Flexbox/Grid.
 type JustifyContent int
 
 const (
@@ -1068,7 +1010,6 @@ func (sn *StyledNode) GetJustifyContent() JustifyContent {
 	}
 }
 
-// AlignItems defines cross-axis alignment (default) in Flexbox/Grid.
 type AlignItems int
 
 const (
@@ -1094,7 +1035,6 @@ func (sn *StyledNode) GetAlignItems() AlignItems {
 	}
 }
 
-// AlignSelf defines cross-axis alignment (override) in Flexbox/Grid.
 type AlignSelf int
 
 const (
@@ -1123,7 +1063,6 @@ func (sn *StyledNode) GetAlignSelf() AlignSelf {
 	}
 }
 
-// AlignContent defines cross-axis alignment for multi-line flex containers.
 type AlignContent int
 
 const (
@@ -1155,7 +1094,6 @@ func (sn *StyledNode) GetAlignContent() AlignContent {
 	}
 }
 
-// IsVisible checks if the element is visually rendered.
 func (sn *StyledNode) IsVisible() bool {
 	if sn.Display() == DisplayNone {
 		return false
@@ -1171,15 +1109,12 @@ func (sn *StyledNode) IsVisible() bool {
 	return true
 }
 
-// A regex to find and parse repeat() functions.
 var repeatRegex = regexp.MustCompile(`repeat\(\s*(\d+)\s*,\s*([^)]+)\)`)
 
-// isWhitespace checks if a character is CSS whitespace.
 func isWhitespace(r byte) bool {
 	return r == ' ' || r == '\t' || r == '\n'
 }
 
-// tokenizeGridTracks splits a grid track definition string into its core components.
 func tokenizeGridTracks(value string) []string {
 	var tokens []string
 	for i := 0; i < len(value); {
@@ -1224,7 +1159,6 @@ func tokenizeGridTracks(value string) []string {
 	return tokens
 }
 
-// GetGridTemplateTracks parses properties like `grid-template-columns`.
 func (sn *StyledNode) GetGridTemplateTracks(property string) ([]GridTrackDefinition, []string) {
 	value := sn.Lookup(property, "none")
 	if value == "none" || value == "" {
@@ -1264,7 +1198,6 @@ func (sn *StyledNode) GetGridTemplateTracks(property string) ([]GridTrackDefinit
 	return definitions, currentNames
 }
 
-// ParseGridLine parses a single grid placement value (like for grid-column-start).
 func (sn *StyledNode) ParseGridLine(property, fallback string) GridLine {
 	value := strings.TrimSpace(sn.Lookup(property, fallback))
 
@@ -1305,9 +1238,6 @@ func getDefaultDisplay(node *html.Node) DisplayType {
 	}
 }
 
-// -- Public Helpers --
-
-// GetFontSize is a public helper to get the font size from a styled node.
 func GetFontSize(sn *StyledNode) float64 {
 	if sn == nil {
 		return BaseFontSize
@@ -1315,7 +1245,6 @@ func GetFontSize(sn *StyledNode) float64 {
 	return ParseAbsoluteLength(sn.Lookup("font-size", fmt.Sprintf("%fpx", BaseFontSize)))
 }
 
-// ParseLengthWithUnits is a public helper to parse CSS length values.
 func ParseLengthWithUnits(value string, parentFontSize, rootFontSize, referenceDimension, viewportWidth, viewportHeight float64) float64 {
 	value = strings.TrimSpace(value)
 	if value == "" || value == "auto" || value == "normal" {
@@ -1368,33 +1297,21 @@ func ParseLengthWithUnits(value string, parentFontSize, rootFontSize, referenceD
 	return 0.0
 }
 
-// -- NEW: Placeholder function for GetFontAscent --
-// Provides a reasonable estimate for font ascent, crucial for baseline alignment.
-// A real implementation would require a font rendering library.
 func GetFontAscent(sn *StyledNode) float64 {
 	fontSize := GetFontSize(sn)
-	// Common heuristic: ascent is about 80% of the font size.
 	return fontSize * 0.8
 }
 
-// -- NEW: Placeholder function for MeasureText --
-// Provides a rough estimate for the width of a text node.
-// A real implementation would use a font library to measure the glyphs.
 func MeasureText(sn *StyledNode) (width, height float64) {
 	if sn == nil || sn.Node == nil || sn.Node.Type != html.TextNode {
 		return 0, 0
 	}
 	text := sn.Node.Data
 	fontSize := GetFontSize(sn)
-	// Super simple heuristic: width is number of chars * half the font size.
-	// This is wildly inaccurate but prevents the layout from collapsing to zero.
 	estimatedWidth := float64(len(text)) * fontSize * 0.6
 	return estimatedWidth, fontSize
 }
 
-// -- Internal Helpers --
-
-// MODIFIED: Renamed to ParseAbsoluteLength to make it public.
 func ParseAbsoluteLength(value string) float64 {
 	return ParseLengthWithUnits(value, 0, 0, 0, 0, 0)
 }

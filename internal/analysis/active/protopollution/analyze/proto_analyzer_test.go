@@ -7,18 +7,16 @@ import (
 	"encoding/json"
 	"errors"
 	"regexp"
-	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap/zaptest"
 
-	"github.comcom/xkilldash9x/scalpel-cli/api/schemas"
+	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
 )
 
@@ -216,9 +214,9 @@ func TestAnalyze_FindingFound(t *testing.T) {
 	findingReported.Add(1)
 
 	// --- Mocks ---
-	// REFACTOR: NewAnalysisContext's findingsChan argument is now nil.
-	mockBrowserManager.On("NewAnalysisContext", ctx, mock.Anything, schemas.Persona{}, "", "", nil).Return(mockSession, nil).Once()
+	mockBrowserManager.On("NewAnalysisContext", ctx, mock.Anything, schemas.Persona{}, "", "", (chan<- schemas.Finding)(nil)).Return(mockSession, nil).Once()
 
+	// The typo was here ("PollutionProofEvent" was misspelled)
 	mockSession.On("ExposeFunction", ctx, jsCallbackName, mock.AnythingOfType("func(proto.PollutionProofEvent)")).Return(nil).Once()
 
 	mockSession.On("InjectScriptPersistently", ctx, mock.AnythingOfType("string")).Return(nil).Once().Run(func(args mock.Arguments) {
@@ -229,7 +227,6 @@ func TestAnalyze_FindingFound(t *testing.T) {
 		capturedCanary = matches[1]
 	})
 
-	// REFACTOR: The test now asserts that AddFinding is called with the correct data.
 	mockSession.On("AddFinding", ctx, mock.AnythingOfType("schemas.Finding")).Return(nil).Once().Run(func(args mock.Arguments) {
 		reportedFinding = args.Get(1).(schemas.Finding)
 		findingReported.Done()
@@ -248,16 +245,15 @@ func TestAnalyze_FindingFound(t *testing.T) {
 			})
 		}()
 	})
+
 	mockSession.On("Close", mock.Anything).Return(nil).Once()
 
 	// --- Execute ---
-	// REFACTOR: Analyze now only returns an error.
 	err := analyzer.Analyze(ctx, "task-1", testURL)
 
 	// --- Assertions ---
 	require.NoError(t, err)
 
-	// Wait for the finding to be reported asynchronously.
 	waitChan := make(chan struct{})
 	go func() {
 		findingReported.Wait()
@@ -271,7 +267,6 @@ func TestAnalyze_FindingFound(t *testing.T) {
 		t.Fatal("Test timed out waiting for finding to be reported")
 	}
 
-	// Now assert properties on the captured finding.
 	assert.Equal(t, "Client-Side Prototype Pollution", reportedFinding.Vulnerability.Name)
 	assert.Equal(t, schemas.SeverityHigh, reportedFinding.Severity)
 	assert.Equal(t, "task-1", reportedFinding.TaskID)
@@ -297,8 +292,8 @@ func TestAnalyze_NoFinding(t *testing.T) {
 	analyzer := NewAnalyzer(logger, mockBrowserManager, cfg)
 	ctx := context.Background()
 
-	mockBrowserManager.On("NewAnalysisContext", ctx, mock.Anything, schemas.Persona{}, "", "", nil).Return(mockSession, nil)
-	mockSession.On("ExposeFunction", ctx, jsCallbackName, mock.AnythingOfType("func(proto.PollutionProofEvent)")).Return(nil)
+	mockBrowserManager.On("NewAnalysisContext", ctx, mock.Anything, schemas.Persona{}, "", "", (chan<- schemas.Finding)(nil)).Return(mockSession, nil)
+	mockSession.On("ExposeFunction", ctx, jsCallbackName, mock.AnythingOfType("func(proto.PollutionProofEvent)")).Return(nil).Once()
 	mockSession.On("InjectScriptPersistently", ctx, mock.AnythingOfType("string")).Return(nil)
 	mockSession.On("Navigate", ctx, "http://clean.example.com").Return(nil)
 	mockSession.On("Close", mock.Anything).Return(nil)
@@ -319,7 +314,7 @@ func TestAnalyze_BrowserError(t *testing.T) {
 	ctx := context.Background()
 	expectedErr := errors.New("failed to launch browser")
 
-	mockBrowserManager.On("NewAnalysisContext", ctx, mock.Anything, schemas.Persona{}, "", "", nil).Return(nil, expectedErr)
+	mockBrowserManager.On("NewAnalysisContext", ctx, mock.Anything, schemas.Persona{}, "", "", (chan<- schemas.Finding)(nil)).Return(nil, expectedErr)
 
 	err := analyzer.Analyze(ctx, "task-fail", "http://example.com")
 
@@ -338,7 +333,7 @@ func TestAnalyze_ContextCancellation(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	mockBrowserManager.On("NewAnalysisContext", mock.Anything, mock.Anything, schemas.Persona{}, "", "", nil).Return(mockSession, nil)
+	mockBrowserManager.On("NewAnalysisContext", mock.Anything, mock.Anything, schemas.Persona{}, "", "", (chan<- schemas.Finding)(nil)).Return(mockSession, nil)
 	mockSession.On("ExposeFunction", mock.Anything, jsCallbackName, mock.AnythingOfType("func(proto.PollutionProofEvent)")).Return(nil)
 	mockSession.On("InjectScriptPersistently", mock.Anything, mock.AnythingOfType("string")).Return(nil)
 	mockSession.On("Navigate", mock.Anything, "http://slow.example.com").Return(nil).Run(func(args mock.Arguments) {
@@ -371,7 +366,7 @@ func TestAnalyze_InstrumentationError(t *testing.T) {
 	ctx := context.Background()
 	expectedErr := errors.New("browser disconnected")
 
-	mockBrowserManager.On("NewAnalysisContext", ctx, mock.Anything, schemas.Persona{}, "", "", nil).Return(mockSession, nil)
+	mockBrowserManager.On("NewAnalysisContext", ctx, mock.Anything, schemas.Persona{}, "", "", (chan<- schemas.Finding)(nil)).Return(mockSession, nil)
 	mockSession.On("ExposeFunction", ctx, jsCallbackName, mock.Anything).Return(expectedErr)
 	mockSession.On("Close", ctx).Return(nil)
 
@@ -392,7 +387,7 @@ func TestAnalyze_MismatchedCanary(t *testing.T) {
 	analyzer := NewAnalyzer(logger, mockBrowserManager, cfg)
 	ctx := context.Background()
 
-	mockBrowserManager.On("NewAnalysisContext", ctx, mock.Anything, schemas.Persona{}, "", "", nil).Return(mockSession, nil)
+	mockBrowserManager.On("NewAnalysisContext", ctx, mock.Anything, schemas.Persona{}, "", "", (chan<- schemas.Finding)(nil)).Return(mockSession, nil)
 	mockSession.On("ExposeFunction", ctx, jsCallbackName, mock.AnythingOfType("func(proto.PollutionProofEvent)")).Return(nil)
 	mockSession.On("InjectScriptPersistently", ctx, mock.AnythingOfType("string")).Return(nil)
 	mockSession.On("Navigate", ctx, "http://example.com").Return(nil).Run(func(args mock.Arguments) {
