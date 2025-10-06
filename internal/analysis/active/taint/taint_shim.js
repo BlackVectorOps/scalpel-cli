@@ -8,6 +8,7 @@
 
     // Configuration injected by the Go backend via text/template
     const CONFIG = {
+        // @ts-ignore - This is a Go template placeholder that will be replaced with a valid JSON object.
         Sinks: {{.SinksJSON}},
         SinkCallbackName: "{{.SinkCallbackName}}",
         ProofCallbackName: "{{.ProofCallbackName}}",

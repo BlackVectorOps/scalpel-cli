@@ -4,6 +4,7 @@ package adapters_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
+	"github.com/xkilldash9x/scalpel-cli/internal/config"
 	"github.com/xkilldash9x/scalpel-cli/internal/mocks"
 	"github.com/xkilldash9x/scalpel-cli/internal/worker/adapters"
 )
@@ -30,12 +32,19 @@ func setupAgentContext(t *testing.T, params interface{}, bm schemas.BrowserManag
 		Global: &core.GlobalContext{
 			BrowserManager: bm,
 			FindingsChan:   make(chan schemas.Finding, 1),
+			Logger:         zap.NewNop(),
+			Config: &config.Config{ // <-- Add this config block
+				Agent: config.AgentConfig{
+					KnowledgeGraph: config.KnowledgeGraphConfig{
+						Type: "in-memory", // Use in-memory for testing
+					},
+				},
+			},
 		},
 		Findings:  []schemas.Finding{},
 		KGUpdates: &schemas.KnowledgeGraphUpdate{},
 	}
 }
-
 func TestAgentAdapter_Analyze_ParameterValidation(t *testing.T) {
 	adapter := adapters.NewAgentAdapter()
 	mockBM := new(mocks.MockBrowserManager)
@@ -60,7 +69,7 @@ func TestAgentAdapter_Analyze_ParameterValidation(t *testing.T) {
 			params:        schemas.AgentMissionParams{MissionBrief: ""},
 			expectedError: "validation error: agent mission task is missing required 'MissionBrief'",
 		},
-        {
+		{
 			name:          "Missing MissionBrief (Pointer)",
 			params:        &schemas.AgentMissionParams{MissionBrief: ""},
 			expectedError: "validation error: agent mission task is missing required 'MissionBrief'",
@@ -86,9 +95,9 @@ func TestAgentAdapter_Analyze_BrowserManagerFailure(t *testing.T) {
 	expectedError := errors.New("browser crashed")
 
 	// Setup mock expectation: BrowserManager fails to create a context.
-    // The adapter passes the Task struct as 'cfg', and empty strings for the template/config (mapped from initialURL/initialData).
+	// The adapter passes the Task struct as 'cfg', and empty strings for the template/config (mapped from initialURL/initialData).
 	mockBM.On("NewAnalysisContext",
-		mock.Anything, // context
+		mock.Anything,    // context
 		analysisCtx.Task, // cfg
 		schemas.DefaultPersona,
 		"", // taintTemplate (initialURL)
@@ -108,30 +117,31 @@ func TestAgentAdapter_Analyze_BrowserManagerFailure(t *testing.T) {
 func TestAgentAdapter_Analyze_EnsureSessionClosed(t *testing.T) {
 	adapter := adapters.NewAgentAdapter()
 	mockBM := new(mocks.MockBrowserManager)
-    mockSession := new(mocks.MockSessionContext)
+	mockSession := new(mocks.MockSessionContext)
 	params := schemas.AgentMissionParams{MissionBrief: "Test mission."}
 	analysisCtx := setupAgentContext(t, params, mockBM)
 
-    // Setup mock expectation: Session creation succeeds.
+	// Setup mock expectation: Session creation succeeds.
 	mockBM.On("NewAnalysisContext", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).
 		Return(mockSession, nil)
 
-    // Setup expectation that Close MUST be called.
-    mockSession.On("Close", mock.Anything).Return(nil)
+	// Setup expectation that Close MUST be called.
+	mockSession.On("Close", mock.Anything).Return(nil)
 
 	// Execute Analyze. We expect this to fail because agent.New() dependencies are not met in the test,
-    // but the session management (defer Close) should still occur.
+	// but the session management (defer Close) should still occur.
 	err := adapter.Analyze(context.Background(), analysisCtx)
 
-    assert.Error(t, err)
-    // The error should occur during agent initialization or execution.
-    assert.Condition(t, func() bool {
-        return errors.Contains(err.Error(), "failed to initialize agent") || errors.Contains(err.Error(), "agent mission failed")
-    }, "Error should relate to agent logic, not session creation")
+	assert.Error(t, err)
+	// The error should occur during agent initialization or execution.
+	assert.Condition(t, func() bool {
+		// Use strings.Contains to check the error message
+		return strings.Contains(err.Error(), "failed to initialize agent") || strings.Contains(err.Error(), "agent mission failed")
+	}, "Error should relate to agent logic, not session creation")
 
-    // Verify that the mocks were interacted with correctly, especially Close().
+	// Verify that the mocks were interacted with correctly, especially Close().
 	mockBM.AssertExpectations(t)
-    mockSession.AssertExpectations(t)
+	mockSession.AssertExpectations(t)
 }
 
 // TestAgentAdapter_Analyze_ContextCancellation_DuringSessionCreation verifies the context is propagated to the BrowserManager.

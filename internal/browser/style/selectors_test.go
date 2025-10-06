@@ -17,7 +17,9 @@ func parseHTMLAndFind(h, id string) *html.Node {
 	var found *html.Node
 	var traverse func(*html.Node)
 	traverse = func(n *html.Node) {
-		if found != nil { return }
+		if found != nil {
+			return
+		}
 		if n.Type == html.ElementNode {
 			for _, attr := range n.Attr {
 				if attr.Key == "id" && attr.Val == id {
@@ -26,7 +28,9 @@ func parseHTMLAndFind(h, id string) *html.Node {
 				}
 			}
 		}
-		for c := n.FirstChild; c != nil; c = c.NextSibling { traverse(c) }
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			traverse(c)
+		}
 	}
 	traverse(doc)
 	return found
@@ -34,8 +38,8 @@ func parseHTMLAndFind(h, id string) *html.Node {
 
 // Test internal matchesAttribute (White-box testing)
 func TestMatchesAttribute(t *testing.T) {
-	htmlInput := `<input type="text" lang="en-US" class="foo bar" data-value="example-test">`
-	node := parseHTMLAndFind(htmlInput, "input")
+	// Using parseHTMLAndFind with an arbitrary ID to get the node
+	node := parseHTMLAndFind(`<input id="target" type="text" lang="en-US" class="foo bar" data-value="example-test">`, "target")
 
 	tests := []struct {
 		sel      parser.AttributeSelector
@@ -96,8 +100,8 @@ func TestMatchesSimple(t *testing.T) {
 
 // MockShadowDOMProcessor for Engine setup
 type MockShadowDOMProcessor struct{ ShadowDOMProcessor }
-func (m *MockShadowDOMProcessor) DetectShadowHost(node *html.Node) bool { return false }
 
+func (m *MockShadowDOMProcessor) DetectShadowHost(node *html.Node) bool { return false }
 
 // Test internal matches (White-box testing for combinators)
 func TestMatchesCombinators(t *testing.T) {
@@ -116,8 +120,8 @@ func TestMatchesCombinators(t *testing.T) {
 	// Helper to parse a selector string into a SelectorGroup
 	parseSelector := func(selStr string) parser.SelectorGroup {
 		p := parser.NewParser(selStr + "{}")
-		// We must call the internal parseSelectorGroups method
-		return p.parseSelectorGroups()[0]
+		// FIX: Call the now-exported ParseSelectorGroups method
+		return p.ParseSelectorGroups()[0]
 	}
 
 	tests := []struct {

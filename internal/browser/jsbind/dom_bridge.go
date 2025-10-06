@@ -1783,11 +1783,35 @@ func (b *DOMBridge) hitTestRecursive(box *layout.LayoutBox, x, y float64) *layou
 func (b *DOMBridge) QuerySelector(selector string) (*html.Node, error) {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	node := htmlquery.FindOne(b.document, selector)
-	if node == nil {
-		return nil, fmt.Errorf("element not found for selector: %s", selector)
+
+	// Compile the CSS selector. This returns an error for invalid syntax.
+	sel, err := cascadia.Compile(selector)
+	if err != nil {
+		return nil, fmt.Errorf("invalid css selector: %w", err)
 	}
+
+	// Query the document for the first match.
+	node := cascadia.Query(b.document, sel)
+	// Return the node if found, or (nil, nil) if not.
 	return node, nil
+}
+
+// QuerySelectorXPath finds the first element using an XPath expression.
+// This function is safe from panics caused by invalid XPath syntax.
+// It returns (nil, nil) if no element is found.
+func (b *DOMBridge) QuerySelectorXPath(xpath string) (node *html.Node, err error) {
+	// Defer a recover function to catch panics from htmlquery.
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("panic during xpath query execution: %v", r)
+		}
+	}()
+
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+
+	node = htmlquery.FindOne(b.document, xpath)
+	return node, nil // No error if not found, just a nil node.
 }
 
 func (b *DOMBridge) GetOuterHTML() (string, error) {

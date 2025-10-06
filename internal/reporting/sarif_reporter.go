@@ -50,6 +50,7 @@ func NewSARIFReporter(writer io.WriteCloser, logger *zap.Logger, toolVersion str
 		Schema:  SARIFSchema,
 		Runs: []*sarif.Run{
 			{
+				// FIX: Explicitly initialize the Tool field with a pointer to sarif.Tool.
 				Tool: &sarif.Tool{
 					Driver: &sarif.ToolComponent{
 						Name:           ToolName,
@@ -209,7 +210,8 @@ func (r *SARIFReporter) ensureRule(finding schemas.Finding) string {
 		Properties: &sarif.PropertyBag{
 			"tags":      []string{"security", "scalpel"},
 			"precision": "high",
-			"CWE":       finding.CWE,
+			// This conversion is correct and necessary to store []string in map[string]interface{}.
+			"CWE":       finding.CWE, 
 		},
 	}
 	driver.Rules = append(driver.Rules, newRule)
@@ -241,7 +243,7 @@ func mapSeverityToSARIFLevel(severity schemas.Severity) string {
 		return string(sarif.LevelError)
 	case "medium":
 		return string(sarif.LevelWarning)
-	case "low":
+	case "low", "informational":
 		return string(sarif.LevelNote)
 	default:
 		return string(sarif.LevelNote)

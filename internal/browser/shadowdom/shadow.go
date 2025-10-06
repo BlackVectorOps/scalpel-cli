@@ -24,15 +24,12 @@ var _ style.ShadowDOMProcessor = (*Engine)(nil)
 // DetectShadowHost checks if a node is a shadow host by looking for
 // a direct child <template> with a 'shadowrootmode' attribute.
 func (e *Engine) DetectShadowHost(node *html.Node) bool {
-	// A valid host must be an element node.
 	if node == nil || node.Type != html.ElementNode {
 		return false
 	}
 
 	for c := node.FirstChild; c != nil; c = c.NextSibling {
-		// The <template> tag is an ElementNode.
 		if c.Type == html.ElementNode && c.Data == "template" {
-			// If the template has the magic attribute, we've found a host.
 			if getAttr(c, "shadowrootmode") != "" {
 				return true
 			}
@@ -43,13 +40,10 @@ func (e *Engine) DetectShadowHost(node *html.Node) bool {
 }
 
 // InstantiateShadowRoot finds the DSD template, clones its content to create a
-// shadow tree, and extracts any encapsulated stylesheets. This process emulates
-// how a browser would instantiate a shadow DOM from a template.
+// shadow tree, and extracts any encapsulated stylesheets.
 func (e *Engine) InstantiateShadowRoot(host *html.Node) (*html.Node, []parser.StyleSheet) {
-	// First, find the DSD template element itself.
 	var templateNode *html.Node
 	for child := host.FirstChild; child != nil; child = child.NextSibling {
-		// The <template> tag is an ElementNode.
 		if child.Type == html.ElementNode && child.Data == "template" {
 			if getAttr(child, "shadowrootmode") != "" {
 				templateNode = child
@@ -59,60 +53,58 @@ func (e *Engine) InstantiateShadowRoot(host *html.Node) (*html.Node, []parser.St
 	}
 
 	if templateNode == nil {
-		// No DSD template found, so no shadow root to instantiate.
-		return nil, nil
+		return nil, nil // No DSD template found.
 	}
 
-	// The content of the template needs to be cloned to create the shadow tree.
-	// The parser often wraps template content in a DocumentFragment.
-	contentSource := templateNode
-	// FIX #2: The correct constant is DocumentNode.
+	// The content to be cloned is either the direct children of the template
+	// or the children of a document-fragment node inside the template.
+	var contentSource *html.Node
 	if templateNode.FirstChild != nil && templateNode.FirstChild.Type == html.DocumentNode {
+		// Case 1: Content is wrapped in a document fragment.
 		contentSource = templateNode.FirstChild
+	} else {
+		// Case 2: Content is composed of direct children of the template tag.
+		contentSource = templateNode
 	}
 
-	// Create a synthetic root to act as the boundary for the new shadow tree.
-	// FIX #2: The correct constant is DocumentNode.
+	if contentSource.FirstChild == nil {
+		// Create an empty shadow root for templates that are empty.
+		shadowRoot := &html.Node{
+			Type: html.DocumentNode,
+			Data: "shadow-root",
+		}
+		return shadowRoot, nil
+	}
+
+	// Create a new DocumentNode to serve as the root of our detached shadow tree.
 	shadowRoot := &html.Node{
 		Type: html.DocumentNode,
-		Data: "shadow-root-boundary", // A marker for easier debugging.
+		Data: "shadow-root", // A marker for easier debugging.
 	}
 
-	// Clone all children from the template's content into our new shadow root.
+	// Clone all children from the identified content source into our new shadow root.
 	for child := contentSource.FirstChild; child != nil; child = child.NextSibling {
 		shadowRoot.AppendChild(cloneNode(child))
 	}
 
-	// Now, traverse the *newly created* shadow tree to find and process styles.
 	var stylesheets []parser.StyleSheet
 	var nodesToRemove []*html.Node
-
 	var findAndParseStyles func(*html.Node)
 	findAndParseStyles = func(n *html.Node) {
-		// The <style> tag is an ElementNode.
 		if n.Type == html.ElementNode && n.Data == "style" {
-			// We've found a style tag, let's process it.
 			if n.FirstChild != nil && n.FirstChild.Type == html.TextNode {
-				cssContent := n.FirstChild.Data
-				p := parser.NewParser(cssContent)
-				// Corrected assignment mismatch. The compiler says p.Parse() returns only one value.
-				parsedSheet := p.Parse()
-				stylesheets = append(stylesheets, parsedSheet)
+				p := parser.NewParser(n.FirstChild.Data)
+				stylesheets = append(stylesheets, p.Parse())
 			}
-			// Mark this <style> node for removal from the shadow tree
-			// so it's not part of the final rendered structure.
 			nodesToRemove = append(nodesToRemove, n)
 			return // Don't traverse into children of a <style> tag.
 		}
 
-		// Don't traverse into nested templates. They are inert until their
-		// own host is processed.
-		// The <template> tag is an ElementNode.
+		// Don't traverse into nested templates. They are inert.
 		if n.Type == html.ElementNode && n.Data == "template" {
 			return
 		}
 
-		// Continue the traversal.
 		for c := n.FirstChild; c != nil; c = c.NextSibling {
 			findAndParseStyles(c)
 		}
@@ -130,6 +122,7 @@ func (e *Engine) InstantiateShadowRoot(host *html.Node) (*html.Node, []parser.St
 	return shadowRoot, stylesheets
 }
 
+
 // AssignSlots distributes the light DOM children of a shadow host into the
 // <slot> elements defined within its shadow DOM.
 func (e *Engine) AssignSlots(host *style.StyledNode) {
@@ -137,8 +130,7 @@ func (e *Engine) AssignSlots(host *style.StyledNode) {
 		return // Nothing to do if there's no shadow root.
 	}
 
-	// Step 1: Categorize all of the host's direct children (the "light DOM")
-	// into named slots or the default slot.
+	// Step 1: Categorize all of the host's direct children (the "light DOM").
 	namedSlottables := make(map[string][]*style.StyledNode)
 	var defaultSlottables []*style.StyledNode
 
@@ -146,13 +138,11 @@ func (e *Engine) AssignSlots(host *style.StyledNode) {
 		isSlottable := false
 		slotName := ""
 
-		// A slottable node must be an ElementNode.
 		if child.Node.Type == html.ElementNode {
 			isSlottable = true
 			slotName = getAttr(child.Node, "slot")
 		} else if child.Node.Type == html.TextNode && strings.TrimSpace(child.Node.Data) != "" {
-			// Non empty text nodes are also slottable.
-			isSlottable = true
+			isSlottable = true // Non-empty text nodes are slottable.
 		}
 
 		if isSlottable {
@@ -164,52 +154,39 @@ func (e *Engine) AssignSlots(host *style.StyledNode) {
 		}
 	}
 
-	// Step 2: Traverse the shadow tree to find <slot> elements and
-	// assign the categorized nodes to them.
+	// Step 2: Traverse the shadow tree to find <slot> elements and assign nodes.
 	var traverseShadow func(*style.StyledNode)
 	traverseShadow = func(node *style.StyledNode) {
 		if node == nil {
 			return
 		}
 
-		// If we encounter another shadow host inside this shadow tree, stop.
-		// Slot assignment doesn't cross shadow boundaries.
+		// If we encounter another shadow host, stop. Slotting doesn't cross boundaries.
 		if node != host.ShadowRoot && node.ShadowRoot != nil {
 			return
 		}
 
-		// The <slot> tag is an ElementNode.
 		if node.Node.Type == html.ElementNode && node.Node.Data == "slot" {
 			slotName := getAttr(node.Node, "name")
 			var assignedNodes []*style.StyledNode
 
 			if slotName == "" {
-				// This is a default slot. It gets any slottable nodes
-				// that didn't have a specific "slot" attribute.
 				if len(defaultSlottables) > 0 {
 					assignedNodes = defaultSlottables
-					defaultSlottables = nil // Consume them so they can't be used again.
+					defaultSlottables = nil // Consume default slots.
 				}
 			} else {
-				// This is a named slot. Find the matching nodes.
 				if nodes, ok := namedSlottables[slotName]; ok {
 					assignedNodes = nodes
-					delete(namedSlottables, slotName) // Consume them.
+					delete(namedSlottables, slotName) // Consume named slots.
 				}
 			}
-			// Assign the found nodes to the slot. If no nodes were found,
-			// this will be an empty slice, and the slot's fallback content
-			// (its own children) will be rendered instead.
 			node.SlotAssignment = assignedNodes
 		}
 
-		// Continue the traversal through the shadow DOM.
+		// Continue the traversal through the children of the current node.
 		for _, child := range node.Children {
 			traverseShadow(child)
-		}
-		// Also traverse the shadow root if it exists
-		if node.ShadowRoot != nil {
-			traverseShadow(node.ShadowRoot)
 		}
 	}
 
@@ -218,7 +195,7 @@ func (e *Engine) AssignSlots(host *style.StyledNode) {
 
 // -- Helper Functions --
 
-// getAttr is a case insensitive helper to retrieve an attribute's value from a node.
+// getAttr is a case-insensitive helper to retrieve an attribute's value from a node.
 func getAttr(n *html.Node, key string) string {
 	if n == nil {
 		return ""
@@ -231,8 +208,7 @@ func getAttr(n *html.Node, key string) string {
 	return ""
 }
 
-// cloneNode creates a deep copy of an html.Node and its descendants. This is vital
-// for template instantiation, ensuring the original template node remains untouched.
+// cloneNode creates a deep copy of an html.Node and its descendants.
 func cloneNode(n *html.Node) *html.Node {
 	if n == nil {
 		return nil
@@ -244,10 +220,8 @@ func cloneNode(n *html.Node) *html.Node {
 		Data:     n.Data,
 		Attr:     make([]html.Attribute, len(n.Attr)),
 	}
-	// Deep copy attributes to prevent slice modification issues.
 	copy(newNode.Attr, n.Attr)
 
-	// Recursively clone all children to build the new tree structure.
 	for child := n.FirstChild; child != nil; child = child.NextSibling {
 		newNode.AppendChild(cloneNode(child))
 	}

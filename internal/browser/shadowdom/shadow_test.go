@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/antchfx/htmlquery" // Import htmlquery for robust parsing
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/xkilldash9x/scalpel-cli/internal/browser/parser"
@@ -13,17 +14,23 @@ import (
 
 // --- Helpers ---
 
-// Helper to parse HTML and return the body content.
+// parseHTML robustly parses an HTML fragment and returns the <body> node.
 func parseHTML(h string) *html.Node {
-	doc, err := html.Parse(strings.NewReader("<html><body>" + h + "</body></html>"))
+	// Wrap the fragment in a full document structure to ensure consistent parsing.
+	fullHTML := "<html><body>" + h + "</body></html>"
+	doc, err := html.Parse(strings.NewReader(fullHTML))
 	if err != nil {
 		panic(err)
 	}
-	// Navigate to body (doc -> html -> body)
-	return doc.FirstChild.NextSibling.FirstChild
+	// Use XPath to reliably find the body tag, avoiding manual traversal.
+	body := htmlquery.FindOne(doc, "//body")
+	if body == nil {
+		panic("could not find body in parsed test html")
+	}
+	return body
 }
 
-// Helper to find the first element node child.
+// firstElement finds the first child of a node that is an Element.
 func firstElement(n *html.Node) *html.Node {
 	for c := n.FirstChild; c != nil; c = c.NextSibling {
 		if c.Type == html.ElementNode {
@@ -58,8 +65,8 @@ func TestCloneNode(t *testing.T) {
 
 	// Ensure deep copy: modifications to the clone's attributes do not affect the original
 	clone.Attr[0].Val = "modified"
-	assert.Equal(t, "original", original.Attr[0].Val)
-	assert.Equal(t, "modified", clone.Attr[0].Val)
+	assert.Equal(t, "original", getAttr(original, "id"))
+	assert.Equal(t, "modified", getAttr(clone, "id"))
 
 	// Ensure deep copy: children are also cloned
 	originalSpan := firstElement(original)
@@ -108,7 +115,7 @@ func TestInstantiateShadowRoot(t *testing.T) {
 
 		require.NotNil(t, shadowRoot)
 		assert.Empty(t, stylesheets)
-		assert.Equal(t, "shadow-root-boundary", shadowRoot.Data)
+		assert.Equal(t, "shadow-root", shadowRoot.Data)
 
 		h1 := firstElement(shadowRoot)
 		require.NotNil(t, h1)
@@ -162,6 +169,7 @@ func TestInstantiateShadowRoot(t *testing.T) {
 // --- Tests for AssignSlots ---
 
 // Helper to create a mock StyledNode structure for testing slotting.
+// Helper to create a mock StyledNode structure for testing slotting.
 func setupSlotTest(t *testing.T, htmlInput string) (*style.StyledNode, *Engine) {
 	e := Engine{}
 	doc := parseHTML(htmlInput)
@@ -170,10 +178,20 @@ func setupSlotTest(t *testing.T, htmlInput string) (*style.StyledNode, *Engine) 
 	// Manually construct the StyledNode tree (Simplified mock)
 	var buildMockTree func(*html.Node) *style.StyledNode
 	buildMockTree = func(n *html.Node) *style.StyledNode {
-		if n == nil { return nil }
+		if n == nil {
+			return nil
+		}
 		sn := &style.StyledNode{Node: n, ComputedStyles: make(map[parser.Property]parser.Value)}
 		for c := n.FirstChild; c != nil; c = c.NextSibling {
-            // Include ElementNodes and non-empty TextNodes (which are slottable)
+			// --- START OF FIX ---
+			// The light DOM (host's children) must not include the <template>
+			// that defines the shadow DOM itself.
+			if c.Type == html.ElementNode && c.Data == "template" {
+				continue
+			}
+			// --- END OF FIX ---
+
+			// Include ElementNodes and non-empty TextNodes (which are slottable)
 			if c.Type == html.ElementNode || (c.Type == html.TextNode && strings.TrimSpace(c.Data) != "") {
 				if childSN := buildMockTree(c); childSN != nil {
 					sn.Children = append(sn.Children, childSN)
@@ -198,10 +216,14 @@ func findSlots(sn *style.StyledNode) map[string]*style.StyledNode {
 	slots := make(map[string]*style.StyledNode)
 	var traverse func(*style.StyledNode)
 	traverse = func(n *style.StyledNode) {
-		if n == nil { return }
+		if n == nil {
+			return
+		}
 		if n.Node.Type == html.ElementNode && n.Node.Data == "slot" {
 			name := getAttr(n.Node, "name")
-			if name == "" { name = "default" }
+			if name == "" {
+				name = "default"
+			}
 			// Handle multiple default slots for testing consumption order
 			key := name
 			if _, exists := slots[key]; exists && name == "default" {
@@ -209,7 +231,9 @@ func findSlots(sn *style.StyledNode) map[string]*style.StyledNode {
 			}
 			slots[key] = n
 		}
-		for _, child := range n.Children { traverse(child) }
+		for _, child := range n.Children {
+			traverse(child)
+		}
 	}
 	if sn.ShadowRoot != nil {
 		traverse(sn.ShadowRoot)
@@ -240,7 +264,7 @@ func TestAssignSlots(t *testing.T) {
 		require.Len(t, slots["footer"].SlotAssignment, 1)
 		assert.Equal(t, "span", slots["footer"].SlotAssignment[0].Node.Data)
 
-        // Default slot gets P1 and P2. D1 is not assigned as "missing" slot doesn't exist.
+		// Default slot gets P1 and P2. D1 is not assigned as "missing" slot doesn't exist.
 		require.Len(t, slots["default"].SlotAssignment, 2)
 		assert.Equal(t, "p", slots["default"].SlotAssignment[0].Node.Data)
 		assert.Equal(t, "p", slots["default"].SlotAssignment[1].Node.Data)

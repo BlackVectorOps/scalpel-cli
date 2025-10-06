@@ -4,7 +4,6 @@ package adapters_test
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -36,15 +35,15 @@ func setupIDORContext(t *testing.T, targetURL string, task schemas.Task) *core.A
 		Findings:  []schemas.Finding{}, // Initialize slice to capture findings
 		Global:    &core.GlobalContext{},
 	}
-	
-    // NOTE: For this test to work, the actual implementation of core.AnalysisContext 
-    // must have a method `AddFinding(f schemas.Finding)` that appends to the `Findings` slice.
-    /*
-    Example implementation assumed in core/context.go:
-    func (c *AnalysisContext) AddFinding(f schemas.Finding) {
-        c.Findings = append(c.Findings, f)
-    }
-    */
+
+	// NOTE: For this test to work, the actual implementation of core.AnalysisContext
+	// must have a method `AddFinding(f schemas.Finding)` that appends to the `Findings` slice.
+	/*
+	   Example implementation assumed in core/context.go:
+	   func (c *AnalysisContext) AddFinding(f schemas.Finding) {
+	       c.Findings = append(c.Findings, f)
+	   }
+	*/
 	return ctx
 }
 
@@ -96,11 +95,11 @@ func TestIDORAdapter_Analyze_BaselineRequestBehavior(t *testing.T) {
 	ctx := context.Background()
 
 	tests := []struct {
-		name           string
-		statusCode     int
-		targetURL      string
-		wantErr        bool
-		errMsg         string
+		name       string
+		statusCode int
+		targetURL  string
+		wantErr    bool
+		errMsg     string
 	}{
 		{"Success 200 OK", http.StatusOK, "", false, ""},
 		{"Failure 404 (Skip Scan)", http.StatusNotFound, "", false, ""},
@@ -136,13 +135,13 @@ func TestIDORAdapter_Analyze_BaselineRequestBehavior(t *testing.T) {
 			} else {
 				assert.NoError(t, err)
 			}
-            // Ensure no findings were generated in any of these scenarios
-            assert.Empty(t, analysisCtx.Findings)
+			// Ensure no findings were generated in any of these scenarios
+			assert.Empty(t, analysisCtx.Findings)
 		})
 	}
 }
 
-// Test IDOR Detection logic. This relies on the internal idor package (not provided) 
+// Test IDOR Detection logic. This relies on the internal idor package (not provided)
 // correctly identifying and modifying IDs (e.g., incrementing integers).
 func TestIDORAdapter_Analyze_DetectionScenarios(t *testing.T) {
 	adapter := adapters.NewIDORAdapter()
@@ -161,9 +160,9 @@ func TestIDORAdapter_Analyze_DetectionScenarios(t *testing.T) {
 					w.WriteHeader(http.StatusForbidden) // Secure: other IDs fail
 				}
 			} else {
-                // Fallback for requests without path IDs
-                w.WriteHeader(http.StatusOK)
-            }
+				// Fallback for requests without path IDs
+				w.WriteHeader(http.StatusOK)
+			}
 		}
 	}
 
@@ -185,8 +184,8 @@ func TestIDORAdapter_Analyze_DetectionScenarios(t *testing.T) {
 
 			targetURL := ts.URL + tt.path
 			task := schemas.Task{
-				TaskID:    "task-idor",
-				TargetURL: targetURL,
+				TaskID:     "task-idor",
+				TargetURL:  targetURL,
 				Parameters: schemas.IDORTaskParams{HTTPMethod: "GET"},
 			}
 			analysisCtx := setupIDORContext(t, targetURL, task)
@@ -198,11 +197,11 @@ func TestIDORAdapter_Analyze_DetectionScenarios(t *testing.T) {
 			if tt.wantFindings > 0 {
 				finding := analysisCtx.Findings[0]
 				assert.Equal(t, schemas.SeverityHigh, finding.Severity)
-                assert.Equal(t, "Insecure Direct Object Reference (IDOR)", finding.Vulnerability.Name)
+				assert.Equal(t, "Insecure Direct Object Reference (IDOR)", finding.Vulnerability.Name)
 				assert.Contains(t, finding.Description, "123")
 				// Assuming the internal idor logic increments the number (123 -> 124)
-				assert.Contains(t, finding.Description, "124") 
-                assert.Equal(t, []string{"CWE-639"}, finding.CWE)
+				assert.Contains(t, finding.Description, "124")
+				assert.Equal(t, []string{"CWE-639"}, finding.CWE)
 			}
 		})
 	}
@@ -223,8 +222,8 @@ func TestIDORAdapter_Analyze_ContextCancellation(t *testing.T) {
 	defer ts.Close()
 
 	task := schemas.Task{
-		TaskID: "task-cancel",
-		TargetURL: ts.URL,
+		TaskID:     "task-cancel",
+		TargetURL:  ts.URL,
 		Parameters: schemas.IDORTaskParams{HTTPMethod: "GET"},
 	}
 	analysisCtx := setupIDORContext(t, ts.URL, task)
@@ -238,6 +237,6 @@ func TestIDORAdapter_Analyze_ContextCancellation(t *testing.T) {
 	// Expect an error indicating the context was cancelled during the baseline HTTP request
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "baseline request failed")
-    // Ensure the underlying error is context related
-    assert.True(t, errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled))
+	// Ensure the underlying error is context related
+	assert.True(t, errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled))
 }

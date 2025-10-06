@@ -9,7 +9,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/dop251/goja"
 	"github.com/stretchr/testify/assert"
@@ -19,20 +18,17 @@ import (
 	"go.uber.org/zap/zaptest"
 	"golang.org/x/net/html"
 
-	"github.comcom/xkilldash9x/scalpel-cli/api/schemas"
+	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 )
 
 // -- Mock BrowserEnvironment --
 
-// MockBrowserEnvironment implements the BrowserEnvironment interface for testing using testify/mock.
-// This provides a more structured way to assert expectations compared to a manual mock.
 type MockBrowserEnvironment struct {
 	mock.Mock
 	mu         sync.RWMutex
 	currentURL *url.URL
 }
 
-// NewMockBrowserEnvironment creates a new mock environment.
 func NewMockBrowserEnvironment(initialURL string) *MockBrowserEnvironment {
 	u, err := url.Parse(initialURL)
 	if err != nil {
@@ -44,8 +40,6 @@ func NewMockBrowserEnvironment(initialURL string) *MockBrowserEnvironment {
 }
 
 func (m *MockBrowserEnvironment) JSNavigate(targetURL string) {
-	// To ensure subsequent calls to ResolveURL work as expected after a navigation,
-	// we update the internal URL state here.
 	m.mu.Lock()
 	resolved, err := m.resolveURLInternal(targetURL)
 	if err == nil {
@@ -103,8 +97,6 @@ func (m *MockBrowserEnvironment) GetCurrentHistoryState() interface{} {
 	return args.Get(0)
 }
 
-// ResolveURL provides a real implementation for convenience, as most tests rely on it
-// functioning correctly without needing to assert its calls.
 func (m *MockBrowserEnvironment) ResolveURL(targetURL string) (*url.URL, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -114,7 +106,6 @@ func (m *MockBrowserEnvironment) ResolveURL(targetURL string) (*url.URL, error) 
 func (m *MockBrowserEnvironment) resolveURLInternal(targetURL string) (*url.URL, error) {
 	base := m.currentURL
 	if base == nil {
-		// Fallback just in case.
 		base, _ = url.Parse("about:blank")
 	}
 	return base.Parse(targetURL)
@@ -129,14 +120,14 @@ type TestEnvironment struct {
 	T       *testing.T
 }
 
-// SetupTest initializes a testing environment without a persistent event loop.
 func SetupTest(t *testing.T, initialHTML string, initialURL string) *TestEnvironment {
 	t.Helper()
 	logger := zaptest.NewLogger(t)
 	mockEnv := NewMockBrowserEnvironment(initialURL)
 	bridge := NewDOMBridge(logger, mockEnv, schemas.DefaultPersona)
 
-	doc, err := html.Parse(initialHTML)
+	// FIX: Use strings.NewReader to satisfy the io.Reader interface.
+	doc, err := html.Parse(strings.NewReader(initialHTML))
 	require.NoError(t, err)
 	bridge.UpdateDOM(doc)
 
@@ -153,13 +144,11 @@ func (te *TestEnvironment) RunJS(script string) (goja.Value, error) {
 	vm := goja.New()
 	te.Bridge.BindToRuntime(vm, te.MockEnv.currentURL.String())
 
-	// Provide a basic console.log for debugging within tests.
 	vm.Set("console", map[string]interface{}{
 		"log": func(args ...interface{}) {
 			te.Logger.Info("JS console.log", zap.Any("args", args))
 		},
 	})
-	// Polyfill Event constructor for tests that dispatch events.
 	vm.RunString(`
         if (typeof Event === 'undefined') {
             function Event(type, options) { this.type = type; }
@@ -180,8 +169,6 @@ func (te *TestEnvironment) MustRunJS(script string) goja.Value {
 
 // -- Test Cases --
 
-// Note: TestTimers has been removed as the synchronous model does not support them.
-
 func TestFormSubmissionPOSTUrlEncoded(t *testing.T) {
 	html := `
         <html><body>
@@ -195,7 +182,6 @@ func TestFormSubmissionPOSTUrlEncoded(t *testing.T) {
 	te := SetupTest(t, html, "http://example.com/home")
 	mockEnv := te.MockEnv
 
-	// Set up the mock expectation for the fetch call.
 	mockEnv.On("ExecuteFetch", mock.Anything, mock.MatchedBy(func(req schemas.FetchRequest) bool {
 		assert.Equal(t, "POST", req.Method)
 		assert.Equal(t, "http://example.com/submit", req.URL)
@@ -211,10 +197,8 @@ func TestFormSubmissionPOSTUrlEncoded(t *testing.T) {
 		return true
 	})).Return(&schemas.FetchResponse{Status: 200}, nil).Once()
 
-	// This is now a blocking call.
 	te.MustRunJS(`document.getElementById('submitBtn').click()`)
 
-	// Verify that the expected call was made.
 	mockEnv.AssertExpectations(t)
 }
 
@@ -230,7 +214,6 @@ func TestFormSubmissionPOSTMultipart(t *testing.T) {
 	te := SetupTest(t, html, "http://example.com/home")
 	mockEnv := te.MockEnv
 
-	// Set up the mock expectation.
 	mockEnv.On("ExecuteFetch", mock.Anything, mock.MatchedBy(func(req schemas.FetchRequest) bool {
 		assert.Equal(t, "http://example.com/upload", req.URL)
 
@@ -247,10 +230,8 @@ func TestFormSubmissionPOSTMultipart(t *testing.T) {
 		return true
 	})).Return(&schemas.FetchResponse{Status: 200}, nil).Once()
 
-	// Trigger the submission.
 	te.MustRunJS(`document.getElementById('submitBtn').click()`)
 
-	// Assert that the mock was called as expected.
 	mockEnv.AssertExpectations(t)
 }
 
@@ -274,16 +255,12 @@ func TestFormSubmissionGET(t *testing.T) {
 	mockEnv.AssertExpectations(t)
 }
 
-// TestConcurrencyAndRaceDetection now more accurately reflects the sync.Pool model.
-// Run with `go test -race` to verify thread safety.
 func TestConcurrencyAndRaceDetection(t *testing.T) {
 	te := SetupTest(t, "<html><body><div id='content'>Initial</div></body></html>", "http://example.com")
 
 	var wg sync.WaitGroup
 	iterations := 50
 
-	// Each goroutine simulates getting a fresh VM from the pool via te.RunJS.
-	// This tests the internal locking of the DOMBridge itself.
 	wg.Add(iterations)
 	for i := 0; i < iterations; i++ {
 		script := fmt.Sprintf(`document.body.setAttribute('data-js', %d);`, i)
@@ -293,7 +270,6 @@ func TestConcurrencyAndRaceDetection(t *testing.T) {
 		}()
 	}
 
-	// Concurrent Go tasks that read/write the DOMBridge state.
 	wg.Add(iterations)
 	for i := 0; i < iterations; i++ {
 		go func(i int) {
@@ -309,14 +285,10 @@ func TestConcurrencyAndRaceDetection(t *testing.T) {
 	}
 
 	wg.Wait()
-	// The test passes if the race detector is silent.
 }
 
-// TestMemoryLeakPrevention is adapted for the synchronous, per-call VM model.
 func TestMemoryLeakPrevention(t *testing.T) {
 	createAndBreakCycle := func() {
-		// In this model, the VM and its resources are self-contained within a single
-		// function call and are immediately eligible for GC, simplifying leak prevention.
 		type LeakyResource struct {
 			Data     [1024 * 1024]byte
 			Callback func()
@@ -332,12 +304,9 @@ func TestMemoryLeakPrevention(t *testing.T) {
 		jsFunc, ok := goja.AssertFunction(jsFuncVal)
 		require.True(t, ok)
 
-		// Create the Go -> JS -> Go reference cycle.
 		resource.Callback = func() {
 			_, _ = jsFunc(goja.Undefined())
 		}
-		// In a real application, the cycle would be broken by setting resource.Callback = nil.
-		// Here, the resource and VM go out of scope together, so the GC can collect them.
 	}
 
 	runtime.GC()
@@ -352,6 +321,12 @@ func TestMemoryLeakPrevention(t *testing.T) {
 	var m2 runtime.MemStats
 	runtime.ReadMemStats(&m2)
 
-	memoryIncreaseMB := (m2.HeapAlloc - m1.HeapAlloc) / 1024 / 1024
-	assert.Less(t, memoryIncreaseMB, uint64(5), "Potential memory leak detected.")
+	// --- START OF FIX ---
+	// Use signed integers for the calculation to correctly handle memory shrinking.
+	memoryIncreaseBytes := int64(m2.HeapAlloc) - int64(m1.HeapAlloc)
+	memoryIncreaseMB := memoryIncreaseBytes / 1024 / 1024
+
+	// Assert that the increase is less than 5MB. A negative value is fine and will pass.
+	assert.Less(t, memoryIncreaseMB, int64(5), "Potential memory leak detected.")
+	// --- END OF FIX ---
 }
