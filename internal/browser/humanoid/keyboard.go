@@ -29,6 +29,44 @@ var commonNgrams = map[string]bool{
 	"the": true, "and": true, "ing": true, "ion": true, "tio": true,
 }
 
+// --- Advanced IKD Structures ---
+
+// KeyInfo stores metadata about keys for IKD calculation.
+type KeyInfo struct {
+	Hand   int     // 0: Left, 1: Right, 2: Either (Spacebar)
+	Finger int     // 0: Pinky, 1: Ring, 2: Middle, 3: Index, 4: Thumb
+	Row    int     // 0: Numbers, 1: Top, 2: Home, 3: Bottom
+	Col    float64 // Column position, staggered for realism
+}
+
+// QWERTYLayout maps characters to their physical properties on a standard keyboard.
+var QWERTYLayout = map[rune]KeyInfo{
+	// Numbers Row
+	'1': {0, 0, 0, 1}, '2': {0, 1, 0, 2}, '3': {0, 2, 0, 3}, '4': {0, 3, 0, 4}, '5': {0, 3, 0, 5},
+	'6': {1, 3, 0, 6}, '7': {1, 3, 0, 7}, '8': {1, 2, 0, 8}, '9': {1, 1, 0, 9}, '0': {1, 0, 0, 10},
+	// Top Row
+	'q': {0, 0, 1, 1.5}, 'w': {0, 1, 1, 2.5}, 'e': {0, 2, 1, 3.5}, 'r': {0, 3, 1, 4.5}, 't': {0, 3, 1, 5.5},
+	'y': {1, 3, 1, 6.5}, 'u': {1, 3, 1, 7.5}, 'i': {1, 2, 1, 8.5}, 'o': {1, 1, 1, 9.5}, 'p': {1, 0, 1, 10.5},
+	// Home Row
+	'a': {0, 0, 2, 1.75}, 's': {0, 1, 2, 2.75}, 'd': {0, 2, 2, 3.75}, 'f': {0, 3, 2, 4.75}, 'g': {0, 3, 2, 5.75},
+	'h': {1, 3, 2, 6.75}, 'j': {1, 3, 2, 7.75}, 'k': {1, 2, 2, 8.75}, 'l': {1, 1, 2, 9.75}, ';': {1, 0, 2, 10.75},
+	// Bottom Row
+	'z': {0, 0, 3, 2}, 'x': {0, 1, 3, 3}, 'c': {0, 2, 3, 4}, 'v': {0, 3, 3, 5}, 'b': {0, 3, 3, 6},
+	'n': {1, 3, 3, 7}, 'm': {1, 3, 3, 8}, ',': {1, 2, 3, 9}, '.': {1, 1, 3, 10}, '/': {1, 0, 3, 11},
+	// Spacebar
+	' ': {2, 4, 4, 6},
+}
+
+// getKeyInfo retrieves the KeyInfo for a given rune, handling case and fallbacks.
+func getKeyInfo(r rune) KeyInfo {
+	info, ok := QWERTYLayout[unicode.ToLower(r)]
+	if !ok {
+		// Default fallback for unknown characters.
+		return KeyInfo{Hand: 1, Finger: 3, Row: 1, Col: 11}
+	}
+	return info
+}
+
 // Type is the public entry point for typing and acquires the lock for the entire operation.
 func (h *Humanoid) Type(ctx context.Context, selector string, text string, opts *InteractionOptions) error {
 	h.mu.Lock()
@@ -37,65 +75,56 @@ func (h *Humanoid) Type(ctx context.Context, selector string, text string, opts 
 	// Update fatigue based on the typing effort (length of text).
 	h.updateFatigue(float64(len(text)) * 0.05)
 
-	// 1. Preparation: Use an internal helper to focus the element, avoiding a deadlock.
+	// 1. Preparation: Use an internal helper to focus the element.
 	if err := h.clickToFocus(ctx, selector, opts); err != nil {
 		return fmt.Errorf("humanoid: failed to click/focus selector '%s': %w", selector, err)
 	}
 
 	// Pause after focusing to simulate cognitive planning.
-	if err := h.cognitivePause(ctx, 200, 80); err != nil {
+	if err := h.cognitivePause(ctx, 250, 100); err != nil {
 		return err
 	}
 
-	words := strings.Fields(text)
+	// Convert the entire text to runes for processing.
+	runes := []rune(text)
 
-	// 2. Execution Loop: Type word by word to simulate burst-and-pause rhythm.
-	for i, word := range words {
-		// Type the characters of the word in a rapid burst.
-		runes := []rune(word)
-		for j := 0; j < len(runes); j++ {
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			// Use a speed factor to make intra-word typing faster.
-			const burstSpeedFactor = 0.7
-			advanced, err := h.typeCharacter(ctx, runes, j, burstSpeedFactor)
-			if err != nil {
-				return err
-			}
-			if advanced {
-				j++ // Skip next character if handled by typo (e.g., transposition).
-			}
+	// 2. Execution Loop: Type character by character. The IKD model handles rhythm.
+	for i := 0; i < len(runes); i++ {
+		if ctx.Err() != nil {
+			return ctx.Err()
 		}
 
-		// If it's not the last word, add a space and a longer pause.
-		if i < len(words)-1 {
-			nextWordLen := len(words[i+1])
-			rng := h.rng
-			pauseMs := 100 + (float64(nextWordLen) * 5) + rng.Float64()*80
-			if err := h.cognitivePause(ctx, pauseMs, pauseMs*0.4); err != nil {
-				return err
-			}
+		// Speed factor is generally 1.0, relying on IKD for timing.
+		const speedFactor = 1.0
 
-			// Type the space between words.
-			if err := h.sendString(ctx, " "); err != nil {
-				return err
-			}
+		advanced, err := h.typeCharacter(ctx, runes, i, speedFactor)
+		if err != nil {
+			return err
+		}
+		if advanced {
+			i++ // Skip next character if handled by typo (e.g., transposition).
 		}
 	}
+
 	return nil
 }
 
-// clickToFocus is a new internal helper that performs a click without acquiring a lock.
+// clickToFocus is an internal helper that performs a click without acquiring a lock.
 func (h *Humanoid) clickToFocus(ctx context.Context, selector string, opts *InteractionOptions) error {
+	// ensureVisible and moveToSelector are handled within the internal click logic.
+	// We call moveToSelector here which handles ensureVisible internally.
 	if err := h.moveToSelector(ctx, selector, opts); err != nil {
 		return err
 	}
-	// Simplified click logic for focus.
+
+	// Simplified click logic using applyClickNoise and hesitate for realism.
+	// Apply click noise before press.
+	clickPos := h.applyClickNoise(h.currentPos)
+
 	mouseDownData := schemas.MouseEventData{
 		Type:       schemas.MousePress,
-		X:          h.currentPos.X,
-		Y:          h.currentPos.Y,
+		X:          clickPos.X,
+		Y:          clickPos.Y,
 		Button:     schemas.ButtonLeft,
 		ClickCount: 1,
 		Buttons:    1,
@@ -103,25 +132,28 @@ func (h *Humanoid) clickToFocus(ctx context.Context, selector string, opts *Inte
 	if err := h.executor.DispatchMouseEvent(ctx, mouseDownData); err != nil {
 		return err
 	}
+	h.currentPos = clickPos
+	h.currentButtonState = schemas.ButtonLeft
 
-	// Short hold for focus.
-	if err := h.executor.Sleep(ctx, h.keyHoldDuration()); err != nil {
+	// Short hold with hesitation (slippage).
+	holdDuration := h.keyHoldDuration()
+	if err := h.hesitate(ctx, holdDuration); err != nil {
+		// Attempt cleanup if interrupted.
+		h.releaseMouse(context.Background())
 		return err
 	}
 
-	mouseUpData := schemas.MouseEventData{
-		Type:       schemas.MouseRelease,
-		X:          h.currentPos.X,
-		Y:          h.currentPos.Y,
-		Button:     schemas.ButtonLeft,
-		ClickCount: 1,
-		Buttons:    0,
-	}
-	return h.executor.DispatchMouseEvent(ctx, mouseUpData)
+	// Apply click noise before release.
+	releasePos := h.applyClickNoise(h.currentPos)
+	h.currentPos = releasePos
+
+	// Use centralized release function.
+	return h.releaseMouse(ctx)
 }
 
 // typeCharacter handles the logic for typing a single character. Assumes lock is held.
 func (h *Humanoid) typeCharacter(ctx context.Context, runes []rune, i int, speedFactor float64) (advanced bool, err error) {
+	// Calculate and execute the Inter-Key Delay (IKD).
 	if err := h.keyPause(ctx, speedFactor, speedFactor, runes, i); err != nil {
 		return false, err
 	}
@@ -152,6 +184,7 @@ func (h *Humanoid) sendString(ctx context.Context, keys string) error {
 	if err := h.executor.SendKeys(ctx, keys); err != nil {
 		return err
 	}
+	// Simulate the time the key is held down.
 	return h.executor.Sleep(ctx, h.keyHoldDuration())
 }
 
@@ -163,14 +196,26 @@ func (h *Humanoid) keyHoldDuration() time.Duration {
 	randNorm := h.rng.NormFloat64()
 
 	delay := randNorm*stdDev + mean
+
+	// Apply fatigue (longer holds when tired).
+	delay *= (1.0 + h.fatigueLevel*0.2)
+
 	if delay < 20.0 { // Ensure a minimum realistic hold time.
-		delay = 20.0
+		delay = 20.0 + h.rng.Float64()*5.0
 	}
 	return time.Duration(delay) * time.Millisecond
 }
 
-// keyPause introduces a human-like inter-key delay (IKD). Assumes lock is held.
+// keyPause introduces a human-like inter-key delay (IKD) using advanced modeling. Assumes lock is held.
 func (h *Humanoid) keyPause(ctx context.Context, meanScale, stdDevScale float64, runes []rune, index int) error {
+	// If it's the first character (index 0), there is no IKD.
+	if index == 0 {
+		// If runes is nil (e.g. during typo correction) and index is 0, we still need a pause if scales are set.
+		if runes != nil || (meanScale == 1.0 && stdDevScale == 1.0) {
+			return nil
+		}
+	}
+
 	cfg := h.dynamicConfig
 	randNorm := h.rng.NormFloat64()
 	fatigueLevel := h.fatigueLevel
@@ -178,31 +223,80 @@ func (h *Humanoid) keyPause(ctx context.Context, meanScale, stdDevScale float64,
 	mean := cfg.KeyPauseMean * meanScale
 	stdDev := cfg.KeyPauseStdDev * stdDevScale
 	minDelay := cfg.KeyPauseMin * meanScale
-	ngramFactor := 1.0
 
-	// Adjust for common N-grams to simulate rhythmic typing.
-	if runes != nil && index > 1 {
-		trigraph := strings.ToLower(string(runes[index-2 : index+1]))
-		if commonNgrams[trigraph] {
-			ngramFactor = cfg.KeyPauseNgramFactor3
-		} else {
+	// --- Advanced IKD Modeling ---
+	ikdFactor := 1.0
+
+	// Apply factors only if we have the context (runes) and it's not the start of the sequence.
+	if runes != nil && index > 0 && index < len(runes) {
+		// 1. N-gram (Rhythm) Factor
+		ngramFactor := 1.0
+		if index > 1 {
+			trigraph := strings.ToLower(string(runes[index-2 : index+1]))
+			if commonNgrams[trigraph] {
+				ngramFactor = cfg.KeyPauseNgramFactor3
+			}
+		}
+		// Check for digraph only if trigraph wasn't found.
+		if ngramFactor == 1.0 {
 			digraph := strings.ToLower(string(runes[index-1 : index+1]))
 			if commonNgrams[digraph] {
 				ngramFactor = cfg.KeyPauseNgramFactor2
 			}
 		}
+		ikdFactor *= ngramFactor
+
+		// 2. Physical Effort Factor (Hand/Finger switching, Distance)
+		prevKey := getKeyInfo(runes[index-1])
+		currentKey := getKeyInfo(runes[index])
+
+		physicalFactor := 1.0
+
+		// Determine hand usage, handling the spacebar (Hand 2).
+		prevHand := prevKey.Hand
+		currentHand := currentKey.Hand
+
+		// Simple model: if either is spacebar, treat it as the opposite hand of the other key.
+		if prevHand == 2 && currentHand != 2 {
+			prevHand = 1 - currentHand
+		} else if currentHand == 2 && prevHand != 2 {
+			currentHand = 1 - prevHand
+		}
+
+		if prevHand != currentHand {
+			// Hand alternation (faster)
+			physicalFactor = cfg.IKDHandAlternationBonus
+		} else if prevKey.Finger != currentKey.Finger {
+			// Different finger, same hand (neutral speed)
+			physicalFactor = 1.0
+		} else {
+			// Same finger repetition (slowest)
+			physicalFactor = cfg.IKDSameFingerPenalty
+		}
+
+		// Distance calculation (Euclidean distance on the layout)
+		dist := math.Sqrt(math.Pow(prevKey.Col-currentKey.Col, 2) + math.Pow(float64(prevKey.Row-currentKey.Row), 2))
+		// Longer distances take more time.
+		distanceFactor := 1.0 + dist*cfg.IKDDistanceFactor
+
+		ikdFactor *= physicalFactor * distanceFactor
 	}
 
-	mean *= ngramFactor
-	minDelay *= ngramFactor
+	// Apply the combined IKD factor
+	mean *= ikdFactor
+	stdDev *= ikdFactor // StdDev also scales with the mean.
+	minDelay *= ikdFactor
 
+	// 3. Fatigue Factor
 	fatigueFactor := 1.0 + fatigueLevel*cfg.KeyPauseFatigueFactor
 	mean *= fatigueFactor
 
+	// Calculate final delay
 	delay := randNorm*stdDev + mean
 	finalDelay := math.Max(minDelay, delay)
 	duration := time.Duration(finalDelay) * time.Millisecond
 
+	// Recover fatigue during the pause.
 	h.recoverFatigue(duration)
 
 	return h.executor.Sleep(ctx, duration)
@@ -235,6 +329,7 @@ func (h *Humanoid) introduceTypo(ctx context.Context, cfg Config, runes []rune, 
 }
 
 // --- Typo Implementations (all assume lock is held) ---
+// Updated to ensure keyPause calls during correction pass index=0 and runes=nil to signify a cognitive pause rather than IKD.
 
 func (h *Humanoid) introduceNeighborTypo(ctx context.Context, char rune) (bool, bool, error) {
 	lowerChar := unicode.ToLower(char)
@@ -248,12 +343,14 @@ func (h *Humanoid) introduceNeighborTypo(ctx context.Context, char rune) (bool, 
 		if err := h.sendString(ctx, string(typoChar)); err != nil {
 			return true, false, err
 		}
+		// Pause to notice typo (Cognitive pause, not IKD).
 		if err := h.keyPause(ctx, cfg.TypoCorrectionPauseMeanScale, cfg.TypoCorrectionPauseStdDevScale, nil, 0); err != nil {
 			return true, false, err
 		}
 		if err := h.sendString(ctx, string(KeyBackspace)); err != nil {
 			return true, false, err
 		}
+		// Pause after correction.
 		if err := h.keyPause(ctx, 1.2, 0.5, nil, 0); err != nil {
 			return true, false, err
 		}
@@ -272,6 +369,7 @@ func (h *Humanoid) introduceTransposition(ctx context.Context, char, nextChar ru
 	if err := h.sendString(ctx, string(nextChar)); err != nil {
 		return false, true, err
 	}
+	// Short pause between transposed keys.
 	if err := h.keyPause(ctx, 0.8, 0.3, nil, 0); err != nil {
 		return false, true, err
 	}
@@ -284,6 +382,7 @@ func (h *Humanoid) introduceTransposition(ctx context.Context, char, nextChar ru
 	shouldCorrect := h.rng.Float64() < cfg.TypoCorrectionProbability
 
 	if shouldCorrect {
+		// Pause to notice transposition.
 		if err := h.keyPause(ctx, cfg.TypoCorrectionPauseMeanScale, cfg.TypoCorrectionPauseStdDevScale, nil, 0); err != nil {
 			return false, advanced, err
 		}
@@ -296,6 +395,7 @@ func (h *Humanoid) introduceTransposition(ctx context.Context, char, nextChar ru
 		if err := h.sendString(ctx, string(KeyBackspace)); err != nil {
 			return false, advanced, err
 		}
+		// Pause before retyping.
 		if err := h.keyPause(ctx, 1.2, 0.5, nil, 0); err != nil {
 			return false, advanced, err
 		}
@@ -322,6 +422,7 @@ func (h *Humanoid) introduceOmission(ctx context.Context, char rune) (bool, bool
 	shouldNotice := h.rng.Float64() < cfg.TypoOmissionNoticeProbability
 
 	if shouldNotice {
+		// Pause to notice the omission.
 		if err := h.keyPause(ctx, cfg.TypoCorrectionPauseMeanScale, cfg.TypoCorrectionPauseStdDevScale, nil, 0); err != nil {
 			return true, false, err
 		}
@@ -346,6 +447,7 @@ func (h *Humanoid) introduceInsertion(ctx context.Context, char rune) (bool, boo
 		}
 
 		if shouldNotice {
+			// Pause to notice the insertion.
 			if err := h.keyPause(ctx, cfg.TypoCorrectionPauseMeanScale, cfg.TypoCorrectionPauseStdDevScale, nil, 0); err != nil {
 				return true, false, err
 			}
@@ -354,6 +456,7 @@ func (h *Humanoid) introduceInsertion(ctx context.Context, char rune) (bool, boo
 			}
 		}
 
+		// Pause before typing the intended character.
 		if err := h.keyPause(ctx, 1.1, 0.4, nil, 0); err != nil {
 			return true, false, err
 		}

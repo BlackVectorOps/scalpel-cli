@@ -12,6 +12,7 @@ import (
 	"go.uber.org/zap"
 )
 
+// maxVelocity defines the maximum speed the cursor can move (pixels per second).
 const maxVelocity = 6000.0
 
 // Humanoid defines the state and capabilities for simulating human like interactions.
@@ -100,6 +101,8 @@ func NewTestHumanoid(executor Executor, seed int64) *Humanoid {
 	// Set specific dynamic config values for predictable test behavior.
 	h.dynamicConfig.FittsA = 100.0
 	h.dynamicConfig.FittsB = 150.0
+	h.dynamicConfig.Omega = 30.0
+	h.dynamicConfig.Zeta = 0.8
 	h.dynamicConfig.PerlinAmplitude = 2.0
 	h.dynamicConfig.GaussianStrength = 0.5
 
@@ -107,15 +110,55 @@ func NewTestHumanoid(executor Executor, seed int64) *Humanoid {
 }
 
 // ensureVisible is a private helper that checks options and performs scrolling if needed.
-// It's the core of the new "implicit scrolling" design.
 // NOTE: This is an internal method and should NOT lock the mutex, as it's
 // called by public methods that already hold the lock.
 func (h *Humanoid) ensureVisible(ctx context.Context, selector string, opts *InteractionOptions) error {
-	// Default behavior is to ensure visibility. This check makes the API easier to use,
-	// as callers can just pass 'nil' for default options.
-	if opts == nil || opts.EnsureVisible {
+	// Determine if visibility should be ensured. Defaults to true.
+	shouldEnsure := true
+
+	// If options are provided and EnsureVisible is explicitly set (not nil), use that value.
+	if opts != nil && opts.EnsureVisible != nil {
+		shouldEnsure = *opts.EnsureVisible
+	}
+
+	if shouldEnsure {
 		// Calls the unexported method from scrolling.go
 		return h.intelligentScroll(ctx, selector)
 	}
 	return nil
 }
+
+// releaseMouse is an internal helper that ensures the mouse button (currently only left) is released.
+// It is used for robust cleanup during complex actions like DragAndDrop or IntelligentClick.
+// It assumes the caller holds the lock.
+func (h *Humanoid) releaseMouse(ctx context.Context) error {
+	currentPos := h.currentPos
+	// Currently, we only track the primary (left) button state for dragging/clicking.
+	if h.currentButtonState != schemas.ButtonLeft {
+		return nil // Nothing to do if the left button isn't pressed according to our state.
+	}
+
+	h.logger.Debug("Humanoid: Executing mouse release (cleanup/action completion)")
+
+	mouseUpData := schemas.MouseEventData{
+		Type:       schemas.MouseRelease,
+		X:          currentPos.X,
+		Y:          currentPos.Y,
+		Button:     schemas.ButtonLeft,
+		ClickCount: 1,
+		Buttons:    0, // Bitfield: 0 indicates no buttons are pressed after release.
+	}
+
+	err := h.executor.DispatchMouseEvent(ctx, mouseUpData)
+	if err != nil {
+		// Log the failure but continue to update state to prevent the simulation from getting stuck
+		// with the button virtually pressed.
+		h.logger.Error("Humanoid: Failed to dispatch mouse release event, but updating internal state anyway", zap.Error(err))
+	}
+
+	// Always update the internal state to "none", regardless of dispatch success.
+	h.currentButtonState = schemas.ButtonNone
+
+	return err
+}
+
