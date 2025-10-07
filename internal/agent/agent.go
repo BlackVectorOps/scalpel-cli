@@ -9,19 +9,16 @@ import (
 	"strings"
 	"sync"
 	"time"
+    "github.com/google/uuid"
+    "github.com/jackc/pgx/v5/pgxpool"
+    "go.uber.org/zap"
 
-	"[github.com/google/uuid](https://github.com/google/uuid)"
-	"[github.com/jackc/pgx/v5/pgxpool](https://github.com/jackc/pgx/v5/pgxpool)"
-	"go.uber.org/zap"
-
-	"[github.com/xkilldash9x/scalpel-cli/api/schemas](https://github.com/xkilldash9x/scalpel-cli/api/schemas)"
-	"[github.com/xkilldash9x/scalpel-cli/internal/analysis/core](https://github.com/xkilldash9x/scalpel-cli/internal/analysis/core)"
-	// Import autofix implicitly as it's used by the orchestrator.
-	// _ "[github.com/xkilldash9x/scalpel-cli/internal/autofix](https://github.com/xkilldash9x/scalpel-cli/internal/autofix)" 
-	"[github.com/xkilldash9x/scalpel-cli/internal/browser/humanoid](https://github.com/xkilldash9x/scalpel-cli/internal/browser/humanoid)"
-	"[github.com/xkilldash9x/scalpel-cli/internal/config](https://github.com/xkilldash9x/scalpel-cli/internal/config)"
-	"[github.com/xkilldash9x/scalpel-cli/internal/knowledgegraph](https://github.com/xkilldash9x/scalpel-cli/internal/knowledgegraph)"
-	"[github.com/xkilldash9x/scalpel-cli/internal/llmclient](https://github.com/xkilldash9x/scalpel-cli/internal/llmclient)"
+    "github.com/xkilldash9x/scalpel-cli/api/schemas"
+    "github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
+    "github.com/xkilldash9x/scalpel-cli/internal/browser/humanoid"
+    "github.com/xkilldash9x/scalpel-cli/internal/config"
+    "github.com/xkilldash9x/scalpel-cli/internal/knowledgegraph"
+    "github.com/xkilldash9x/scalpel-cli/internal/llmclient"
 )
 
 // Agent orchestrates the components of an autonomous security mission.

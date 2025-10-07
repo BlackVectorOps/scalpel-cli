@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"os"
 	"sync"
 	"time"
 
@@ -30,8 +31,38 @@ type Config struct {
 	Scanners  ScannersConfig  `mapstructure:"scanners" yaml:"scanners"`
 	Agent     AgentConfig     `mapstructure:"agent" yaml:"agent"`
 	Discovery DiscoveryConfig `mapstructure:"discovery" yaml:"discovery"`
+	Autofix   AutofixConfig   `mapstructure:"autofix" yaml:"autofix"`
 	// ScanConfig gets its marching orders from CLI flags, not the config file.
 	Scan ScanConfig `mapstructure:"-" yaml:"-"`
+}
+
+// AutofixConfig holds settings for the self-healing (autofix) subsystem.
+type AutofixConfig struct {
+	Enabled                bool         `mapstructure:"enabled" yaml:"enabled"`
+	ProjectRoot            string       `mapstructure:"project_root" yaml:"project_root"`
+	DASTLogPath            string       `mapstructure:"dast_log_path" yaml:"dast_log_path"`
+	MinConfidenceThreshold float64      `mapstructure:"min_confidence_threshold" yaml:"min_confidence_threshold"`
+	CooldownSeconds        int          `mapstructure:"cooldown_seconds" yaml:"cooldown_seconds"`
+	KeepWorkspaceOnFailure bool         `mapstructure:"keep_workspace_on_failure" yaml:"keep_workspace_on_failure"`
+	Git                    GitConfig    `mapstructure:"git" yaml:"git"`
+	GitHub                 GitHubConfig `mapstructure:"github" yaml:"github"`
+}
+
+// GitConfig defines the committer identity.
+type GitConfig struct {
+	AuthorName  string `mapstructure:"author_name" yaml:"author_name"`
+	AuthorEmail string `mapstructure:"author_email" yaml:"author_email"`
+}
+
+// GitHubConfig defines the configuration for GitHub integration.
+type GitHubConfig struct {
+	// The GitHub Personal Access Token (PAT).
+	// SECURITY: Loaded via environment variable (SCALPEL_AUTOFIX_GH_TOKEN).
+	Token      string `mapstructure:"token" yaml:"-"` // Ignore in YAML/JSON
+	RepoOwner  string `mapstructure:"repo_owner" yaml:"repo_owner"`
+	RepoName   string `mapstructure:"repo_name" yaml:"repo_name"`
+	// The base branch to target for pull requests (e.g., "main").
+	BaseBranch string `mapstructure:"base_branch" yaml:"base_branch"`
 }
 
 // LoggerConfig holds all the configuration for the logger.
@@ -66,8 +97,8 @@ type DatabaseConfig struct {
 
 // EngineConfig configures the core task processing engine.
 type EngineConfig struct {
-	QueueSize         int           `mapstructure:"queue_size" yaml:"queue_size"`
-	WorkerConcurrency int           `mapstructure:"worker_concurrency" yaml:"worker_concurrency"`
+	QueueSize          int           `mapstructure:"queue_size" yaml:"queue_size"`
+	WorkerConcurrency  int           `mapstructure:"worker_concurrency" yaml:"worker_concurrency"`
 	DefaultTaskTimeout time.Duration `mapstructure:"default_task_timeout" yaml:"default_task_timeout"`
 }
 
@@ -174,16 +205,16 @@ type AuthConfig struct {
 
 // ATOConfig configures the Account Takeover scanner.
 type ATOConfig struct {
-	Enabled              bool     `mapstructure:"enabled" yaml:"enabled"`
-	CredentialFile       string   `mapstructure:"credential_file" yaml:"credential_file"`
-	Concurrency          int      `mapstructure:"concurrency" yaml:"concurrency"`
-	MinRequestDelayMs    int      `mapstructure:"min_request_delay_ms" yaml:"min_request_delay_ms"`
-	RequestDelayJitterMs int      `mapstructure:"request_delay_jitter_ms" yaml:"request_delay_jitter_ms"`
-	SuccessKeywords      []string `mapstructure:"success_keywords" yaml:"success_keywords"`
-	UserFailureKeywords  []string `mapstructure:"user_failure_keywords" yaml:"user_failure_keywords"`
-	PassFailureKeywords  []string `mapstructure:"pass_failure_keywords" yaml:"pass_failure_keywords"`
+	Enabled                bool     `mapstructure:"enabled" yaml:"enabled"`
+	CredentialFile         string   `mapstructure:"credential_file" yaml:"credential_file"`
+	Concurrency            int      `mapstructure:"concurrency" yaml:"concurrency"`
+	MinRequestDelayMs      int      `mapstructure:"min_request_delay_ms" yaml:"min_request_delay_ms"`
+	RequestDelayJitterMs   int      `mapstructure:"request_delay_jitter_ms" yaml:"request_delay_jitter_ms"`
+	SuccessKeywords        []string `mapstructure:"success_keywords" yaml:"success_keywords"`
+	UserFailureKeywords    []string `mapstructure:"user_failure_keywords" yaml:"user_failure_keywords"`
+	PassFailureKeywords    []string `mapstructure:"pass_failure_keywords" yaml:"pass_failure_keywords"`
 	GenericFailureKeywords []string `mapstructure:"generic_failure_keywords" yaml:"generic_failure_keywords"`
-	LockoutKeywords      []string `mapstructure:"lockout_keywords" yaml:"lockout_keywords"`
+	LockoutKeywords        []string `mapstructure:"lockout_keywords" yaml:"lockout_keywords"`
 }
 
 // IDORConfig defines the settings for the Insecure Direct Object Reference scanner.
@@ -258,25 +289,17 @@ type LLMModelConfig struct {
 }
 
 // NewDefaultConfig creates a new configuration struct populated with default values.
-// This is super useful for tests or for bootstrapping the app when a config
-// file is missing.
 func NewDefaultConfig() *Config {
 	v := viper.New()
-	// We're setting the defaults using the same mechanism as the main app.
 	SetDefaults(v)
-
 	var cfg Config
-	// Unmarshal the defaults into our struct.
 	if err := v.Unmarshal(&cfg); err != nil {
-		// This should realistically never fail if our defaults and struct tags are correct.
-		// Panicking here is reasonable because it indicates a fundamental programmer error.
 		panic(fmt.Sprintf("failed to unmarshal default config: %v", err))
 	}
 	return &cfg
 }
 
 // SetDefaults initializes default values for various configuration parameters.
-// This ensures the application can run with a minimal config file.
 func SetDefaults(v *viper.Viper) {
 	// -- Logger --
 	v.SetDefault("logger.level", "info")
@@ -328,18 +351,26 @@ func SetDefaults(v *viper.Viper) {
 	v.SetDefault("discovery.concurrency", 20)
 	v.SetDefault("discovery.timeout", "15m")
 	v.SetDefault("discovery.passive_enabled", true)
-	v.SetDefault("discovery.include_subdomains", true) // Default for subdomain discovery
-	v.SetDefault("discovery.crtsh_rate_limit", 2.0) // 1 request every 0.5 seconds
+	v.SetDefault("discovery.include_subdomains", true)
+	v.SetDefault("discovery.crtsh_rate_limit", 2.0)
 	v.SetDefault("discovery.passive_concurrency", 10)
 
 	// -- Agent --
 	v.SetDefault("agent.llm.default_fast_model", "gemini-2.5-flash")
 	v.SetDefault("agent.llm.default_powerful_model", "gemini-2.5-pro")
-	v.SetDefault("agent.knowledge_graph.type", "postgres") // 'memory' or 'postgres'
+	v.SetDefault("agent.knowledge_graph.type", "postgres")
+
+	// -- Autofix --
+	v.SetDefault("autofix.enabled", false)
+	v.SetDefault("autofix.min_confidence_threshold", 0.75)
+	v.SetDefault("autofix.cooldown_seconds", 300) // 5 minutes
+	v.SetDefault("autofix.keep_workspace_on_failure", false)
+	v.SetDefault("autofix.git.author_name", "scalpel-autofix-bot")
+	v.SetDefault("autofix.git.author_email", "autofix@scalpel.security")
+	v.SetDefault("autofix.github.base_branch", "main")
 }
 
 // Validate checks the configuration for required fields and sane values.
-// A little bit of sanity checking goes a long way.
 func (c *Config) Validate() error {
 	if c.Database.URL == "" {
 		return fmt.Errorf("database.url is a required configuration field")
@@ -350,18 +381,53 @@ func (c *Config) Validate() error {
 	if c.Browser.Concurrency <= 0 {
 		return fmt.Errorf("browser.concurrency must be a positive integer")
 	}
+
+	// Autofix Validation
+	if err := c.Autofix.Validate(); err != nil {
+		return fmt.Errorf("autofix configuration invalid: %w", err)
+	}
+
+	return nil
+}
+
+// Validate checks the Autofix configuration, particularly the GitHub integration.
+func (a *AutofixConfig) Validate() error {
+	if !a.Enabled {
+		return nil
+	}
+	if a.MinConfidenceThreshold < 0.0 || a.MinConfidenceThreshold > 1.0 {
+		return fmt.Errorf("min_confidence_threshold must be between 0.0 and 1.0")
+	}
+	// Check GitHub configuration if enabled
+	if a.GitHub.RepoOwner == "" || a.GitHub.RepoName == "" || a.GitHub.BaseBranch == "" {
+		return fmt.Errorf("github.repo_owner, github.repo_name, and github.base_branch are required")
+	}
+	// Token validation
+	if a.GitHub.Token == "" {
+		// SECURITY: Ensure the token is present if the feature is enabled.
+		return fmt.Errorf("GitHub token is required but not found. Ensure SCALPEL_AUTOFIX_GH_TOKEN environment variable is set")
+	}
 	return nil
 }
 
 // Load initializes the configuration singleton from Viper.
-// This should only be called once at the very beginning.
 func Load(v *viper.Viper) error {
 	once.Do(func() {
 		var cfg Config
+
+		// Bind Environment Variables for sensitive data
+		v.BindEnv("autofix.github.token", "SCALPEL_AUTOFIX_GH_TOKEN")
+
 		if err := v.Unmarshal(&cfg); err != nil {
 			loadErr = fmt.Errorf("error unmarshaling config: %w", err)
 			return
 		}
+
+		// Manually load the token if Unmarshal didn't pick it up
+		if cfg.Autofix.Enabled && cfg.Autofix.GitHub.Token == "" {
+			cfg.Autofix.GitHub.Token = os.Getenv("SCALPEL_AUTOFIX_GH_TOKEN")
+		}
+
 		if err := cfg.Validate(); err != nil {
 			loadErr = fmt.Errorf("invalid configuration: %w", err)
 			return
@@ -372,8 +438,6 @@ func Load(v *viper.Viper) error {
 }
 
 // Get returns the loaded configuration instance.
-// Panics if the config hasn't been loaded, because if you're asking for it,
-// it really should have been initialized already.
 func Get() *Config {
 	if instance == nil {
 		panic("Configuration not initialized. Ensure initialization happens in the root command.")
@@ -382,7 +446,6 @@ func Get() *Config {
 }
 
 // Set initializes the global configuration instance if not already set.
-// Primarily useful for testing where you want to inject a specific config.
 func Set(cfg *Config) {
 	once.Do(func() {
 		instance = cfg
