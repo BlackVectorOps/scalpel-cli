@@ -1273,7 +1273,7 @@ func (s *Session) ExposeFunction(ctx context.Context, name string, function inte
 	return s.exposeFunctionInternal(lockedCtx, name, function)
 }
 
-func (s *Session) exposeFunctionInternal(ctx context.Context, name string, function interface{}) error {
+func (s *Session) exposeFunctionInternal(_ context.Context, name string, function interface{}) error {
 	s.mu.Lock()
 	s.exposedFunctions[name] = function
 	s.mu.Unlock()
@@ -1946,7 +1946,7 @@ func (s *Session) prepareRequestHeaders(req *http.Request) {
 	}
 }
 
-func (s *Session) findElementNode(ctx context.Context, selector string) (*html.Node, error) {
+func (s *Session) findElementNode(_ context.Context, selector string) (*html.Node, error) {
 	bridge := s.getDOMBridge()
 	if bridge == nil {
 		return nil, fmt.Errorf("DOM bridge is not initialized or session is closed")

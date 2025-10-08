@@ -277,7 +277,7 @@ func (w *Watcher) normalizeFilePath(filePath string) (string, error) {
 	return filepath.ToSlash(relPath), nil
 }
 
-func (w *Watcher) findTriggeringRequest(dastLogPath string, crashTime time.Time) (*DASTRequest, error) {
+func (w *Watcher) findTriggeringRequest(_ string, crashTime time.Time) (*DASTRequest, error) {
 	w.logger.Debug("Simulating DAST log parsing (Placeholder)...")
 	// In a real implementation, this would involve reading the DAST log file backwards
 	// to find the last request sent just before the crashTime.

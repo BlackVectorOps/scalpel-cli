@@ -5,17 +5,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sync"
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
+	"github.com/xkilldash9x/scalpel-cli/internal/mocks"
 )
 
 // -- Mock Implementations --
@@ -34,69 +34,6 @@ func (m *mockWorker) ProcessTask(ctx context.Context, analysisCtx *core.Analysis
 	return nil
 }
 
-// mockStore simulates the behavior of the store.Store service.
-type mockStore struct {
-	mu            sync.Mutex
-	persistedData []*schemas.ResultEnvelope
-	// A channel to signal when data has been persisted, for async testing.
-	persisted chan struct{}
-}
-
-func newMockStore() *mockStore {
-	return &mockStore{
-		persistedData: make([]*schemas.ResultEnvelope, 0),
-		persisted:     make(chan struct{}, 100), // Buffered channel
-	}
-}
-
-func (m *mockStore) PersistData(ctx context.Context, data *schemas.ResultEnvelope) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.persistedData = append(m.persistedData, data)
-	m.persisted <- struct{}{} // Signal that a result was received.
-	return nil
-}
-
-func (m *mockStore) GetPersistedCount() int {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return len(m.persistedData)
-}
-
-// mockBrowserManager is a minimal mock to satisfy the interface dependency.
-type mockBrowserManager struct{}
-
-// FIX: Updated the method signature to match the schemas.BrowserManager interface.
-func (m *mockBrowserManager) NewAnalysisContext(
-	sessionCtx context.Context,
-	cfg interface{},
-	persona schemas.Persona,
-	taintTemplate string,
-	taintConfig string,
-	findingsChan chan<- schemas.Finding, // Added this missing parameter.
-) (schemas.SessionContext, error) {
-	return nil, nil
-}
-
-func (m *mockBrowserManager) Shutdown(ctx context.Context) error {
-	return nil
-}
-
-// mockKGClient is a minimal mock for the knowledge graph client dependency.
-type mockKGClient struct{}
-
-func (m *mockKGClient) AddNode(ctx context.Context, node schemas.Node) error { return nil }
-func (m *mockKGClient) AddEdge(ctx context.Context, edge schemas.Edge) error { return nil }
-func (m *mockKGClient) GetNode(ctx context.Context, id string) (schemas.Node, error) {
-	return schemas.Node{}, nil
-}
-func (m *mockKGClient) GetEdges(ctx context.Context, nodeID string) ([]schemas.Edge, error) {
-	return nil, nil
-}
-func (m *mockKGClient) GetNeighbors(ctx context.Context, nodeID string) ([]schemas.Node, error) {
-	return nil, nil
-}
-
 // -- Test Suite --
 
 // TestTaskEngine_StartStop verifies the engine's core lifecycle: starting, processing tasks, and stopping gracefully.
@@ -109,7 +46,7 @@ func TestTaskEngine_StartStop(t *testing.T) {
 		},
 	}
 	logger := zap.NewNop()
-	store := newMockStore()
+	store := new(mocks.MockStore)
 
 	// This mock worker will add a finding to each task it processes.
 	worker := &mockWorker{
@@ -119,7 +56,7 @@ func TestTaskEngine_StartStop(t *testing.T) {
 		},
 	}
 
-	engine, err := New(cfg, logger, store, &mockBrowserManager{}, &mockKGClient{})
+	engine, err := New(cfg, logger, store, new(mocks.MockBrowserManager), new(mocks.MockKGClient))
 	require.NoError(t, err)
 
 	// We need to replace the real worker with our mock.
@@ -127,9 +64,13 @@ func TestTaskEngine_StartStop(t *testing.T) {
 
 	// -- Execution --
 	taskChan := make(chan schemas.Task, 10)
+
+	// Expect PersistData to be called for each successful task with findings.
+	numTasks := 3
+	store.On("PersistData", mock.Anything, mock.Anything).Return(nil).Times(numTasks)
+
 	engine.Start(context.Background(), taskChan)
 
-	numTasks := 3
 	for i := 0; i < numTasks; i++ {
 		taskChan <- schemas.Task{TaskID: fmt.Sprintf("task-%d", i), TargetURL: "https://example.com"}
 	}
@@ -139,7 +80,7 @@ func TestTaskEngine_StartStop(t *testing.T) {
 	engine.Stop()
 
 	// -- Assertions --
-	assert.Equal(t, numTasks, store.GetPersistedCount(), "Should have persisted a result for each task")
+	store.AssertExpectations(t)
 }
 
 // TestTaskEngine_WorkerError verifies that if a worker returns an error, the result is not persisted.
@@ -147,7 +88,7 @@ func TestTaskEngine_WorkerError(t *testing.T) {
 	// -- Setup --
 	cfg := &config.Config{Engine: config.EngineConfig{WorkerConcurrency: 1}}
 	logger := zap.NewNop()
-	store := newMockStore()
+	store := new(mocks.MockStore)
 	worker := &mockWorker{
 		processFunc: func(ctx context.Context, analysisCtx *core.AnalysisContext) error {
 			// Simulate a processing error.
@@ -155,7 +96,7 @@ func TestTaskEngine_WorkerError(t *testing.T) {
 		},
 	}
 
-	engine, err := New(cfg, logger, store, &mockBrowserManager{}, &mockKGClient{})
+	engine, err := New(cfg, logger, store, new(mocks.MockBrowserManager), new(mocks.MockKGClient))
 	require.NoError(t, err)
 	engine.worker = worker
 
@@ -168,7 +109,7 @@ func TestTaskEngine_WorkerError(t *testing.T) {
 	engine.Stop()
 
 	// -- Assertions --
-	assert.Equal(t, 0, store.GetPersistedCount(), "Should not persist results when worker fails")
+	store.AssertNotCalled(t, "PersistData", mock.Anything, mock.Anything)
 }
 
 // TestTaskEngine_NoResults verifies that no data is persisted if a task yields no findings or KG updates.
@@ -176,12 +117,12 @@ func TestTaskEngine_NoResults(t *testing.T) {
 	// -- Setup --
 	cfg := &config.Config{Engine: config.EngineConfig{WorkerConcurrency: 1}}
 	logger := zap.NewNop()
-	store := newMockStore()
+	store := new(mocks.MockStore)
 	worker := &mockWorker{
-	// Default processFunc returns success with no findings.
+		// Default processFunc returns success with no findings.
 	}
 
-	engine, err := New(cfg, logger, store, &mockBrowserManager{}, &mockKGClient{})
+	engine, err := New(cfg, logger, store, new(mocks.MockBrowserManager), new(mocks.MockKGClient))
 	require.NoError(t, err)
 	engine.worker = worker
 
@@ -194,7 +135,7 @@ func TestTaskEngine_NoResults(t *testing.T) {
 	engine.Stop()
 
 	// -- Assertions --
-	assert.Equal(t, 0, store.GetPersistedCount(), "Should not persist data when there are no results")
+	store.AssertNotCalled(t, "PersistData", mock.Anything, mock.Anything)
 }
 
 // TestTaskEngine_ContextCancellation ensures workers shut down when the main context is cancelled.
@@ -202,7 +143,7 @@ func TestTaskEngine_ContextCancellation(t *testing.T) {
 	// -- Setup --
 	cfg := &config.Config{Engine: config.EngineConfig{WorkerConcurrency: 2}}
 	logger := zap.NewNop()
-	store := newMockStore()
+	store := new(mocks.MockStore)
 
 	// This worker will block until its context is cancelled.
 	worker := &mockWorker{
@@ -212,7 +153,7 @@ func TestTaskEngine_ContextCancellation(t *testing.T) {
 		},
 	}
 
-	engine, err := New(cfg, logger, store, &mockBrowserManager{}, &mockKGClient{})
+	engine, err := New(cfg, logger, store, new(mocks.MockBrowserManager), new(mocks.MockKGClient))
 	require.NoError(t, err)
 	engine.worker = worker
 
@@ -235,5 +176,5 @@ func TestTaskEngine_ContextCancellation(t *testing.T) {
 	// -- Assertions --
 	// The main assertion is that the Stop() call completes without a timeout.
 	// We also expect no data to be persisted because the tasks were cancelled.
-	assert.Equal(t, 0, store.GetPersistedCount(), "No results should be persisted on context cancellation")
+	store.AssertNotCalled(t, "PersistData", mock.Anything, mock.Anything)
 }

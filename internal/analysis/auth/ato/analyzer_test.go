@@ -20,125 +20,28 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
 	"github.com/xkilldash9x/scalpel-cli/internal/browser/humanoid"
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
+	"github.com/xkilldash9x/scalpel-cli/internal/mocks"
 )
 
 // -- Mock Implementations --
 
-// MockSessionContext is a mock implementation of the schemas.SessionContext interface.
-// It also implements HumanoidProvider as required by the analyzer's duck-typing.
-type MockSessionContext struct {
-	mock.Mock
-	// Field to control the return value of GetHumanoid()
+// MockSessionWithHumanoid embeds the central mock and adds the GetHumanoid method
+// to satisfy the HumanoidProvider interface check within the analyzer.
+type MockSessionWithHumanoid struct {
+	*mocks.MockSessionContext
 	humanoidInstance *humanoid.Humanoid
 }
 
-// Implement necessary methods for schemas.SessionContext
-func (m *MockSessionContext) ID() string {
-	args := m.Called()
-	return args.String(0)
-}
-
-func (m *MockSessionContext) CollectArtifacts(ctx context.Context) (*schemas.Artifacts, error) {
-	args := m.Called(ctx)
-	if args.Get(0) == nil {
-		return nil, args.Error(1)
-	}
-	return args.Get(0).(*schemas.Artifacts), args.Error(1)
-}
-
-func (m *MockSessionContext) AddFinding(ctx context.Context, finding schemas.Finding) error {
-	args := m.Called(ctx, finding)
-	return args.Error(0)
-}
-
-func (m *MockSessionContext) Navigate(ctx context.Context, url string) error {
-	args := m.Called(ctx, url)
-	return args.Error(0)
-}
-
-// FIX: Changed timeoutMs from int64 to int to match the interface.
-func (m *MockSessionContext) WaitForAsync(ctx context.Context, timeoutMs int) error {
-	args := m.Called(ctx, timeoutMs)
-	return args.Error(0)
-}
-
-func (m *MockSessionContext) ExecuteScript(ctx context.Context, script string, scriptArgs []interface{}) (json.RawMessage, error) {
-	args := m.Called(ctx, script, scriptArgs)
-	if args.Get(0) == nil {
-		return nil, args.Error(1)
-	}
-	return args.Get(0).(json.RawMessage), args.Error(1)
-}
-
-func (m *MockSessionContext) Click(ctx context.Context, selector string) error {
-	args := m.Called(ctx, selector)
-	return args.Error(0)
-}
-
-func (m *MockSessionContext) Close(ctx context.Context) error {
-	args := m.Called(ctx)
-	return args.Error(0)
-}
-
-func (m *MockSessionContext) DispatchMouseEvent(ctx context.Context, data schemas.MouseEventData) error {
-	args := m.Called(ctx, data)
-	return args.Error(0)
-}
-
-func (m *MockSessionContext) ExposeFunction(ctx context.Context, name string, fn interface{}) error {
-	args := m.Called(ctx, name, fn)
-	return args.Error(0)
-}
-
-// -- Start of newly added missing methods --
-func (m *MockSessionContext) Type(ctx context.Context, selector string, text string) error {
-	args := m.Called(ctx, selector, text)
-	return args.Error(0)
-}
-
-func (m *MockSessionContext) Submit(ctx context.Context, selector string) error {
-	args := m.Called(ctx, selector)
-	return args.Error(0)
-}
-
-func (m *MockSessionContext) ScrollPage(ctx context.Context, direction string) error {
-	args := m.Called(ctx, direction)
-	return args.Error(0)
-}
-
-func (m *MockSessionContext) InjectScriptPersistently(ctx context.Context, script string) error {
-	args := m.Called(ctx, script)
-	return args.Error(0)
-}
-
-func (m *MockSessionContext) Interact(ctx context.Context, config schemas.InteractionConfig) error {
-	args := m.Called(ctx, config)
-	return args.Error(0)
-}
-
-func (m *MockSessionContext) Sleep(ctx context.Context, d time.Duration) error {
-	args := m.Called(ctx, d)
-	return args.Error(0)
-}
-
-func (m *MockSessionContext) SendKeys(ctx context.Context, keys string) error {
-	args := m.Called(ctx, keys)
-	return args.Error(0)
-}
-
-func (m *MockSessionContext) GetElementGeometry(ctx context.Context, selector string) (*schemas.ElementGeometry, error) {
-	args := m.Called(ctx, selector)
-	if args.Get(0) == nil {
-		return nil, args.Error(1)
-	}
-	return args.Get(0).(*schemas.ElementGeometry), args.Error(1)
-}
-// -- End of newly added missing methods --
-
-
-// GetHumanoid implements the HumanoidProvider interface.
-func (m *MockSessionContext) GetHumanoid() *humanoid.Humanoid {
+// GetHumanoid implements the HumanoidProvider interface for testing.
+func (m *MockSessionWithHumanoid) GetHumanoid() *humanoid.Humanoid {
 	return m.humanoidInstance
+}
+
+// newMockSession creates a new mock session for ATO tests.
+func newMockSession() *MockSessionWithHumanoid {
+	return &MockSessionWithHumanoid{
+		MockSessionContext: mocks.NewMockSessionContext(),
+	}
 }
 
 // Helper function to create a new analyzer instance for testing.
@@ -152,14 +55,14 @@ func newTestAnalyzer(t *testing.T, cfg *config.Config) *ATOAnalyzer {
 				Active: config.ActiveScannersConfig{
 					Auth: config.AuthConfig{
 						ATO: config.ATOConfig{
-							Enabled:              true,
-							Concurrency:          2,
-							MinRequestDelayMs:    0,
-							RequestDelayJitterMs: 0,
-							SuccessKeywords:      []string{"\"success\":true", "welcome"},
-							LockoutKeywords:      []string{"locked", "too many"},
-							PassFailureKeywords:  []string{"invalid password", "incorrect password"},
-							UserFailureKeywords:  []string{"user not found"},
+							Enabled:                true,
+							Concurrency:            2,
+							MinRequestDelayMs:      0,
+							RequestDelayJitterMs:   0,
+							SuccessKeywords:        []string{"\"success\":true", "welcome"},
+							LockoutKeywords:        []string{"locked", "too many"},
+							PassFailureKeywords:    []string{"invalid password", "incorrect password"},
+							UserFailureKeywords:    []string{"user not found"},
 							GenericFailureKeywords: []string{"login failed"},
 						},
 					},
@@ -186,7 +89,7 @@ func TestNewATOAnalyzer_Initialization(t *testing.T) {
 			},
 		},
 	}
-	
+
 	analyzer := newTestAnalyzer(t, cfg)
 
 	assert.NotNil(t, analyzer)
@@ -385,7 +288,7 @@ func TestAnalyzeLoginResponse(t *testing.T) {
 func TestExecuteLoginAttempt_JSON(t *testing.T) {
 	t.Parallel()
 	a := newTestAnalyzer(t, nil)
-	mockCtx := new(MockSessionContext)
+	mockCtx := newMockSession()
 	ctx := context.Background()
 
 	attempt := &loginAttempt{
@@ -430,7 +333,7 @@ func TestExecuteLoginAttempt_JSON(t *testing.T) {
 func TestExecuteLoginAttempt_FormURLEncoded(t *testing.T) {
 	t.Parallel()
 	a := newTestAnalyzer(t, nil)
-	mockCtx := new(MockSessionContext)
+	mockCtx := newMockSession()
 	ctx := context.Background()
 
 	attempt := &loginAttempt{
@@ -461,9 +364,9 @@ func TestExecuteLoginAttempt_FormURLEncoded(t *testing.T) {
 func TestGetFreshCSRFToken_Success(t *testing.T) {
 	t.Parallel()
 	a := newTestAnalyzer(t, nil)
-	mockCtx := new(MockSessionContext)
+	mockCtx := newMockSession()
 	mockCtx.humanoidInstance = nil
-	
+
 	ctx := context.Background()
 	pageURL := "https://example.com/login"
 
@@ -502,7 +405,7 @@ func TestLegacyPause_TimingAndCancellation(t *testing.T) {
 	a := newTestAnalyzer(t, cfg)
 
 	start := time.Now()
-	err := a.executePause(context.Background(), nil) 
+	err := a.executePause(context.Background(), nil)
 	duration := time.Since(start)
 
 	assert.NoError(t, err)
@@ -517,7 +420,7 @@ func TestLegacyPause_TimingAndCancellation(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 		cancel()
 	}()
-	err = a.executePause(ctx, nil) 
+	err = a.executePause(ctx, nil)
 	duration = time.Since(start)
 
 	assert.Less(t, duration.Milliseconds(), int64(500))
@@ -525,7 +428,7 @@ func TestLegacyPause_TimingAndCancellation(t *testing.T) {
 
 func TestAnalyze_Integration(t *testing.T) {
 	a := newTestAnalyzer(t, nil)
-	mockCtx := new(MockSessionContext)
+	mockCtx := newMockSession()
 	ctx := context.Background()
 
 	// -- Setup HAR and Artifacts --
@@ -585,7 +488,7 @@ func TestAnalyze_Integration(t *testing.T) {
 		// Match the baseline call for the enumeration endpoint
 		return len(args) == 4 && args[0] == "https://example.com/signin" && !strings.Contains(args[3].(string), "admin")
 	})).Return(json.RawMessage(baselineEnumResp), nil).Once()
-	
+
 	// 2b. Attempt with valid user, wrong pass -> distinct "incorrect password" message
 	enumResp, _ := json.Marshal(fetchResponse{Status: http.StatusUnauthorized, Body: "incorrect password"})
 	mockCtx.On("ExecuteScript", ctx, mock.AnythingOfType("string"), mock.MatchedBy(func(args []interface{}) bool {
@@ -598,7 +501,6 @@ func TestAnalyze_Integration(t *testing.T) {
 		return len(args) == 4 && args[0] == "https://example.com/signin"
 	})).Return(json.RawMessage(baselineEnumResp), nil)
 
-
 	// -- Execute and Assert --
 	err := a.Analyze(ctx, mockCtx)
 	require.NoError(t, err)
@@ -609,7 +511,6 @@ func TestAnalyze_Integration(t *testing.T) {
 		defer findingsMu.Unlock()
 		return len(findings) >= 2
 	}, 2*time.Second, 50*time.Millisecond, "Expected at least 2 findings")
-
 
 	hasStuffing := false
 	hasEnumeration := false

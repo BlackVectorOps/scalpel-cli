@@ -25,11 +25,12 @@ import (
 	"go.uber.org/zap/zaptest"
 
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
+	"github.com/xkilldash9x/scalpel-cli/internal/mocks"
 )
 
 // SetupHermeticEnv creates an isolated environment for E2E testing the Developer workflow.
 // It includes a mock GitHub server and a local Git repository acting as the remote origin.
-func SetupHermeticEnv(t *testing.T) (*Developer, *MockLLMClient, string) {
+func SetupHermeticEnv(t *testing.T) (*Developer, *mocks.MockLLMClient, string) {
 	t.Helper()
 
 	// Check prerequisites
@@ -94,7 +95,7 @@ func Divide(a, b int) int {
 
 	// 3. Setup Mocks and Developer instance
 	logger := zaptest.NewLogger(t)
-	mockLLM := new(MockLLMClient)
+	mockLLM := new(mocks.MockLLMClient)
 	cfg := &config.AutofixConfig{
 		Enabled: true,
 		GitHub: config.GitHubConfig{
@@ -125,13 +126,13 @@ func Divide(a, b int) int {
 	require.NoError(t, err, "Failed to authenticate with mock GitHub server")
 
 	dev := &Developer{
-		logger:            logger.Named("test-dev"),
-		llmClient:         mockLLM,
-		cfg:               cfg,
-		githubClient:      ghClient,
-		gitAuth:           nil,
-		ghConfig:          &cfg.GitHub,
-		gitConfig:         &cfg.Git,
+		logger:       logger.Named("test-dev"),
+		llmClient:    mockLLM,
+		cfg:          cfg,
+		githubClient: ghClient,
+		gitAuth:      nil,
+		ghConfig:     &cfg.GitHub,
+		gitConfig:    &cfg.Git,
 	}
 
 	return dev, mockLLM, remotePath

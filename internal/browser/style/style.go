@@ -1,4 +1,3 @@
-// internal/browser/style/style.go
 package style
 
 import (
@@ -28,7 +27,7 @@ type ShadowDOMProcessor interface {
 // -- Constants and Configuration --
 
 const (
-	BaseFontSize    = 16.0 // Default root font size.
+	BaseFontSize      = 16.0 // Default root font size (used for 'rem' units if root element doesn't specify).
 	DefaultLineHeight = 1.2  // Default multiplier for 'line-height: normal'.
 )
 
@@ -191,12 +190,14 @@ func (se *Engine) buildTreeRecursive(node *html.Node, parent *StyledNode, scoped
 	if node.Type == html.CommentNode {
 		return nil
 	}
+	// Optimization: Skip <head> content.
 	if parent != nil && parent.Node != nil && parent.Node.Type == html.ElementNode && strings.ToLower(parent.Node.Data) == "html" {
 		if node.Type == html.ElementNode && strings.ToLower(node.Data) == "head" {
 			return nil
 		}
 	}
 
+	// 1. Calculate specified styles (The Cascade).
 	computedStyles := make(map[parser.Property]parser.Value)
 	if node.Type == html.ElementNode {
 		computedStyles = se.CalculateStyles(node, scopedSheets)
@@ -207,21 +208,26 @@ func (se *Engine) buildTreeRecursive(node *html.Node, parent *StyledNode, scoped
 		ComputedStyles: computedStyles,
 	}
 
+	// 2. Handle Inheritance.
 	if parent != nil {
 		se.inheritStyles(styledNode, parent)
 	} else {
 		se.applyRootDefaults(styledNode)
 	}
 
+	// 3. Resolve relative values (Compute absolute values).
 	se.resolveRelativeValues(styledNode, parent)
 
-	if se.shadowEngine.DetectShadowHost(node) {
+	// 4. Handle Shadow DOM instantiation.
+	isShadowHost := se.shadowEngine.DetectShadowHost(node)
+	if isShadowHost {
 		shadowRootNode, shadowScopedSheets := se.shadowEngine.InstantiateShadowRoot(node)
 		if shadowRootNode != nil {
 			styledNode.ShadowRoot = se.buildTreeRecursive(shadowRootNode, styledNode, shadowScopedSheets)
 		}
 	}
 
+	// 5. Recurse into children (Light DOM).
 	for c := node.FirstChild; c != nil; c = c.NextSibling {
 		childStyled := se.buildTreeRecursive(c, styledNode, scopedSheets)
 		if childStyled != nil {
@@ -229,10 +235,16 @@ func (se *Engine) buildTreeRecursive(node *html.Node, parent *StyledNode, scoped
 		}
 	}
 
+	// 6. Handle Slot Assignment (if this node is a shadow host).
+	if isShadowHost && styledNode.ShadowRoot != nil {
+		se.shadowEngine.AssignSlots(styledNode)
+	}
+
 	return styledNode
 }
 
 func (se *Engine) applyRootDefaults(sn *StyledNode) {
+	// Ensure the root has a base font size if none was set by UA/Author sheets.
 	if _, exists := sn.ComputedStyles["font-size"]; !exists {
 		sn.ComputedStyles["font-size"] = parser.Value(fmt.Sprintf("%fpx", BaseFontSize))
 	}
@@ -244,6 +256,7 @@ func (se *Engine) inheritStyles(child, parent *StyledNode) {
 		"line-height": true, "text-align": true, "visibility": true, "cursor": true,
 	}
 
+	// Handle explicit 'inherit' keyword.
 	for prop, val := range child.ComputedStyles {
 		if val == "inherit" {
 			if parentVal, parentHas := parent.ComputedStyles[prop]; parentHas {
@@ -252,6 +265,7 @@ func (se *Engine) inheritStyles(child, parent *StyledNode) {
 		}
 	}
 
+	// Handle default inheritance.
 	for prop := range inheritableProperties {
 		if _, exists := child.ComputedStyles[prop]; !exists {
 			if val, parentHas := parent.ComputedStyles[prop]; parentHas {
@@ -261,22 +275,55 @@ func (se *Engine) inheritStyles(child, parent *StyledNode) {
 	}
 }
 
+// isResolvableRelative checks if a CSS value string contains units that need resolving.
+// This is an optimization to avoid parsing and re-serializing absolute values like '1px'.
+func isResolvableRelative(value parser.Value) bool {
+	s := string(value)
+	// We check for units that depend on font size or viewport size.
+	return strings.Contains(s, "em") || // Covers 'em' and 'rem'
+		strings.Contains(s, "%") ||
+		strings.Contains(s, "vw") ||
+		strings.Contains(s, "vh") ||
+		strings.Contains(s, "vmin") ||
+		strings.Contains(s, "vmax")
+}
+
+// resolveRelativeValues converts relative units (em, rem, vw, vh) into absolute pixel values where possible.
 func (se *Engine) resolveRelativeValues(sn *StyledNode, parent *StyledNode) {
+	// 1. Determine parent font size.
 	parentFontSize := BaseFontSize
 	if parent != nil {
 		parentFontSize = ParseAbsoluteLength(parent.Lookup("font-size", fmt.Sprintf("%fpx", BaseFontSize)))
 	}
 
+	// 2. Resolve the element's own font-size first.
 	if fontSizeStr, ok := sn.ComputedStyles["font-size"]; ok {
 		resolvedFontSize := ParseLengthWithUnits(string(fontSizeStr), parentFontSize, BaseFontSize, parentFontSize, se.viewportWidth, se.viewportHeight)
 		sn.ComputedStyles["font-size"] = parser.Value(fmt.Sprintf("%fpx", resolvedFontSize))
 	}
 
+	// 3. Get the computed font size of the current element.
 	currentFontSize := ParseAbsoluteLength(sn.Lookup("font-size", fmt.Sprintf("%fpx", BaseFontSize)))
 
+	// 4. Resolve line-height (special handling for unitless).
 	if lineHeightStr, ok := sn.ComputedStyles["line-height"]; ok {
 		resolvedLineHeight := se.resolveLineHeight(string(lineHeightStr), currentFontSize)
 		sn.ComputedStyles["line-height"] = parser.Value(fmt.Sprintf("%fpx", resolvedLineHeight))
+	}
+
+	// 5. Resolve other properties containing font-relative or viewport-relative units.
+	for prop, value := range sn.ComputedStyles {
+		if prop == "font-size" || prop == "line-height" {
+			continue
+		}
+
+		// FIX: Only attempt to resolve values that contain relative units.
+		// This prevents re-formatting "1px" to "1.000000px" and fixes the layout property resolution.
+		if isResolvableRelative(value) {
+			// For properties other than font-size, 'em' refers to the current element's font size.
+			resolvedValue := ParseLengthWithUnits(string(value), currentFontSize, BaseFontSize, 0, se.viewportWidth, se.viewportHeight)
+			sn.ComputedStyles[prop] = parser.Value(fmt.Sprintf("%fpx", resolvedValue))
+		}
 	}
 }
 
@@ -286,11 +333,14 @@ func (se *Engine) resolveLineHeight(value string, fontSize float64) float64 {
 		return fontSize * DefaultLineHeight
 	}
 
+	// Check for unitless number (e.g., '1.5').
 	if val, err := parseFloat(value); err == nil && !strings.ContainsAny(value, "px%emremvwvhvminvmax") {
+		// Unitless value is a multiplier of the font size.
 		return fontSize * val
 	}
 
-	return ParseLengthWithUnits(value, fontSize, BaseFontSize, 0, se.viewportWidth, se.viewportHeight)
+	// Handle lengths with units. For line-height, '%' also refers to the element's own font size.
+	return ParseLengthWithUnits(value, fontSize, BaseFontSize, fontSize, se.viewportWidth, se.viewportHeight)
 }
 
 type StyleOrigin int
@@ -380,30 +430,99 @@ func (se *Engine) CalculateStyles(node *html.Node, scopedSheets []parser.StyleSh
 	return styles
 }
 
+// expandShorthands converts shorthand properties into their longhand equivalents.
 func expandShorthands(styles map[parser.Property]parser.Value) {
 	expandFlexShorthand(styles)
+
+	// Expand 1-to-4 value shorthands (TRBL order).
 	expand1To4Shorthand(styles, "margin", "margin-top", "margin-right", "margin-bottom", "margin-left")
 	expand1To4Shorthand(styles, "padding", "padding-top", "padding-right", "padding-bottom", "padding-left")
 	expand1To4Shorthand(styles, "border-width", "border-top-width", "border-right-width", "border-bottom-width", "border-left-width")
+	expand1To4Shorthand(styles, "border-color", "border-top-color", "border-right-color", "border-bottom-color", "border-left-color")
+	expand1To4Shorthand(styles, "border-style", "border-top-style", "border-right-style", "border-bottom-style", "border-left-style")
 
-	if borderVal, ok := styles["border"]; ok {
+	// Expand 'border' and 'border-[side]' shorthands (e.g., border: 1px solid red;).
+
+	// Helper maps for robust border shorthand parsing.
+	borderStyles := map[string]bool{
+		"none": true, "hidden": true, "dotted": true, "dashed": true,
+		"solid": true, "double": true, "groove": true, "ridge": true,
+		"inset": true, "outset": true,
+	}
+	borderWidths := map[string]bool{"thin": true, "medium": true, "thick": true}
+
+	// Function to process generic border shorthand (border, border-top, etc.)
+	processBorderShorthand := func(propName string) {
+		borderVal, ok := styles[parser.Property(propName)]
+		if !ok {
+			return
+		}
+
 		parts := strings.Fields(string(borderVal))
-		width, styleVal := "medium", "none"
-		foundWidth, foundStyle := false, false
+		// Defaults according to CSS spec
+		width, styleVal, colorVal := "medium", "none", ""
+		foundWidth, foundStyle, foundColor := false, false, false
+
 		for _, part := range parts {
-			if !foundWidth && (strings.ContainsAny(part, "px%emremvwvh") || (len(part) > 0 && (part[0] >= '0' && part[0] <= '9')) || part == "thin" || part == "medium" || part == "thick") {
-				width = part
-				foundWidth = true
-			} else if !foundStyle && (part == "solid" || part == "dashed" || part == "dotted" || part == "double" || part == "none" || part == "hidden") {
+			partLower := strings.ToLower(part)
+
+			// 1. Check for Style
+			if !foundStyle && borderStyles[partLower] {
 				styleVal = part
 				foundStyle = true
+				continue
+			}
+
+			// 2. Check for Width
+			if !foundWidth {
+				// Rudimentary check for length (unit or starts with digit/dot)
+				isLength := strings.ContainsAny(part, "px%emremvwvh") || (len(part) > 0 && ((part[0] >= '0' && part[0] <= '9') || part[0] == '.'))
+				if isLength || borderWidths[partLower] {
+					width = part
+					foundWidth = true
+					continue
+				}
+			}
+
+			// 3. Check for Color
+			if !foundColor {
+				// Use the existing ParseColor function to validate if it's a color.
+				if _, ok := ParseColor(part); ok {
+					colorVal = part
+					foundColor = true
+					continue
+				}
 			}
 		}
-		for _, side := range []string{"top", "right", "bottom", "left"} {
+
+		// Determine which sides to apply based on the property name.
+		var sides []string
+		if propName == "border" {
+			sides = []string{"top", "right", "bottom", "left"}
+		} else {
+			// Handle border-top, border-left etc.
+			side := strings.TrimPrefix(propName, "border-")
+			if side == "top" || side == "right" || side == "bottom" || side == "left" {
+				sides = []string{side}
+			}
+		}
+
+		// Apply the values.
+		for _, side := range sides {
 			styles[parser.Property("border-"+side+"-width")] = parser.Value(width)
 			styles[parser.Property("border-"+side+"-style")] = parser.Value(styleVal)
+			if foundColor {
+				// Only set color if found, otherwise it retains existing value (e.g., from border-color or currentcolor).
+				styles[parser.Property("border-"+side+"-color")] = parser.Value(colorVal)
+			}
 		}
 	}
+
+	processBorderShorthand("border")
+	processBorderShorthand("border-top")
+	processBorderShorthand("border-right")
+	processBorderShorthand("border-bottom")
+	processBorderShorthand("border-left")
 }
 
 func expand1To4Shorthand(styles map[parser.Property]parser.Value, shorthand, top, right, bottom, left parser.Property) {
@@ -428,42 +547,61 @@ func expand1To4Shorthand(styles map[parser.Property]parser.Value, shorthand, top
 	}
 }
 
+// expandFlexShorthand implements the CSS specification logic for 'flex'.
 func expandFlexShorthand(styles map[parser.Property]parser.Value) {
 	flexVal, ok := styles["flex"]
 	if !ok {
 		return
 	}
+
+	// Defaults (initial values: 0 1 auto)
 	grow, shrink, basis := "0", "1", "auto"
 	parts := strings.Fields(string(flexVal))
+
+	// Helper to check if a string represents a length/basis value.
 	isLengthCheck := func(s string) bool {
-		return strings.ContainsAny(s, "px%emremvwvhvminvmax") || (s == "0" && len(s) == 1)
+		// Contains units, or is 'auto'/'content', or is '0'.
+		return strings.ContainsAny(s, "px%emremvwvhvminvmax") || s == "auto" || s == "content" || (s == "0" && len(s) == 1)
 	}
 
-	if len(parts) == 1 {
+	// Parsing logic based on the number of values provided (CSS Flexbox spec).
+	switch len(parts) {
+	case 1:
 		switch parts[0] {
-		case "none":
+		case "none": // 0 0 auto
 			grow, shrink, basis = "0", "0", "auto"
-		case "auto":
+		case "auto": // 1 1 auto
 			grow, shrink, basis = "1", "1", "auto"
 		default:
 			isLength := isLengthCheck(parts[0])
+			// Check if it's a unitless number (flex-grow).
 			if _, err := parseFloat(parts[0]); err == nil && !isLength {
+				// flex: <number> -> <number> 1 0px
 				grow = parts[0]
+				shrink = "1"
+				basis = "0px" // Basis defaults to 0 when only grow is specified.
 			} else {
+				// flex: <length> -> 1 1 <length>
 				basis = parts[0]
 				grow = "1"
 				shrink = "1"
 			}
 		}
-	} else if len(parts) == 2 {
+	case 2:
+		// flex: <grow> <shrink> OR flex: <grow> <basis>
 		grow = parts[0]
 		isLength := isLengthCheck(parts[1])
 		if _, err := parseFloat(parts[1]); err == nil && !isLength {
+			// flex: <grow> <shrink> -> <grow> <shrink> 0px
 			shrink = parts[1]
+			basis = "0px"
 		} else {
+			// flex: <grow> <basis> -> <grow> 1 <basis>
 			basis = parts[1]
+			shrink = "1"
 		}
-	} else if len(parts) >= 3 {
+	case 3:
+		// flex: <grow> <shrink> <basis>
 		grow = parts[0]
 		shrink = parts[1]
 		basis = parts[2]
@@ -474,12 +612,23 @@ func expandFlexShorthand(styles map[parser.Property]parser.Value) {
 	styles["flex-basis"] = parser.Value(basis)
 }
 
+// calculateCascadePriority determines the priority based on Origin and Importance.
+// Higher number means higher priority.
 func calculateCascadePriority(d DeclarationWithContext) int {
 	isImportant := d.Declaration.Important
+
+	// The Cascade Order (lowest to highest priority):
+	// 1. User agent declarations (normal)
+	// 2. Author declarations (normal)
+	// 3. Inline declarations (normal)
+	// 4. Author declarations (!important)
+	// 5. Inline declarations (!important)
+	// 6. User agent declarations (!important)
+
 	switch d.Origin {
 	case OriginUserAgent:
 		if isImportant {
-			return 5
+			return 6
 		}
 		return 1
 	case OriginAuthor:
@@ -489,7 +638,7 @@ func calculateCascadePriority(d DeclarationWithContext) int {
 		return 2
 	case OriginInline:
 		if isImportant {
-			return 4
+			return 5
 		}
 		return 3
 	}
@@ -520,6 +669,8 @@ func parseInlineStyles(styleAttr string) []parser.Declaration {
 	return decls
 }
 
+// -- Selector Matching Implementation --
+
 func (se *Engine) matches(node *html.Node, group parser.SelectorGroup) (*parser.ComplexSelector, bool) {
 	if node.Type != html.ElementNode {
 		return nil, false
@@ -540,9 +691,13 @@ func (se *Engine) recursiveMatch(node *html.Node, complexSelector parser.Complex
 	if node == nil || index < 0 {
 		return false
 	}
+
+	// We check node type during traversal for combinators.
+	// For the current node match, it must be an element.
 	if node.Type != html.ElementNode {
 		return false
 	}
+
 	currentSelectorWithCombinator := complexSelector.Selectors[index]
 	if !se.matchesSimple(node, currentSelectorWithCombinator.SimpleSelector) {
 		return false
@@ -1109,7 +1264,8 @@ func (sn *StyledNode) IsVisible() bool {
 	return true
 }
 
-var repeatRegex = regexp.MustCompile(`repeat\(\s*(\d+)\s*,\s*([^)]+)\)`)
+// Regex for parsing repeat() notation in grid templates. Updated to include auto-fill/auto-fit.
+var repeatRegex = regexp.MustCompile(`repeat\(\s*(\d+|auto-fill|auto-fit)\s*,\s*([^)]+)\)`)
 
 func isWhitespace(r byte) bool {
 	return r == ' ' || r == '\t' || r == '\n'
@@ -1164,19 +1320,25 @@ func (sn *StyledNode) GetGridTemplateTracks(property string) ([]GridTrackDefinit
 	if value == "none" || value == "" {
 		return nil, nil
 	}
+	// Expand repeat() notation (only explicit counts).
 	expandedValue := repeatRegex.ReplaceAllStringFunc(value, func(match string) string {
 		submatches := repeatRegex.FindStringSubmatch(match)
 		if len(submatches) < 3 {
 			observability.GetLogger().Warn("Malformed repeat() function", zap.String("match", match))
-			return ""
+			return match // Return original if malformed
 		}
-		count, err := strconv.Atoi(submatches[1])
-		if err != nil {
-			observability.GetLogger().Warn("Invalid count in repeat()", zap.String("count_val", submatches[1]), zap.Error(err))
-			return ""
+
+		countStr := submatches[1]
+		tracksToRepeat := strings.TrimSpace(submatches[2])
+
+		// Handle numeric counts
+		if count, err := strconv.Atoi(countStr); err == nil {
+			// Repeat the track definition string.
+			return strings.TrimSpace(strings.Repeat(tracksToRepeat+" ", count))
 		}
-		tracksToRepeat := submatches[2]
-		return strings.TrimSpace(strings.Repeat(tracksToRepeat+" ", count))
+
+		// If auto-fill/auto-fit, return the match as is, to be processed during layout.
+		return match
 	})
 
 	var definitions []GridTrackDefinition
@@ -1251,61 +1413,50 @@ func ParseLengthWithUnits(value string, parentFontSize, rootFontSize, referenceD
 		return 0.0
 	}
 
-	// Helper to parse the numeric part of the value.
-	parseNumeric := func(s, suffix string) (float64, bool) {
-		numStr := strings.TrimSuffix(s, suffix)
-		if val, err := parseFloat(numStr); err == nil {
-			return val, true
-		}
-		return 0.0, false
-	}
-
 	if strings.HasSuffix(value, "%") {
-		if percent, ok := parseNumeric(value, "%"); ok {
+		if percent, err := parseFloat(strings.TrimSuffix(value, "%")); err == nil {
 			return referenceDimension * (percent / 100.0)
 		}
 	}
 	if strings.HasSuffix(value, "px") {
-		if px, ok := parseNumeric(value, "px"); ok {
+		if px, err := parseFloat(strings.TrimSuffix(value, "px")); err == nil {
 			return px
 		}
 	}
-	// -- FIX: Check for "rem" before "em" --
+	// FIX: Check for 'rem' BEFORE 'em' because 'rem' ends with 'em'.
 	if strings.HasSuffix(value, "rem") {
-		if val, ok := parseNumeric(value, "rem"); ok {
+		if val, err := parseFloat(strings.TrimSuffix(value, "rem")); err == nil {
 			return val * rootFontSize
 		}
 	}
 	if strings.HasSuffix(value, "em") {
-		if val, ok := parseNumeric(value, "em"); ok {
+		if val, err := parseFloat(strings.TrimSuffix(value, "em")); err == nil {
 			return val * parentFontSize
 		}
 	}
 	if strings.HasSuffix(value, "vw") {
-		if val, ok := parseNumeric(value, "vw"); ok {
+		if val, err := parseFloat(strings.TrimSuffix(value, "vw")); err == nil {
 			return viewportWidth * (val / 100.0)
 		}
 	}
 	if strings.HasSuffix(value, "vh") {
-		if val, ok := parseNumeric(value, "vh"); ok {
+		if val, err := parseFloat(strings.TrimSuffix(value, "vh")); err == nil {
 			return viewportHeight * (val / 100.0)
 		}
 	}
 	if strings.HasSuffix(value, "vmin") {
-		if val, ok := parseNumeric(value, "vmin"); ok {
+		if val, err := parseFloat(strings.TrimSuffix(value, "vmin")); err == nil {
 			return min(viewportWidth, viewportHeight) * (val / 100.0)
 		}
 	}
 	if strings.HasSuffix(value, "vmax") {
-		if val, ok := parseNumeric(value, "vmax"); ok {
+		if val, err := parseFloat(strings.TrimSuffix(value, "vmax")); err == nil {
 			return max(viewportWidth, viewportHeight) * (val / 100.0)
 		}
 	}
-	// Fallback for unitless values (should be treated as px).
 	if val, err := parseFloat(value); err == nil {
 		return val
 	}
-
 	return 0.0
 }
 
@@ -1314,40 +1465,65 @@ func GetFontAscent(sn *StyledNode) float64 {
 	return fontSize * 0.8
 }
 
+// MeasureText estimates the dimensions of a text node.
+// Improved estimation using different factors for whitespace and characters.
 func MeasureText(sn *StyledNode) (width, height float64) {
 	if sn == nil || sn.Node == nil || sn.Node.Type != html.TextNode {
 		return 0, 0
 	}
 	text := sn.Node.Data
 	fontSize := GetFontSize(sn)
-	estimatedWidth := float64(len(text)) * fontSize * 0.6
-	return estimatedWidth, fontSize
+
+	// Estimation factors (relative to font size). Real implementation requires font metrics.
+	const avgCharWidthFactor = 0.55
+	const spaceWidthFactor = 0.25
+
+	width = 0.0
+	for _, r := range text {
+		// This does not handle whitespace collapsing or line breaking (handled in layout).
+		if r == ' ' || r == '\t' {
+			width += fontSize * spaceWidthFactor
+		} else if r != '\n' && r != '\r' {
+			width += fontSize * avgCharWidthFactor
+		}
+		// Newlines are generally ignored for width calculation in standard flow until layout handles line breaking.
+	}
+
+	return width, fontSize
 }
 
 func ParseAbsoluteLength(value string) float64 {
 	return ParseLengthWithUnits(value, 0, 0, 0, 0, 0)
 }
 
+// parseFloat is a custom float parser tailored for CSS value formats.
+// It parses the float part at the beginning of the string and stops when an unrecognized character is met.
+// It requires at least one digit to be parsed.
 func parseFloat(s string) (float64, error) {
 	var result float64
 	var sign float64 = 1
 	var decimalPoint bool
 	var decimalPlace float64 = 0.1
+
 	if len(s) == 0 {
 		return 0, fmt.Errorf("empty string")
 	}
+
 	i := 0
-	if s[0] == '-' {
+	// Handle sign.
+	switch s[0] {
+	case '-':
 		sign = -1
 		i++
-	} else if s[0] == '+' {
+	case '+':
 		i++
 	}
-	parsedSomething := false
+
+	parsedDigits := false // Track if we have parsed at least one digit.
 	for ; i < len(s); i++ {
 		ch := s[i]
 		if ch >= '0' && ch <= '9' {
-			parsedSomething = true
+			parsedDigits = true
 			digit := float64(ch - '0')
 			if decimalPoint {
 				result += digit * decimalPlace
@@ -1356,18 +1532,23 @@ func parseFloat(s string) (float64, error) {
 				result = result*10 + digit
 			}
 		} else if ch == '.' && !decimalPoint {
-			parsedSomething = true
 			decimalPoint = true
 		} else {
+			// Stop parsing when a non-digit, non-period character is encountered.
 			break
 		}
 	}
-	if !parsedSomething {
-		return 0, fmt.Errorf("invalid float format: %s", s)
+
+	if !parsedDigits {
+		// If no digits were parsed (e.g., ".", "+", "abc"), it's invalid.
+		return 0, fmt.Errorf("invalid float format (no digits parsed): %s", s)
 	}
+
+	// Avoid returning negative zero.
 	if result == 0 && sign == -1 {
 		return 0, nil
 	}
+
 	return result * sign, nil
 }
 

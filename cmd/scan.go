@@ -17,10 +17,10 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/agent"
 	"github.com/xkilldash9x/scalpel-cli/internal/browser"
+	"github.com/xkilldash9x/scalpel-cli/internal/browser/network"
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
 	"github.com/xkilldash9x/scalpel-cli/internal/discovery"
 	"github.com/xkilldash9x/scalpel-cli/internal/engine"
-	"github.com/xkilldash9x/scalpel-cli/internal/browser/network"
 	"github.com/xkilldash9x/scalpel-cli/internal/observability"
 	"github.com/xkilldash9x/scalpel-cli/internal/orchestrator"
 	"github.com/xkilldash9x/scalpel-cli/internal/reporting"
@@ -293,4 +293,3 @@ func generateReport(ctx context.Context, dbStore *store.Store, scanID, format, o
 	logger.Info("Report generated successfully.", zap.String("path", outputPath))
 	return nil
 }
-

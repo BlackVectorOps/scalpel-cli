@@ -11,13 +11,14 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
+	"github.com/xkilldash9x/scalpel-cli/internal/mocks"
 )
 
 // -- BrowserExecutor Tests --
 
 func TestBrowserExecutor_HandleNavigate(t *testing.T) {
 	logger := zap.NewNop()
-	mockSession := new(MockSessionContext)
+	mockSession := mocks.NewMockSessionContext()
 	provider := func() schemas.SessionContext { return mockSession }
 	executor := NewBrowserExecutor(logger, provider)
 
@@ -42,7 +43,7 @@ func TestBrowserExecutor_HandleNavigate(t *testing.T) {
 
 func TestBrowserExecutor_HandleSubmitForm(t *testing.T) {
 	logger := zap.NewNop()
-	mockSession := new(MockSessionContext)
+	mockSession := mocks.NewMockSessionContext()
 	provider := func() schemas.SessionContext { return mockSession }
 	executor := NewBrowserExecutor(logger, provider)
 
@@ -58,7 +59,7 @@ func TestBrowserExecutor_HandleSubmitForm(t *testing.T) {
 
 func TestBrowserExecutor_HandleScroll(t *testing.T) {
 	logger := zap.NewNop()
-	mockSession := new(MockSessionContext)
+	mockSession := mocks.NewMockSessionContext()
 	provider := func() schemas.SessionContext { return mockSession }
 	executor := NewBrowserExecutor(logger, provider)
 
@@ -80,7 +81,7 @@ func TestBrowserExecutor_HandleScroll(t *testing.T) {
 
 func TestBrowserExecutor_HandleWaitForAsync(t *testing.T) {
 	logger := zap.NewNop()
-	mockSession := new(MockSessionContext)
+	mockSession := mocks.NewMockSessionContext()
 	provider := func() schemas.SessionContext { return mockSession }
 	executor := NewBrowserExecutor(logger, provider)
 
@@ -107,7 +108,7 @@ func TestBrowserExecutor_HandleWaitForAsync(t *testing.T) {
 // Refactored TestExecutorRegistry_Execute into sub-tests for clarity and correctness.
 func TestExecutorRegistry_Execute(t *testing.T) {
 	logger := zap.NewNop()
-	mockSession := new(MockSessionContext)
+	mockSession := mocks.NewMockSessionContext()
 	provider := func() schemas.SessionContext { return mockSession }
 	registry := NewExecutorRegistry(logger, ".")
 	registry.UpdateSessionProvider(provider)
@@ -129,9 +130,9 @@ func TestExecutorRegistry_Execute(t *testing.T) {
 		// We expect an error here because the codebase executor needs a real file system.
 		// This test just confirms the action is correctly dispatched to that executor.
 		codeAction := Action{Type: ActionGatherCodebaseContext, Metadata: map[string]interface{}{"module_path": "."}}
-		
+
 		result, err := registry.Execute(context.Background(), codeAction)
-		
+
 		// The executor itself returns the failed result, not a raw error.
 		require.NoError(t, err)
 		require.NotNil(t, result)
@@ -140,9 +141,9 @@ func TestExecutorRegistry_Execute(t *testing.T) {
 
 	t.Run("UnregisteredAction", func(t *testing.T) {
 		unknownAction := Action{Type: "ACTION_THAT_DOES_NOT_EXIST"}
-		
+
 		result, err := registry.Execute(context.Background(), unknownAction)
-		
+
 		// Unregistered actions should return a raw error from the registry.
 		require.Error(t, err)
 		require.Nil(t, result)
@@ -152,9 +153,9 @@ func TestExecutorRegistry_Execute(t *testing.T) {
 	t.Run("HumanoidActionDisallowed", func(t *testing.T) {
 		// Actions handled by the agent's main loop should not be sent to the registry.
 		clickAction := Action{Type: ActionClick}
-		
+
 		result, err := registry.Execute(context.Background(), clickAction)
-		
+
 		require.Error(t, err)
 		require.Nil(t, result)
 		require.Contains(t, err.Error(), "should be handled by the Agent")

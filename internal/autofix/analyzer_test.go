@@ -17,13 +17,14 @@ import (
 	"go.uber.org/zap/zaptest"
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
+	"github.com/xkilldash9x/scalpel-cli/internal/mocks"
 )
 
 // Helper to setup Analyzer and Mocks
-func setupAnalyzer(t *testing.T) (*Analyzer, *MockLLMClient, string) {
+func setupAnalyzer(t *testing.T) (*Analyzer, *mocks.MockLLMClient, string) {
 	t.Helper()
 	logger := zaptest.NewLogger(t)
-	mockLLM := new(MockLLMClient)
+	mockLLM := new(mocks.MockLLMClient)
 	projectRoot := t.TempDir()
 	analyzer := NewAnalyzer(logger, mockLLM, projectRoot)
 	return analyzer, mockLLM, projectRoot

@@ -21,7 +21,6 @@ logger:
     panic: "magenta"
     fatal: "magenta"
 
-# FIX: Renamed from 'postgres' to 'database' to match the Go struct.
 database:
   # This value will be overridden by the SCALPEL_DATABASE_URL environment variable.
   url: ""
@@ -33,9 +32,10 @@ engine:
 
 browser:
   headless: true
+  disable_cache: true
   ignore_tls_errors: false
-  # FIX: Added the missing 'concurrency' field required by the validation logic.
   concurrency: 2
+  debug: true
   args:
     - "--no-sandbox"
     - "--disable-setuid-sandbox"
@@ -56,11 +56,14 @@ browser:
   viewport:
     width: 1920
     height: 1080
+  humanoid: {}
 
 network:
   timeout: "30s"
+  navigation_timeout: "90s"
   post_load_wait: "2s"
-  capture_response_bodies: true # Added to ensure HAR files are complete.
+  capture_response_bodies: true
+  ignore_tls_errors: false
   headers:
     User-Agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36 ScalpelV2/1.0"
   proxy:
@@ -69,27 +72,21 @@ network:
     ca_cert: ""
     ca_key: ""
 
-agent:
-  knowledge_graph:
-    type: "postgres" # Options: "postgres" or "in-memory"
-
 iast:
-  # FIX: Changed keys to snake_case to match the Go struct.
-  shim_path: "internal/browser/shim/pinnacle.js"
-  config_path: "internal/browser/shim/pinnacle.json"
+  enabled: false
+  shim_path: ""
+  config_path: ""
 
 scanners:
   passive:
     headers:
       enabled: true
-
   static:
     jwt:
       enabled: true
       known_secrets: []
       brute_force_enabled: true
       dictionary_file: "config/jwt.secrets.list"
-
   active:
     taint:
       enabled: true
@@ -97,6 +94,7 @@ scanners:
       concurrency: 2
     protopollution:
       enabled: true
+      wait_duration: "8s"
     timeslip:
       enabled: true
       request_count: 25
@@ -130,7 +128,6 @@ scanners:
         lockout_keywords:
           - "account locked"
           - "too many attempts"
-
       idor:
         enabled: true
         ignore_list:
@@ -143,3 +140,36 @@ scanners:
           UUID: ["horizontal_swap"]
           Base64Encoded: ["bit_flip"]
           ObjectID: ["increment_char"]
+
+discovery:
+  max_depth: 5
+  concurrency: 20
+  timeout: "15m"
+  passive_enabled: true
+  include_subdomains: true
+  crtsh_rate_limit: 2.0
+  cache_dir: ""
+  passive_concurrency: 10
+
+agent:
+  llm:
+    default_fast_model: "gemini-2.5-flash"
+    default_powerful_model: "gemini-2.5-pro"
+    models: {}
+  knowledge_graph:
+    type: "postgres"
+
+autofix:
+  enabled: false
+  project_root: ""
+  dast_log_path: ""
+  min_confidence_threshold: 0.75
+  cooldown_seconds: 300
+  keep_workspace_on_failure: false
+  git:
+    author_name: "Kyle McAllister"
+    author_email: "xkilldash9x@proton.me"
+  github:
+    repo_owner: "xkilldash9x"
+    repo_name: "scalpel-cli"
+    base_branch: "main"

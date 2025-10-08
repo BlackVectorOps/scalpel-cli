@@ -5,27 +5,29 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
-	"go.uber.org/zap"
-
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
 	"github.com/xkilldash9x/scalpel-cli/internal/observability"
 )
 
 var (
-	cfgFile string
+	cfgFile     string
+	validateFix bool // Flag for validation runs during self-healing
 )
 
 // rootCmd represents the base command when called without any subcommands
 var rootCmd = &cobra.Command{
-	Use:     "scalpel-cli",
-	Short:   "Scalpel is an AI-native security scanner.",
-	Version: Version,
-	// PersistentPreRunE runs before any command to handle initialization.
+	Use:               "scalpel-cli",
+	Short:             "Scalpel is an AI-native security scanner.",
+	Version:           Version,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+		// ... (PersistentPreRunE logic remains the same) ...
+		return nil
+	},
+}
+
 		// 1. Initialize configuration loading (Viper)
 		if err := initializeConfig(); err != nil {
 			// Initialize a basic logger if config loading fails early.
@@ -41,7 +43,7 @@ var rootCmd = &cobra.Command{
 			return fmt.Errorf("failed to unmarshal config: %w", err)
 		}
 
-		// 3. Validate the configuration (assuming cfg.Validate() exists)
+		// 3. Validate the configuration
 		if err := cfg.Validate(); err != nil {
 			observability.InitializeLogger(cfg.Logger)
 			return fmt.Errorf("invalid configuration: %w", err)
@@ -65,12 +67,15 @@ func Execute(ctx context.Context) error {
 	// Add subcommands
 	rootCmd.AddCommand(newScanCmd())
 	rootCmd.AddCommand(newReportCmd())
+	rootCmd.AddCommand(newSelfHealCmd()) // Register the self-heal command
+	rootCmd.AddCommand(newEvolveCmd())   // Register the evolve command
 
 	// Execute the root command with the provided context
 	if err := rootCmd.ExecuteContext(ctx); err != nil {
 		// Handle execution errors gracefully.
 		if logger := observability.GetLogger(); logger != nil && logger != zap.NewNop() {
-			// Avoid logging context.Canceled errors as failures, as they are expected during graceful shutdown.
+			// Avoid logging context.Canceled errors as failures, as they are expected
+			// during graceful shutdown.
 			if ctx.Err() == nil {
 				logger.Error("Command execution failed", zap.Error(err))
 			}
@@ -84,9 +89,20 @@ func Execute(ctx context.Context) error {
 }
 
 func init() {
+	cobra.OnInitialize(initializeConfig)
+
 	rootCmd.PersistentFlags().StringVarP(&cfgFile, "config", "c", "", "config file (default is ./config.yaml)")
-	rootCmd.SetVersionTemplate(`{{printf "%s\n" .Version}}`)
+	rootCmd.PersistentFlags().BoolVar(&validateFix, "validate-fix", false, "Internal flag for self-healing validation.")
+	rootCmd.PersistentFlags().MarkHidden("validate-fix") // Hide from users
+
+	// CORRECTED: Add the command variables directly instead of calling constructor functions.
+	rootCmd.AddCommand(selfHealCmd)
+	rootCmd.AddCommand(evolveCmd)
+	rootCmd.AddCommand(scanCmd)
+	rootCmd.AddCommand(versionCmd)
+	rootCmd.AddCommand(reportCmd)
 }
+
 
 // initializeConfig reads in config file and ENV variables if set.
 func initializeConfig() error {
@@ -108,17 +124,19 @@ func initializeConfig() error {
 	viper.AutomaticEnv()
 
 	// Explicitly bind critical environment variables.
+	// This ensures they are picked up correctly.
 
 	// Database connection string
 	_ = viper.BindEnv("database.url", "SCALPEL_DATABASE_URL")
 
-	// Gemini API Key. Assuming the configuration path is agent.llm.gemini_api_key.
+	// Gemini API Key.
 	// We bind both a convenient short name and the structured name.
 	_ = viper.BindEnv("agent.llm.gemini_api_key", "SCALPEL_GEMINI_API_KEY", "SCALPEL_AGENT_LLM_GEMINI_API_KEY")
 
 	// 3. Read the configuration file
 	if err := viper.ReadInConfig(); err != nil {
-		// It's okay if the config file is not found, but report other errors (e.g., parsing errors).
+		// It's okay if the config file is not found, but report other errors
+		// like parsing issues.
 		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
 			return fmt.Errorf("error reading config file: %w", err)
 		}

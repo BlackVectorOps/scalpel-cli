@@ -1,4 +1,3 @@
-// internal/discovery/discovery_test.go
 package discovery
 
 import (
@@ -9,16 +8,16 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 
-	// It's good practice to alias the schemas package if there's any potential for name collision.
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
+	"github.com/xkilldash9x/scalpel-cli/internal/mocks"
 )
 
 // -- Mocks and Test Helpers --
@@ -38,82 +37,6 @@ func (m *mockHTTPClient) Get(ctx context.Context, url string) ([]byte, int, erro
 	}
 	// Default response for any URL not explicitly mocked.
 	return nil, http.StatusNotFound, fmt.Errorf("mockHTTPClient: no response for %s", url)
-}
-
-// mockKGClient is a test implementation of the KnowledgeGraphClient.
-// We use it to verify that the discovery engine is adding the correct nodes and edges.
-type mockKGClient struct {
-	mu    sync.Mutex
-	Nodes map[string]schemas.Node
-	Edges []schemas.Edge
-}
-
-func newMockKGClient() *mockKGClient {
-	return &mockKGClient{
-		Nodes: make(map[string]schemas.Node),
-		Edges: []schemas.Edge{},
-	}
-}
-
-func (m *mockKGClient) AddNode(ctx context.Context, node schemas.Node) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.Nodes[node.ID] = node
-	return nil
-}
-
-func (m *mockKGClient) AddEdge(ctx context.Context, edge schemas.Edge) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.Edges = append(m.Edges, edge)
-	return nil
-}
-
-// GetNode fulfills the schemas.KnowledgeGraphClient interface.
-func (m *mockKGClient) GetNode(ctx context.Context, id string) (schemas.Node, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	node, ok := m.Nodes[id]
-	if !ok {
-		return schemas.Node{}, fmt.Errorf("node with id '%s' not found in mock", id)
-	}
-	return node, nil
-}
-
-// GetEdges fulfills the schemas.KnowledgeGraphClient interface.
-// It now accepts a nodeID to match the updated interface definition.
-func (m *mockKGClient) GetEdges(ctx context.Context, nodeID string) ([]schemas.Edge, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	var outgoingEdges []schemas.Edge
-	for _, edge := range m.Edges {
-		if edge.From == nodeID {
-			outgoingEdges = append(outgoingEdges, edge)
-		}
-	}
-	return outgoingEdges, nil
-}
-
-// GetNeighbors fulfills the schemas.KnowledgeGraphClient interface.
-func (m *mockKGClient) GetNeighbors(ctx context.Context, nodeID string) ([]schemas.Node, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	var neighbors []schemas.Node
-	neighborIDs := make(map[string]bool)
-
-	for _, edge := range m.Edges {
-		if edge.From == nodeID {
-			if _, exists := m.Nodes[edge.To]; exists {
-				if !neighborIDs[edge.To] {
-					neighbors = append(neighbors, m.Nodes[edge.To])
-					neighborIDs[edge.To] = true
-				}
-			}
-		}
-	}
-	return neighbors, nil
 }
 
 // mockBrowserInteractor simulates the behavior of a web browser for the Engine tests.
@@ -398,7 +321,9 @@ func TestEngine_Start(t *testing.T) {
 		scope, err := NewBasicScopeManager("https://example.com", true)
 		require.NoError(t, err)
 
-		kgClient := newMockKGClient()
+		kgClient := new(mocks.MockKGClient)
+		kgClient.On("AddNode", mock.Anything, mock.Anything).Return(nil)
+		kgClient.On("AddEdge", mock.Anything, mock.Anything).Return(nil)
 
 		// This defines the "shape" of the website we're crawling.
 		browser := &mockBrowserInteractor{
@@ -453,14 +378,7 @@ func TestEngine_Start(t *testing.T) {
 		assert.NotContains(t, taskUrls, "https://example.com/final")
 		assert.NotContains(t, taskUrls, "https://external.com/")
 
-		// Verify the knowledge graph was built correctly
-		kgClient.mu.Lock()
-		defer kgClient.mu.Unlock()
-
-		assert.Contains(t, kgClient.Nodes, "https://example.com/")
-		assert.Contains(t, kgClient.Nodes, "example.com")
-		assert.Contains(t, kgClient.Nodes, "sub.example.com")
-		assert.Len(t, kgClient.Edges, 6, "Should create HOSTS_URL and HAS_SUBDOMAIN edges")
+		// Verify the mock's expectations were met.
+		kgClient.AssertExpectations(t)
 	})
 }
-

@@ -19,6 +19,7 @@ type DBPool interface {
 	Query(ctx context.Context, sql string, args ...interface{}) (pgx.Rows, error)
 	// Add Exec to the interface so we can mock it
 	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+	CopyFrom(ctx context.Context, tableName pgx.Identifier, columnNames []string, rowSrc pgx.CopyFromSource) (int64, error)
 }
 
 // Store provides a PostgreSQL implementation of the Repository interface.
@@ -116,17 +117,17 @@ func (s *Store) persistFindings(ctx context.Context, tx pgx.Tx, scanID string, f
 // REFACTORED to use a simple loop of tx.Exec instead of SendBatch
 func (s *Store) persistNodes(ctx context.Context, tx pgx.Tx, nodes []schemas.NodeInput) error {
 	sql := `
-		INSERT INTO kg_nodes (id, type, properties, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5)
-		ON CONFLICT (id) DO UPDATE SET
-			type = EXCLUDED.type,
-			properties = kg_nodes.properties || EXCLUDED.properties,
-			updated_at = EXCLUDED.updated_at;
-	`
+        INSERT INTO kg_nodes (id, type, properties, created_at, updated_at)
+        VALUES ($1, $2, $3, $4, $5)
+        ON CONFLICT (id) DO UPDATE SET
+            type = EXCLUDED.type,
+            properties = kg_nodes.properties || EXCLUDED.properties,
+            updated_at = EXCLUDED.updated_at;
+    `
 	now := time.Now()
 
 	for _, n := range nodes {
-		if n.Properties == nil || len(n.Properties) == 0 {
+		if len(n.Properties) == 0 {
 			n.Properties = json.RawMessage("{}")
 		}
 		if _, err := tx.Exec(ctx, sql, n.ID, string(n.Type), n.Properties, now, now); err != nil {
@@ -139,15 +140,15 @@ func (s *Store) persistNodes(ctx context.Context, tx pgx.Tx, nodes []schemas.Nod
 // REFACTORED to use a simple loop of tx.Exec instead of SendBatch
 func (s *Store) persistEdges(ctx context.Context, tx pgx.Tx, edges []schemas.EdgeInput) error {
 	sql := `
-		INSERT INTO kg_edges (source_id, target_id, relationship, properties, "timestamp")
-		VALUES ($1, $2, $3, $4, $5)
-		ON CONFLICT (source_id, target_id, relationship) DO UPDATE SET
-			properties = kg_edges.properties || EXCLUDED.properties;
-	`
+        INSERT INTO kg_edges (source_id, target_id, relationship, properties, "timestamp")
+        VALUES ($1, $2, $3, $4, $5)
+        ON CONFLICT (source_id, target_id, relationship) DO UPDATE SET
+            properties = kg_edges.properties || EXCLUDED.properties;
+    `
 	now := time.Now()
 
 	for _, e := range edges {
-		if e.Properties == nil || len(e.Properties) == 0 {
+		if len(e.Properties) == 0 {
 			e.Properties = json.RawMessage("{}")
 		}
 		if _, err := tx.Exec(ctx, sql, e.From, e.To, string(e.Type), e.Properties, now); err != nil {
@@ -159,11 +160,11 @@ func (s *Store) persistEdges(ctx context.Context, tx pgx.Tx, edges []schemas.Edg
 
 func (s *Store) GetFindingsByScanID(ctx context.Context, scanID string) ([]schemas.Finding, error) {
 	query := `
-		SELECT id, task_id, observed_at, target, module, vulnerability, severity, description, evidence, recommendation, cwe
-		FROM findings
-		WHERE scan_id = $1
-		ORDER BY observed_at ASC;
-	`
+        SELECT id, task_id, observed_at, target, module, vulnerability, severity, description, evidence, recommendation, cwe
+        FROM findings
+        WHERE scan_id = $1
+        ORDER BY observed_at ASC;
+    `
 	rows, err := s.pool.Query(ctx, query, scanID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query findings: %w", err)

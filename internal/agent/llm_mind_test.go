@@ -15,16 +15,17 @@ import (
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
+	"github.com/xkilldash9x/scalpel-cli/internal/mocks"
 )
 
 // -- Test Setup Helper --
 
 // setupLLMMind initializes the LLMMind and its dependencies for testing.
-func setupLLMMind(t *testing.T) (*LLMMind, *MockLLMClient, *MockGraphStore, *CognitiveBus) {
+func setupLLMMind(t *testing.T) (*LLMMind, *mocks.MockLLMClient, *mocks.MockKGClient, *CognitiveBus) {
 	t.Helper()
 	logger := zaptest.NewLogger(t)
-	mockLLM := new(MockLLMClient)
-	mockKG := new(MockGraphStore)
+	mockLLM := new(mocks.MockLLMClient)
+	mockKG := new(mocks.MockKGClient)
 	// Use a real CognitiveBus to properly test the integration of the OODA loop.
 	bus := NewCognitiveBus(logger, 50)
 
@@ -333,6 +334,21 @@ func TestOODALoop_DecisionLLMFailure(t *testing.T) {
 		mind.Start(ctx)
 	}()
 	mind.SetMission(Mission{ID: missionID})
+
+	// Helper function to wait for a WaitGroup with a timeout.
+	waitTimeout := func(wg *sync.WaitGroup, timeout time.Duration) bool {
+		c := make(chan struct{})
+		go func() {
+			defer close(c)
+			wg.Wait()
+		}()
+		select {
+		case <-c:
+			return true // completed normally
+		case <-time.After(timeout):
+			return false // timed out
+		}
+	}
 
 	if !waitTimeout(&cycleCompleteWg, 5*time.Second) {
 		t.Fatal("Timeout waiting for the OODA loop (LLM Generate call) to execute.")

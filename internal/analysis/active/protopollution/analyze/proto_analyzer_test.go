@@ -18,169 +18,14 @@ import (
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
+	"github.com/xkilldash9x/scalpel-cli/internal/mocks"
 )
-
-// -- Mock Definitions --
-
-// MockBrowserManager mocks the schemas.BrowserManager interface.
-type MockBrowserManager struct {
-	mock.Mock
-}
-
-func (m *MockBrowserManager) NewAnalysisContext(
-	sessionCtx context.Context,
-	cfg interface{},
-	persona schemas.Persona,
-	taintTemplate string,
-	taintConfig string,
-	findingsChan chan<- schemas.Finding,
-) (schemas.SessionContext, error) {
-	args := m.Called(sessionCtx, cfg, persona, taintTemplate, taintConfig, findingsChan)
-	if args.Get(0) == nil {
-		return nil, args.Error(1)
-	}
-	return args.Get(0).(schemas.SessionContext), args.Error(1)
-}
-
-func (m *MockBrowserManager) Shutdown(ctx context.Context) error {
-	args := m.Called(ctx)
-	return args.Error(0)
-}
-
-// MockSessionContext mocks the schemas.SessionContext interface.
-type MockSessionContext struct {
-	mock.Mock
-	callbackFunc func(payload PollutionProofEvent)
-	mu           sync.Mutex
-}
-
-// --- Start of schemas.SessionContext interface implementation ---
-
-func (m *MockSessionContext) ID() string {
-	args := m.Called()
-	return args.String(0)
-}
-
-func (m *MockSessionContext) Navigate(ctx context.Context, url string) error {
-	args := m.Called(ctx, url)
-	return args.Error(0)
-}
-
-func (m *MockSessionContext) Click(ctx context.Context, selector string) error {
-	args := m.Called(ctx, selector)
-	return args.Error(0)
-}
-
-func (m *MockSessionContext) Type(ctx context.Context, selector string, text string) error {
-	args := m.Called(ctx, selector, text)
-	return args.Error(0)
-}
-
-func (m *MockSessionContext) Submit(ctx context.Context, selector string) error {
-	args := m.Called(ctx, selector)
-	return args.Error(0)
-}
-
-func (m *MockSessionContext) ScrollPage(ctx context.Context, direction string) error {
-	args := m.Called(ctx, direction)
-	return args.Error(0)
-}
-
-func (m *MockSessionContext) WaitForAsync(ctx context.Context, milliseconds int) error {
-	args := m.Called(ctx, milliseconds)
-	return args.Error(0)
-}
-
-func (m *MockSessionContext) ExposeFunction(ctx context.Context, name string, function interface{}) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	// This type assertion is key to capturing the callback for simulation.
-	if cb, ok := function.(func(PollutionProofEvent)); ok {
-		m.callbackFunc = cb
-	}
-	args := m.Called(ctx, name, function)
-	return args.Error(0)
-}
-
-func (m *MockSessionContext) InjectScriptPersistently(ctx context.Context, script string) error {
-	args := m.Called(ctx, script)
-	return args.Error(0)
-}
-
-func (m *MockSessionContext) Interact(ctx context.Context, config schemas.InteractionConfig) error {
-	args := m.Called(ctx, config)
-	return args.Error(0)
-}
-
-func (m *MockSessionContext) Close(ctx context.Context) error {
-	args := m.Called(ctx)
-	return args.Error(0)
-}
-
-func (m *MockSessionContext) CollectArtifacts(ctx context.Context) (*schemas.Artifacts, error) {
-	args := m.Called(ctx)
-	if args.Get(0) == nil {
-		return nil, args.Error(1)
-	}
-	return args.Get(0).(*schemas.Artifacts), args.Error(1)
-}
-
-// FIX: Updated signature to match the schemas.SessionContext interface.
-func (m *MockSessionContext) AddFinding(ctx context.Context, finding schemas.Finding) error {
-	args := m.Called(ctx, finding)
-	return args.Error(0)
-}
-
-func (m *MockSessionContext) Sleep(ctx context.Context, d time.Duration) error {
-	args := m.Called(ctx, d)
-	return args.Error(0)
-}
-
-func (m *MockSessionContext) DispatchMouseEvent(ctx context.Context, data schemas.MouseEventData) error {
-	args := m.Called(ctx, data)
-	return args.Error(0)
-}
-
-func (m *MockSessionContext) SendKeys(ctx context.Context, keys string) error {
-	args := m.Called(ctx, keys)
-	return args.Error(0)
-}
-
-func (m *MockSessionContext) GetElementGeometry(ctx context.Context, selector string) (*schemas.ElementGeometry, error) {
-	args := m.Called(ctx, selector)
-	if args.Get(0) == nil {
-		return nil, args.Error(1)
-	}
-	return args.Get(0).(*schemas.ElementGeometry), args.Error(1)
-}
-
-func (m *MockSessionContext) ExecuteScript(ctx context.Context, script string, args []interface{}) (json.RawMessage, error) {
-	callArgs := m.Called(ctx, script, args)
-	var res json.RawMessage
-	if callArgs.Get(0) != nil {
-		res = callArgs.Get(0).(json.RawMessage)
-	}
-	return res, callArgs.Error(1)
-}
-
-// --- End of interface implementation ---
-
-// SimulateCallback is a test helper to invoke the registered callback function.
-func (m *MockSessionContext) SimulateCallback(t *testing.T, event PollutionProofEvent) {
-	t.Helper()
-	m.mu.Lock()
-	cb := m.callbackFunc
-	m.mu.Unlock()
-	require.NotNil(t, cb, "Callback function was not set via ExposeFunction")
-	// The callback is invoked directly, as it's the analyzer's job to handle concurrency.
-	cb(event)
-}
 
 // -- Test Cases --
 
 func TestNewAnalyzer(t *testing.T) {
 	logger := zaptest.NewLogger(t)
-	mockBrowserManager := new(MockBrowserManager)
+	mockBrowserManager := new(mocks.MockBrowserManager)
 	cfg := config.ProtoPollutionConfig{
 		Enabled: true,
 		// WaitDuration is 0 (invalid)
@@ -199,8 +44,8 @@ func TestNewAnalyzer(t *testing.T) {
 
 func TestAnalyze_FindingFound(t *testing.T) {
 	logger := zaptest.NewLogger(t)
-	mockBrowserManager := new(MockBrowserManager)
-	mockSession := new(MockSessionContext)
+	mockBrowserManager := new(mocks.MockBrowserManager)
+	mockSession := mocks.NewMockSessionContext()
 	cfg := config.ProtoPollutionConfig{
 		WaitDuration: 150 * time.Millisecond,
 	}
@@ -216,7 +61,6 @@ func TestAnalyze_FindingFound(t *testing.T) {
 	// --- Mocks ---
 	mockBrowserManager.On("NewAnalysisContext", ctx, mock.Anything, schemas.Persona{}, "", "", (chan<- schemas.Finding)(nil)).Return(mockSession, nil).Once()
 
-	// The typo was here ("PollutionProofEvent" was misspelled)
 	mockSession.On("ExposeFunction", ctx, jsCallbackName, mock.AnythingOfType("func(proto.PollutionProofEvent)")).Return(nil).Once()
 
 	mockSession.On("InjectScriptPersistently", ctx, mock.AnythingOfType("string")).Return(nil).Once().Run(func(args mock.Arguments) {
@@ -237,7 +81,14 @@ func TestAnalyze_FindingFound(t *testing.T) {
 		go func() {
 			time.Sleep(20 * time.Millisecond)
 			require.NotEmpty(t, capturedCanary, "Canary was not captured before navigation simulation")
-			mockSession.SimulateCallback(t, PollutionProofEvent{
+
+			// Use the mock's helper to get the function and call it.
+			fn, ok := mockSession.GetExposedFunction(jsCallbackName)
+			require.True(t, ok, "Callback function was not set via ExposeFunction")
+			callback, ok := fn.(func(PollutionProofEvent))
+			require.True(t, ok, "Exposed function has the wrong signature")
+
+			callback(PollutionProofEvent{
 				Source:     "URL_SearchParams",
 				Canary:     capturedCanary,
 				Vector:     "__proto__[polluted]=true",
@@ -284,8 +135,8 @@ func TestAnalyze_FindingFound(t *testing.T) {
 
 func TestAnalyze_NoFinding(t *testing.T) {
 	logger := zaptest.NewLogger(t)
-	mockBrowserManager := new(MockBrowserManager)
-	mockSession := new(MockSessionContext)
+	mockBrowserManager := new(mocks.MockBrowserManager)
+	mockSession := mocks.NewMockSessionContext()
 	cfg := config.ProtoPollutionConfig{
 		WaitDuration: 50 * time.Millisecond,
 	}
@@ -308,7 +159,7 @@ func TestAnalyze_NoFinding(t *testing.T) {
 
 func TestAnalyze_BrowserError(t *testing.T) {
 	logger := zaptest.NewLogger(t)
-	mockBrowserManager := new(MockBrowserManager)
+	mockBrowserManager := new(mocks.MockBrowserManager)
 	cfg := config.ProtoPollutionConfig{}
 	analyzer := NewAnalyzer(logger, mockBrowserManager, cfg)
 	ctx := context.Background()
@@ -326,8 +177,8 @@ func TestAnalyze_BrowserError(t *testing.T) {
 
 func TestAnalyze_ContextCancellation(t *testing.T) {
 	logger := zaptest.NewLogger(t)
-	mockBrowserManager := new(MockBrowserManager)
-	mockSession := new(MockSessionContext)
+	mockBrowserManager := new(mocks.MockBrowserManager)
+	mockSession := mocks.NewMockSessionContext()
 	cfg := config.ProtoPollutionConfig{WaitDuration: 5 * time.Second}
 	analyzer := NewAnalyzer(logger, mockBrowserManager, cfg)
 
@@ -359,8 +210,8 @@ func TestAnalyze_ContextCancellation(t *testing.T) {
 
 func TestAnalyze_InstrumentationError(t *testing.T) {
 	logger := zaptest.NewLogger(t)
-	mockBrowserManager := new(MockBrowserManager)
-	mockSession := new(MockSessionContext)
+	mockBrowserManager := new(mocks.MockBrowserManager)
+	mockSession := mocks.NewMockSessionContext()
 	cfg := config.ProtoPollutionConfig{}
 	analyzer := NewAnalyzer(logger, mockBrowserManager, cfg)
 	ctx := context.Background()
@@ -381,8 +232,8 @@ func TestAnalyze_InstrumentationError(t *testing.T) {
 
 func TestAnalyze_MismatchedCanary(t *testing.T) {
 	logger := zaptest.NewLogger(t)
-	mockBrowserManager := new(MockBrowserManager)
-	mockSession := new(MockSessionContext)
+	mockBrowserManager := new(mocks.MockBrowserManager)
+	mockSession := mocks.NewMockSessionContext()
 	cfg := config.ProtoPollutionConfig{WaitDuration: 100 * time.Millisecond}
 	analyzer := NewAnalyzer(logger, mockBrowserManager, cfg)
 	ctx := context.Background()
@@ -393,7 +244,13 @@ func TestAnalyze_MismatchedCanary(t *testing.T) {
 	mockSession.On("Navigate", ctx, "http://example.com").Return(nil).Run(func(args mock.Arguments) {
 		go func() {
 			time.Sleep(10 * time.Millisecond)
-			mockSession.SimulateCallback(t, PollutionProofEvent{
+			// Use the mock's helper to get the function and call it.
+			fn, ok := mockSession.GetExposedFunction(jsCallbackName)
+			require.True(t, ok, "Callback function was not set via ExposeFunction")
+			callback, ok := fn.(func(PollutionProofEvent))
+			require.True(t, ok, "Exposed function has the wrong signature")
+
+			callback(PollutionProofEvent{
 				Source: "StrayEvent",
 				Canary: "wrong_canary",
 				Vector: "N/A",

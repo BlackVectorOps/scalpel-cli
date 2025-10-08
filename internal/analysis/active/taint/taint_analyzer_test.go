@@ -18,7 +18,7 @@ import (
 	"go.uber.org/zap/zaptest"
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
-	"github.com/xkilldash9x/scalpel-cli/internal/mocks" // Corrected import
+	"github.com/xkilldash9x/scalpel-cli/internal/mocks"
 )
 
 // Mock Definitions
@@ -45,27 +45,9 @@ func (m *MockResultsReporter) GetFindings() []CorrelatedFinding {
 	return findings
 }
 
-// MockOASTProvider mocks the OASTProvider interface.
-type MockOASTProvider struct {
-	mock.Mock
-}
-
-func (m *MockOASTProvider) GetInteractions(ctx context.Context, canaries []string) ([]schemas.OASTInteraction, error) {
-	args := m.Called(ctx, canaries)
-	if args.Get(0) == nil {
-		return nil, args.Error(1)
-	}
-	return args.Get(0).([]schemas.OASTInteraction), args.Error(1)
-}
-
-func (m *MockOASTProvider) GetServerURL() string {
-	args := m.Called()
-	return args.String(0)
-}
-
 // Test Setup Helper
 
-func setupAnalyzer(t *testing.T, configMod func(*Config), oastEnabled bool) (*Analyzer, *MockResultsReporter, *MockOASTProvider) {
+func setupAnalyzer(t *testing.T, configMod func(*Config), oastEnabled bool) (*Analyzer, *MockResultsReporter, *mocks.MockOASTProvider) {
 	t.Helper()
 	logger := zaptest.NewLogger(t)
 	targetURL, _ := url.Parse("http://example.com/app")
@@ -89,10 +71,10 @@ func setupAnalyzer(t *testing.T, configMod func(*Config), oastEnabled bool) (*An
 	}
 
 	reporter := new(MockResultsReporter)
-	var oastProvider *MockOASTProvider
+	var oastProvider *mocks.MockOASTProvider
 	var oastProviderIface OASTProvider
 	if oastEnabled {
-		oastProvider = new(MockOASTProvider)
+		oastProvider = new(mocks.MockOASTProvider)
 		oastProvider.On("GetServerURL").Return("oast.example.com").Maybe()
 		oastProviderIface = oastProvider
 	}
@@ -148,7 +130,7 @@ func TestGenerateShim(t *testing.T) {
 
 func TestInstrument_Success(t *testing.T) {
 	analyzer, _, _ := setupAnalyzer(t, nil, false)
-	mockSession := mocks.NewMockSessionContext() // Corrected instantiation
+	mockSession := mocks.NewMockSessionContext()
 	ctx := context.Background()
 
 	mockSession.On("ExposeFunction", ctx, JSCallbackSinkEvent, mock.AnythingOfType("func(taint.SinkEvent)")).Return(nil).Once()
@@ -164,7 +146,7 @@ func TestInstrument_Success(t *testing.T) {
 
 func TestInstrument_Failure_ExposeFunction(t *testing.T) {
 	analyzer, _, _ := setupAnalyzer(t, nil, false)
-	mockSession := mocks.NewMockSessionContext() // Corrected instantiation
+	mockSession := mocks.NewMockSessionContext()
 	ctx := context.Background()
 
 	expectedError := errors.New("browser connection lost")
@@ -254,12 +236,11 @@ func TestProbePersistentSources(t *testing.T) {
 				c.Probes = probes
 				c.Target, _ = url.Parse(tt.targetURL)
 			}, false)
-			mockSession := mocks.NewMockSessionContext() // Corrected instantiation
+			mockSession := mocks.NewMockSessionContext()
 			ctx := context.Background()
 			var capturedScript string
-			// Correctly capture the script from the second argument (index 1).
 			mockSession.On("ExecuteScript", ctx, mock.AnythingOfType("string"), mock.Anything).Run(func(args mock.Arguments) {
-				capturedScript = args.String(1) // Use args.String(1) to safely get the script string.
+				capturedScript = args.String(1)
 			}).Return(json.RawMessage("null"), nil).Once()
 
 			mockSession.On("Navigate", ctx, tt.targetURL).Return(nil).Once()
@@ -291,7 +272,7 @@ func TestProbeURLSources(t *testing.T) {
 		c.Probes = probes
 		c.Target, _ = url.Parse("http://example.com/page?existing=1")
 	}, false)
-	mockSession := mocks.NewMockSessionContext() // Corrected instantiation
+	mockSession := mocks.NewMockSessionContext()
 	ctx := context.Background()
 	var queryURL, hashURL string
 	mockSession.On("Navigate", ctx, mock.AnythingOfType("string")).Return(nil).Twice().Run(func(args mock.Arguments) {
@@ -515,7 +496,7 @@ func TestAnalyze_HappyPath(t *testing.T) {
 		c.Probes = []ProbeDefinition{{Type: schemas.ProbeTypeOAST, Payload: "http://{{.OASTServer}}/{{.Canary}}"}}
 	}, true)
 	ctx := context.Background()
-	mockSession := mocks.NewMockSessionContext() // Corrected instantiation
+	mockSession := mocks.NewMockSessionContext()
 	mockSession.On("ID").Return("mock-session-id").Maybe()
 	mockSession.On("ExposeFunction", mock.Anything, mock.Anything, mock.Anything).Return(nil).Times(3)
 	mockSession.On("InjectScriptPersistently", mock.Anything, mock.Anything).Return(nil).Once()

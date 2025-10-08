@@ -18,11 +18,10 @@ import (
 )
 
 const (
-	ModuleName           = "PrototypePollutionAnalyzer"
-	jsCallbackName       = "__scalpel_protopollution_proof"
-	placeholderCanary    = "{{SCALPEL_CANARY}}"
-	placeholderCallback  = "{{SCALPEL_CALLBACK}}"
-	findingChannelBuffer = 10 // A decent buffer for handling bursts of events from the browser.
+	ModuleName          = "PrototypePollutionAnalyzer"
+	jsCallbackName      = "__scalpel_protopollution_proof"
+	placeholderCanary   = "{{SCALPEL_CANARY}}"
+	placeholderCallback = "{{SCALPEL_CALLBACK}}"
 )
 
 //go:embed shim.js

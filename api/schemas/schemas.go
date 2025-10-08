@@ -20,17 +20,16 @@ const (
 	TaskTestAuthIDOR          TaskType = "TEST_AUTH_IDOR"
 	TaskAnalyzeHeaders        TaskType = "ANALYZE_HEADERS"
 	TaskAnalyzeJWT            TaskType = "ANALYZE_JWT"
-	TaskAnalyzeJSFile         TaskType = "ANALYZE_JS_FILE" // New task type for JS file analysis.
+	TaskAnalyzeJSFile         TaskType = "ANALYZE_JS_FILE"
 )
 
 // Task represents a unit of work to be executed by the engine.
-// This is central to how the system decouples discovery from execution.
 type Task struct {
 	TaskID     string      `json:"task_id"`
 	ScanID     string      `json:"scan_id"`
 	Type       TaskType    `json:"type"`
 	TargetURL  string      `json:"target_url"`
-	Parameters interface{} `json:"parameters"` // Holds task specific configuration.
+	Parameters interface{} `json:"parameters"`
 }
 
 // -- Task Parameter Definitions --
@@ -103,84 +102,66 @@ type ProbeType string
 
 const (
 	ProbeTypeXSS                ProbeType = "XSS"
-	ProbeTypeSSTI               ProbeType = "SSTI" // Server-Side Template Injection
-	ProbeTypeSQLi               ProbeType = "SQLI" // SQL Injection
+	ProbeTypeSSTI               ProbeType = "SSTI"
+	ProbeTypeSQLi               ProbeType = "SQLI"
 	ProbeTypeCmdInjection       ProbeType = "CMD_INJECTION"
-	ProbeTypeOAST               ProbeType = "OAST" // Out-of-Band Application Security Testing
+	ProbeTypeOAST               ProbeType = "OAST"
 	ProbeTypeDOMClobbering      ProbeType = "DOM_CLOBBERING"
 	ProbeTypePrototypePollution ProbeType = "PROTOTYPE_POLLUTION"
-	ProbeTypeGeneric            ProbeType = "GENERIC" // For generic data flow tracking.
+	ProbeTypeGeneric            ProbeType = "GENERIC"
 )
 
 // TaintSource identifies where the tainted data originated.
 type TaintSource string
 
 const (
-	// Client side persistent storage
 	SourceCookie         TaintSource = "COOKIE"
 	SourceLocalStorage   TaintSource = "LOCAL_STORAGE"
 	SourceSessionStorage TaintSource = "SESSION_STORAGE"
-
-	// Client side transient sources
-	SourceURLParam     TaintSource = "URL_PARAM"
-	SourceHashFragment TaintSource = "HASH_FRAGMENT"
-	SourceReferer      TaintSource = "REFERER"
-	SourceHeader       TaintSource = "HEADER"
-	SourceDOMInput     TaintSource = "DOM_INPUT" // Data entered via forms/interaction.
-	SourceDOM          TaintSource = "DOM"       // Data read from existing DOM (e.g., window.name).
-
-	// Communication channels
-	SourceWebSocket   TaintSource = "WEB_SOCKET"   // Data received from server via WebSocket.
-	SourcePostMessage TaintSource = "POST_MESSAGE" // Data received from other windows/workers.
+	SourceURLParam       TaintSource = "URL_PARAM"
+	SourceHashFragment   TaintSource = "HASH_FRAGMENT"
+	SourceReferer        TaintSource = "REFERER"
+	SourceHeader         TaintSource = "HEADER"
+	SourceDOMInput       TaintSource = "DOM_INPUT"
+	SourceDOM            TaintSource = "DOM"
+	SourceWebSocket      TaintSource = "WEB_SOCKET"
+	SourcePostMessage    TaintSource = "POST_MESSAGE"
 )
 
 // TaintSink identifies the dangerous function or property where tainted data landed.
 type TaintSink string
 
 const (
-	// -- Execution Sinks --
 	SinkEval                TaintSink = "EVAL"
 	SinkFunctionConstructor TaintSink = "FUNCTION_CONSTRUCTOR"
-	SinkSetTimeout          TaintSink = "SET_TIMEOUT"   // When a string is passed.
-	SinkSetInterval         TaintSink = "SET_INTERVAL"  // When a string is passed.
-	SinkEventHandler        TaintSink = "EVENT_HANDLER" // e.g., element.onload, setAttribute('onclick', ...)
-
-	// -- DOM Manipulation Sinks (XSS) --
-	SinkInnerHTML          TaintSink = "INNER_HTML"
-	SinkOuterHTML          TaintSink = "OUTER_HTML"
-	SinkInsertAdjacentHTML TaintSink = "INSERT_ADJACENT_HTML"
-	SinkDocumentWrite      TaintSink = "DOCUMENT_WRITE"
-
-	// -- Resource & Navigation Sinks --
-	SinkScriptSrc    TaintSink = "SCRIPT_SRC"
-	SinkIframeSrc    TaintSink = "IFRAME_SRC"
-	SinkIframeSrcDoc TaintSink = "IFRAME_SRCDOC"
-	SinkWorkerSrc    TaintSink = "WORKER_SRC"
-	SinkEmbedSrc     TaintSink = "EMBED_SRC"
-	SinkObjectData   TaintSink = "OBJECT_DATA"
-	SinkBaseHref     TaintSink = "BASE_HREF"  // Can lead to script gadget hijacking
-	SinkNavigation   TaintSink = "NAVIGATION" // e.g., location.href, window.open with javascript: URIs
-
-	// -- Network/Exfiltration Sinks --
-	SinkFetch             TaintSink = "FETCH_BODY"
-	SinkFetchURL          TaintSink = "FETCH_URL"
-	SinkXMLHTTPRequest    TaintSink = "XHR_BODY"
-	SinkXMLHTTPRequestURL TaintSink = "XHR_URL"
-	SinkWebSocketSend     TaintSink = "WEBSOCKET_SEND"
-	SinkSendBeacon        TaintSink = "SEND_BEACON"
-
-	// -- IPC (Inter-Process Communication) Sinks --
-	SinkPostMessage       TaintSink = "POST_MESSAGE"
-	SinkWorkerPostMessage TaintSink = "WORKER_POST_MESSAGE"
-
-	// -- Style & CSS Sinks --
-	SinkStyleCSS        TaintSink = "STYLE_CSS"         // e.g., element.style.cssText, can be used for data exfil/UI redressing
-	SinkStyleInsertRule TaintSink = "STYLE_INSERT_RULE" // Can inject malicious CSS rules.
-
-	// -- Special Confirmation Sinks (High Confidence) --
-	SinkExecution          TaintSink = "EXECUTION_PROOF"
-	SinkOASTInteraction    TaintSink = "OAST_INTERACTION"
-	SinkPrototypePollution TaintSink = "PROTOTYPE_POLLUTION_CONFIRMED"
+	SinkSetTimeout          TaintSink = "SET_TIMEOUT"
+	SinkSetInterval         TaintSink = "SET_INTERVAL"
+	SinkEventHandler        TaintSink = "EVENT_HANDLER"
+	SinkInnerHTML           TaintSink = "INNER_HTML"
+	SinkOuterHTML           TaintSink = "OUTER_HTML"
+	SinkInsertAdjacentHTML  TaintSink = "INSERT_ADJACENT_HTML"
+	SinkDocumentWrite       TaintSink = "DOCUMENT_WRITE"
+	SinkScriptSrc           TaintSink = "SCRIPT_SRC"
+	SinkIframeSrc           TaintSink = "IFRAME_SRC"
+	SinkIframeSrcDoc        TaintSink = "IFRAME_SRCDOC"
+	SinkWorkerSrc           TaintSink = "WORKER_SRC"
+	SinkEmbedSrc            TaintSink = "EMBED_SRC"
+	SinkObjectData          TaintSink = "OBJECT_DATA"
+	SinkBaseHref            TaintSink = "BASE_HREF"
+	SinkNavigation          TaintSink = "NAVIGATION"
+	SinkFetch               TaintSink = "FETCH_BODY"
+	SinkFetchURL            TaintSink = "FETCH_URL"
+	SinkXMLHTTPRequest      TaintSink = "XHR_BODY"
+	SinkXMLHTTPRequestURL   TaintSink = "XHR_URL"
+	SinkWebSocketSend       TaintSink = "WEBSOCKET_SEND"
+	SinkSendBeacon          TaintSink = "SEND_BEACON"
+	SinkPostMessage         TaintSink = "POST_MESSAGE"
+	SinkWorkerPostMessage   TaintSink = "WORKER_POST_MESSAGE"
+	SinkStyleCSS            TaintSink = "STYLE_CSS"
+	SinkStyleInsertRule     TaintSink = "STYLE_INSERT_RULE"
+	SinkExecution           TaintSink = "EXECUTION_PROOF"
+	SinkOASTInteraction     TaintSink = "OAST_INTERACTION"
+	SinkPrototypePollution  TaintSink = "PROTOTYPE_POLLUTION_CONFIRMED"
 )
 
 // ObservationType defines the category of an observation made by an agent.
@@ -197,20 +178,21 @@ const (
 type NodeType string
 
 const (
-	NodeHost          NodeType = "HOST"
-	NodeIPAddress     NodeType = "IP_ADDRESS"
-	NodeURL           NodeType = "URL"
-	NodeCookie        NodeType = "COOKIE"
-	NodeHeader        NodeType = "HEADER"
-	NodeTechnology    NodeType = "TECHNOLOGY"
-	NodeVulnerability NodeType = "VULNERABILITY"
-	NodeAction        NodeType = "ACTION"
-	NodeObservation   NodeType = "OBSERVATION"
-	NodeTool          NodeType = "TOOL"
-	NodeFile          NodeType = "FILE"
-	NodeDomain        NodeType = "DOMAIN"
-	NodeFunction      NodeType = "FUNCTION" // New node type for a function in a codebase.
-	NodeMission       NodeType = "MISSION"
+	NodeHost               NodeType = "HOST"
+	NodeIPAddress          NodeType = "IP_ADDRESS"
+	NodeURL                NodeType = "URL"
+	NodeCookie             NodeType = "COOKIE"
+	NodeHeader             NodeType = "HEADER"
+	NodeTechnology         NodeType = "TECHNOLOGY"
+	NodeVulnerability      NodeType = "VULNERABILITY"
+	NodeAction             NodeType = "ACTION"
+	NodeObservation        NodeType = "OBSERVATION"
+	NodeTool               NodeType = "TOOL"
+	NodeFile               NodeType = "FILE"
+	NodeDomain             NodeType = "DOMAIN"
+	NodeFunction           NodeType = "FUNCTION"
+	NodeMission            NodeType = "MISSION"
+	NodeImprovementAttempt NodeType = "IMPROVEMENT_ATTEMPT"
 )
 
 // RelationshipType defines the type of an edge between nodes.
@@ -224,9 +206,10 @@ const (
 	RelationshipExposes        RelationshipType = "EXPOSES"
 	RelationshipExecuted       RelationshipType = "EXECUTED"
 	RelationshipHasObservation RelationshipType = "HAS_OBSERVATION"
-	RelationshipImports        RelationshipType = "IMPORTS" // New relationship for imports.
+	RelationshipImports        RelationshipType = "IMPORTS"
 	RelationshipHostsURL       RelationshipType = "HOSTS_URL"
 	RelationshipHasSubdomain   RelationshipType = "HAS_SUBDOMAIN"
+	RelationshipAttempted      RelationshipType = "ATTEMPTED"
 )
 
 // NodeStatus defines the state of a node, useful for tracking analysis progress.
@@ -237,6 +220,8 @@ const (
 	StatusProcessing NodeStatus = "PROCESSING"
 	StatusAnalyzed   NodeStatus = "ANALYZED"
 	StatusError      NodeStatus = "ERROR"
+	StatusSuccess    NodeStatus = "SUCCESS"
+	StatusFailure    NodeStatus = "FAILURE"
 )
 
 // Node represents a single entity in the Knowledge Graph.
@@ -253,8 +238,8 @@ type Node struct {
 // Edge represents a directed, labeled relationship between two nodes.
 type Edge struct {
 	ID         string           `json:"id"`
-	From       string           `json:"from"` // Source Node ID
-	To         string           `json:"to"`   // Target Node ID
+	From       string           `json:"from"`
+	To         string           `json:"to"`
 	Type       RelationshipType `json:"type"`
 	Label      string           `json:"label"`
 	Properties json.RawMessage  `json:"properties"`
@@ -273,7 +258,7 @@ type Subgraph struct {
 // FileNodeProperties defines the structured properties for a NodeFile.
 type FileNodeProperties struct {
 	FilePath string `json:"file_path"`
-	Language string `json:"language"` // e.g., "JavaScript", "TypeScript"
+	Language string `json:"language"`
 }
 
 // FunctionNodeProperties defines the structured properties for a NodeFunction.
@@ -281,6 +266,15 @@ type FunctionNodeProperties struct {
 	StartLine  int  `json:"start_line"`
 	EndLine    int  `json:"end_line"`
 	IsExported bool `json:"is_exported"`
+}
+
+// ImprovementAttemptProperties defines the structured properties for a NodeImprovementAttempt.
+type ImprovementAttemptProperties struct {
+	GoalObjective string                 `json:"goal_objective"`
+	StrategyDesc  string                 `json:"strategy_description"`
+	ActionType    string                 `json:"action_type"`
+	ActionPayload map[string]interface{} `json:"action_payload"`
+	OutcomeOutput string                 `json:"outcome_output"`
 }
 
 // -- Input Schemas for Bulk Operations --
@@ -297,8 +291,8 @@ type NodeInput struct {
 // EdgeInput is a helper struct for bulk inserting or updating edges.
 type EdgeInput struct {
 	ID         string           `json:"id"`
-	From       string           `json:"from"` // Source Node ID
-	To         string           `json:"to"`   // Target Node ID
+	From       string           `json:"from"`
+	To         string           `json:"to"`
 	Type       RelationshipType `json:"type"`
 	Label      string           `json:"label"`
 	Properties json.RawMessage  `json:"properties"`
@@ -307,7 +301,6 @@ type EdgeInput struct {
 // -- Communication & Result Schemas --
 
 // KnowledgeGraphUpdate is a container for bulk updates to the Knowledge Graph.
-// It's used within a ResultEnvelope to send back new entities discovered by a task.
 type KnowledgeGraphUpdate struct {
 	NodesToAdd []NodeInput `json:"nodes_to_add"`
 	EdgesToAdd []EdgeInput `json:"edges_to_add"`
@@ -325,7 +318,6 @@ type ResultEnvelope struct {
 // -- Browser & Artifact Schemas --
 
 // UserAgentBrandVersion is a local replacement for emulation.UserAgentBrandVersion.
-// This decouples our schemas from the cdproto library.
 type UserAgentBrandVersion struct {
 	Brand   string `json:"brand"`
 	Version string `json:"version"`
@@ -343,19 +335,16 @@ type ClientHints struct {
 
 // Persona encapsulates all properties for a consistent browser fingerprint.
 type Persona struct {
-	UserAgent string   `json:"userAgent"`
-	Platform  string   `json:"platform"`
-	Languages []string `json:"languages"`
-
-	// Flattened ScreenProperties
-	Width       int64 `json:"width"`
-	Height      int64 `json:"height"`
-	AvailWidth  int64 `json:"availWidth"`
-	AvailHeight int64 `json:"availHeight"`
-	ColorDepth  int64 `json:"colorDepth"`
-	PixelDepth  int64 `json:"pixelDepth"`
-	Mobile      bool  `json:"mobile"`
-
+	UserAgent       string       `json:"userAgent"`
+	Platform        string       `json:"platform"`
+	Languages       []string     `json:"languages"`
+	Width           int64        `json:"width"`
+	Height          int64        `json:"height"`
+	AvailWidth      int64        `json:"availWidth"`
+	AvailHeight     int64        `json:"availHeight"`
+	ColorDepth      int64        `json:"colorDepth"`
+	PixelDepth      int64        `json:"pixelDepth"`
+	Mobile          bool         `json:"mobile"`
 	Timezone        string       `json:"timezoneId"`
 	Locale          string       `json:"locale"`
 	ClientHintsData *ClientHints `json:"clientHintsData,omitempty"`
@@ -395,24 +384,19 @@ const (
 type InteractionStep struct {
 	Action       InteractionAction `json:"action"`
 	Selector     string            `json:"selector,omitempty"`
-	Value        string            `json:"value,omitempty"`        // For Type, Navigate, Select
-	Milliseconds int               `json:"milliseconds,omitempty"` // For Wait
-	Direction    string            `json:"direction,omitempty"`    // For Scroll
+	Value        string            `json:"value,omitempty"`
+	Milliseconds int               `json:"milliseconds,omitempty"`
+	Direction    string            `json:"direction,omitempty"`
 }
 
 // InteractionConfig defines parameters for browser interaction.
-// It supports both an automated, recursive interaction model (MaxDepth, etc.)
-// and an explicit, step-by-step model (Steps).
 type InteractionConfig struct {
-	// Fields for automated, recursive interaction
 	MaxDepth                int               `json:"max_depth"`
 	MaxInteractionsPerDepth int               `json:"max_interactions_per_depth"`
 	InteractionDelayMs      int               `json:"interaction_delay_ms"`
 	PostInteractionWaitMs   int               `json:"post_interaction_wait_ms"`
 	CustomInputData         map[string]string `json:"custom_input_data,omitempty"`
-
-	// Field for explicit, step-by-step interaction
-	Steps []InteractionStep `json:"steps,omitempty"`
+	Steps                   []InteractionStep `json:"steps,omitempty"`
 }
 
 // ConsoleLog represents a single entry from the browser's console.
@@ -436,11 +420,10 @@ const (
 
 // Cookie represents a browser cookie.
 type Cookie struct {
-	Name   string `json:"name"`
-	Value  string `json:"value"`
-	Domain string `json:"domain"`
-	Path   string `json:"path"`
-	// Expires is the cookie expiration date, as a Unix timestamp (float seconds).
+	Name     string         `json:"name"`
+	Value    string         `json:"value"`
+	Domain   string         `json:"domain"`
+	Path     string         `json:"path"`
 	Expires  float64        `json:"expires"`
 	Size     int64          `json:"size"`
 	HTTPOnly bool           `json:"httpOnly"`
@@ -493,7 +476,7 @@ type FetchResponse struct {
 
 // ElementGeometry defines the bounding box and vertices of a DOM element.
 type ElementGeometry struct {
-	Vertices []float64 `json:"vertices"` // List of x, y coordinates [x1, y1, x2, y2, ...]
+	Vertices []float64 `json:"vertices"`
 	Width    int64     `json:"width"`
 	Height   int64     `json:"height"`
 }
@@ -508,7 +491,7 @@ const (
 	MouseWheel   MouseEventType = "mouseWheel"
 )
 
-// Defines the mouse button being pressed.
+// MouseButton defines the mouse button being pressed.
 type MouseButton string
 
 const (
@@ -518,13 +501,13 @@ const (
 	ButtonMiddle MouseButton = "middle"
 )
 
-// This type encapsulates all data for a mouse event.
+// MouseEventData encapsulates all data for a mouse event.
 type MouseEventData struct {
 	Type       MouseEventType `json:"type"`
 	X          float64        `json:"x"`
 	Y          float64        `json:"y"`
 	Button     MouseButton    `json:"button"`
-	Buttons    int64          `json:"buttons"` // Bitfield for currently pressed buttons.
+	Buttons    int64          `json:"buttons"`
 	ClickCount int            `json:"clickCount"`
 	DeltaX     float64        `json:"deltaX"`
 	DeltaY     float64        `json:"deltaY"`
@@ -578,10 +561,9 @@ type Entry struct {
 }
 
 type Request struct {
-	Method      string `json:"method"`
-	URL         string `json:"url"`
-	HTTPVersion string `json:"httpVersion"`
-	// Updated to use HARCookie for HAR compliance.
+	Method      string      `json:"method"`
+	URL         string      `json:"url"`
+	HTTPVersion string      `json:"httpVersion"`
 	Cookies     []HARCookie `json:"cookies"`
 	Headers     []NVPair    `json:"headers"`
 	QueryString []NVPair    `json:"queryString"`
@@ -591,10 +573,9 @@ type Request struct {
 }
 
 type Response struct {
-	Status      int    `json:"status"`
-	StatusText  string `json:"statusText"`
-	HTTPVersion string `json:"httpVersion"`
-	// Updated to use HARCookie for HAR compliance.
+	Status      int         `json:"status"`
+	StatusText  string      `json:"statusText"`
+	HTTPVersion string      `json:"httpVersion"`
 	Cookies     []HARCookie `json:"cookies"`
 	Headers     []NVPair    `json:"headers"`
 	Content     Content     `json:"content"`
@@ -618,13 +599,13 @@ type NVPair struct {
 	Value string `json:"value"`
 }
 
-// HARCookie uses string for Expires to conform strictly to the HAR spec format (ISO 8601).
+// HARCookie uses string for Expires to conform strictly to the HAR spec format.
 type HARCookie struct {
 	Name     string `json:"name"`
 	Value    string `json:"value"`
 	Path     string `json:"path,omitempty"`
 	Domain   string `json:"domain,omitempty"`
-	Expires  string `json:"expires,omitempty"` // ISO 8601 format
+	Expires  string `json:"expires,omitempty"`
 	HTTPOnly bool   `json:"httpOnly,omitempty"`
 	Secure   bool   `json:"secure,omitempty"`
 }
@@ -662,8 +643,8 @@ func NewHAR() *HAR {
 type ModelTier string
 
 const (
-	TierFast     ModelTier = "fast"     // Optimized for speed and cost.
-	TierPowerful ModelTier = "powerful" // Optimized for reasoning and accuracy.
+	TierFast     ModelTier = "fast"
+	TierPowerful ModelTier = "powerful"
 )
 
 type GenerationOptions struct {
@@ -689,14 +670,12 @@ type LLMClient interface {
 
 // DiscoveryEngine defines the interface for an engine that discovers potential tasks.
 type DiscoveryEngine interface {
-	// Start kicks off the discovery process, returning a channel that will stream tasks.
 	Start(ctx context.Context, targets []string) (<-chan Task, error)
 	Stop()
 }
 
 // TaskEngine defines the interface for an engine that executes tasks.
 type TaskEngine interface {
-	// Start begins processing tasks from a channel.
 	Start(ctx context.Context, taskChan <-chan Task)
 	Stop()
 }
@@ -704,22 +683,20 @@ type TaskEngine interface {
 // -- Centralized Core Service Interfaces --
 
 // KnowledgeGraphClient defines the canonical interface for interacting with the Knowledge Graph.
-// It uses the rich Node and Edge types for clarity and type safety.
 type KnowledgeGraphClient interface {
 	AddNode(ctx context.Context, node Node) error
 	AddEdge(ctx context.Context, edge Edge) error
 	GetNode(ctx context.Context, id string) (Node, error)
 	GetEdges(ctx context.Context, nodeID string) ([]Edge, error)
 	GetNeighbors(ctx context.Context, nodeID string) ([]Node, error)
+	QueryImprovementHistory(ctx context.Context, goalObjective string, limit int) ([]Node, error)
 }
 
 // BrowserManager defines the canonical interface for managing browser processes and creating sessions.
-// It requires a config.Config, so we must use an interface{} to avoid import cycles.
-// The concrete implementation will perform a type assertion.
 type BrowserManager interface {
 	NewAnalysisContext(
 		sessionCtx context.Context,
-		cfg interface{}, // *config.Config
+		cfg interface{},
 		persona Persona,
 		taintTemplate string,
 		taintConfig string,
@@ -728,39 +705,26 @@ type BrowserManager interface {
 	Shutdown(ctx context.Context) error
 }
 
-// BrowserInteractor defines the canonical interface for high-level browser interactions within a single session.
+// BrowserInteractor defines the canonical interface for high-level browser interactions.
 type BrowserInteractor interface {
 	NavigateAndExtract(ctx context.Context, url string) ([]string, error)
 }
 
-// SessionContext defines the interface for interacting with a specific browser session (tab).
-// This is used by more advanced analyzers and agents that need fine-grained control.
+// SessionContext defines the interface for interacting with a specific browser session.
 type SessionContext interface {
-	// ID returns the unique identifier for the session.
 	ID() string
 	Navigate(ctx context.Context, url string) error
-	// Interaction methods now include context.Context.
 	Click(ctx context.Context, selector string) error
 	Type(ctx context.Context, selector string, text string) error
 	Submit(ctx context.Context, selector string) error
 	ScrollPage(ctx context.Context, direction string) error
 	WaitForAsync(ctx context.Context, milliseconds int) error
-	// REFACTOR: Removed GetContext() as it's an anti-pattern. Context must be passed as an argument.
-
-	// ExposeFunction allows Go functions to be called from the browser's JavaScript context.
 	ExposeFunction(ctx context.Context, name string, function interface{}) error
-	// InjectScriptPersistently adds a script that will be executed on all new documents in the session.
 	InjectScriptPersistently(ctx context.Context, script string) error
-	// Interact triggers the automated recursive interaction logic.
 	Interact(ctx context.Context, config InteractionConfig) error
-	// Close gracefully terminates the browser session.
 	Close(ctx context.Context) error
-
-	// CollectArtifacts gathers data like HAR logs and DOM state from the session.
 	CollectArtifacts(ctx context.Context) (*Artifacts, error)
-	// AddFinding to allow analyzers to report findings directly through the session.
 	AddFinding(ctx context.Context, finding Finding) error
-	// Methods for human-like interaction, using canonical schema types.
 	Sleep(ctx context.Context, d time.Duration) error
 	DispatchMouseEvent(ctx context.Context, data MouseEventData) error
 	SendKeys(ctx context.Context, keys string) error
@@ -769,16 +733,13 @@ type SessionContext interface {
 }
 
 // HTTPClient defines the interface for making simple HTTP GET requests.
-// This is used by passive discovery modules.
 type HTTPClient interface {
 	Get(ctx context.Context, url string) (body []byte, statusCode int, err error)
 }
 
 // OASTProvider is the contract for interacting with an OAST service.
 type OASTProvider interface {
-	// Fetches interactions since the last check for the given canaries.
 	GetInteractions(ctx context.Context, canaries []string) ([]OASTInteraction, error)
-	// Returns the base URL/domain for the OAST server to be used in payloads.
 	GetServerURL() string
 }
 
