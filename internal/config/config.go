@@ -58,9 +58,9 @@ type GitConfig struct {
 type GitHubConfig struct {
 	// The GitHub Personal Access Token (PAT).
 	// SECURITY: Loaded via environment variable (SCALPEL_AUTOFIX_GH_TOKEN).
-	Token      string `mapstructure:"token" yaml:"-"` // Ignore in YAML/JSON
-	RepoOwner  string `mapstructure:"repo_owner" yaml:"repo_owner"`
-	RepoName   string `mapstructure:"repo_name" yaml:"repo_name"`
+	Token     string `mapstructure:"token" yaml:"-"` // Ignore in YAML/JSON
+	RepoOwner string `mapstructure:"repo_owner" yaml:"repo_owner"`
+	RepoName  string `mapstructure:"repo_name" yaml:"repo_name"`
 	// The base branch to target for pull requests (e.g., "main").
 	BaseBranch string `mapstructure:"base_branch" yaml:"base_branch"`
 }
@@ -246,9 +246,20 @@ type DiscoveryConfig struct {
 	PassiveConcurrency int           `mapstructure:"passive_concurrency" yaml:"passive_concurrency"`
 }
 
+// PostgresConfig holds the connection details for a PostgreSQL database.
+type PostgresConfig struct {
+	Host     string `mapstructure:"host" yaml:"host"`
+	Port     int    `mapstructure:"port" yaml:"port"`
+	User     string `mapstructure:"user" yaml:"user"`
+	Password string `mapstructure:"password" yaml:"password"`
+	DBName   string `mapstructure:"dbname" yaml:"dbname"`
+	SSLMode  string `mapstructure:"sslmode" yaml:"sslmode"`
+}
+
 // KnowledgeGraphConfig specifies the backend for the knowledge graph.
 type KnowledgeGraphConfig struct {
-	Type string `mapstructure:"type" yaml:"type"`
+	Type     string         `mapstructure:"type" yaml:"type"`
+	Postgres PostgresConfig `mapstructure:"postgres" yaml:"postgres"`
 }
 
 // AgentConfig holds settings related to the AI agent and its components.
@@ -359,6 +370,12 @@ func SetDefaults(v *viper.Viper) {
 	v.SetDefault("agent.llm.default_fast_model", "gemini-2.5-flash")
 	v.SetDefault("agent.llm.default_powerful_model", "gemini-2.5-pro")
 	v.SetDefault("agent.knowledge_graph.type", "postgres")
+	v.SetDefault("agent.knowledge_graph.postgres.host", "localhost")
+	v.SetDefault("agent.knowledge_graph.postgres.port", 5432)
+	v.SetDefault("agent.knowledge_graph.postgres.user", "postgres")
+	v.SetDefault("agent.knowledge_graph.postgres.password", "") // Should be set via env var in production
+	v.SetDefault("agent.knowledge_graph.postgres.dbname", "scalpel_kg")
+	v.SetDefault("agent.knowledge_graph.postgres.sslmode", "disable")
 
 	// -- Autofix --
 	v.SetDefault("autofix.enabled", false)
@@ -417,6 +434,7 @@ func Load(v *viper.Viper) error {
 
 		// Bind Environment Variables for sensitive data
 		v.BindEnv("autofix.github.token", "SCALPEL_AUTOFIX_GH_TOKEN")
+		v.BindEnv("agent.knowledge_graph.postgres.password", "SCALPEL_KG_PASSWORD")
 
 		if err := v.Unmarshal(&cfg); err != nil {
 			loadErr = fmt.Errorf("error unmarshaling config: %w", err)

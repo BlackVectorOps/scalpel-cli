@@ -89,14 +89,14 @@ func TestTaskSerialization(t *testing.T) {
 
 		// Verify the JSON structure (the contract)
 		expectedJSON := `{
-			"task_id": "T1",
-			"scan_id": "S1",
-			"type": "TEST_AUTH_ATO",
-			"target_url": "https://example.com/login",
-			"parameters": {
-				"usernames": ["admin", "guest"]
-			}
-		}`
+            "task_id": "T1",
+            "scan_id": "S1",
+            "type": "TEST_AUTH_ATO",
+            "target_url": "https://example.com/login",
+            "parameters": {
+                "usernames": ["admin", "guest"]
+            }
+        }`
 		assertJSONEqual(t, []byte(expectedJSON), data)
 
 		// Unmarshal (Testing the behavior when the type inside interface{} is unknown)
@@ -133,24 +133,23 @@ func TestTaskSerialization(t *testing.T) {
 		}
 
 		expectedJSON := `{
-			"task_id": "T2",
-			"scan_id": "",
-			"type": "TEST_AUTH_IDOR",
-			"target_url": "",
-			"parameters": {
-				"http_method": "POST",
-				"http_body": "id=123",
-				"http_headers": {"X-Test": "true"}
-			}
-		}`
+            "task_id": "T2",
+            "scan_id": "",
+            "type": "TEST_AUTH_IDOR",
+            "target_url": "",
+            "parameters": {
+                "http_method": "POST",
+                "http_body": "id=123",
+                "http_headers": {"X-Test": "true"}
+            }
+        }`
 		assertJSONEqual(t, []byte(expectedJSON), data)
 	})
 }
 
 // TestFindingSerialization tests the Finding struct round trip.
 func TestFindingSerialization(t *testing.T) {
-	// Truncate time for comparison as JSON serialization (RFC3339) might lose nanosecond precision.
-	now := time.Now().UTC().Truncate(time.Millisecond)
+	now := getTestTime(t)
 	finding := &schemas.Finding{
 		ID:        "finding-1",
 		ScanID:    "scan-1",
@@ -191,7 +190,7 @@ func TestFindingSerialization(t *testing.T) {
 
 // TestKnowledgeGraphSerialization tests Node and Edge serialization, focusing on json.RawMessage.
 func TestKnowledgeGraphSerialization(t *testing.T) {
-	now := time.Now().UTC().Truncate(time.Millisecond)
+	now := getTestTime(t)
 	propertiesJSON := json.RawMessage(`{"ip":"192.0.2.1","port":80}`)
 
 	node := &schemas.Node{
@@ -235,7 +234,7 @@ func TestKnowledgeGraphSerialization(t *testing.T) {
 
 // TestResultEnvelopeSerialization tests the comprehensive ResultEnvelope structure.
 func TestResultEnvelopeSerialization(t *testing.T) {
-	now := time.Now().UTC().Truncate(time.Millisecond)
+	now := getTestTime(t)
 	envelope := &schemas.ResultEnvelope{
 		ScanID:    "scan-1",
 		TaskID:    "task-1",
@@ -367,7 +366,7 @@ func TestHARInitialization(t *testing.T) {
 // TestHARSerialization tests the HAR structure round trip, ensuring compliance with the format,
 // especially the distinct HARCookie time format.
 func TestHARSerialization(t *testing.T) {
-	now := time.Now().UTC().Truncate(time.Millisecond)
+	now := getTestTime(t)
 	// CRITICAL: HARCookie Expires must be ISO 8601 format string (RFC3339Nano is compatible).
 	// This is different from schemas.Cookie which uses a float Unix timestamp.
 	expiresISO := now.Add(24 * time.Hour).Format(time.RFC3339Nano)
@@ -487,14 +486,14 @@ func TestJSONRawMessageHandling(t *testing.T) {
 
 	// Ensure the properties field is embedded as an object, not a string.
 	expectedJSON := `{
-		"id":"n1",
-		"type":"",
-		"label":"",
-		"status":"",
-		"properties":{"key": "value"},
-		"created_at":"0001-01-01T00:00:00Z",
-		"last_seen":"0001-01-01T00:00:00Z"
-	}`
+        "id":"n1",
+        "type":"",
+        "label":"",
+        "status":"",
+        "properties":{"key": "value"},
+        "created_at":"0001-01-01T00:00:00Z",
+        "last_seen":"0001-01-01T00:00:00Z"
+    }`
 	assertJSONEqual(t, []byte(expectedJSON), data)
 
 	// 2. Empty RawMessage
@@ -513,14 +512,14 @@ func TestJSONRawMessageHandling(t *testing.T) {
 
 	// A nil json.RawMessage marshals to 'null'.
 	expectedEmptyJSON := `{
-		"id":"n2",
-		"type":"",
-		"label":"",
-		"status":"",
-		"properties":null,
-		"created_at":"0001-01-01T00:00:00Z",
-		"last_seen":"0001-01-01T00:00:00Z"
-	}`
+        "id":"n2",
+        "type":"",
+        "label":"",
+        "status":"",
+        "properties":null,
+        "created_at":"0001-01-01T00:00:00Z",
+        "last_seen":"0001-01-01T00:00:00Z"
+    }`
 	assertJSONEqual(t, []byte(expectedEmptyJSON), dataEmpty)
 
 	// 3. Test Unmarshalling into RawMessage

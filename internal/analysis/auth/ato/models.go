@@ -44,9 +44,10 @@ func AnalyzeResponse(attempt LoginAttempt, statusCode int, responseBody string, 
 
 	// Heuristics for success:
 	// 1. Redirect status codes (3xx) often indicate success.
-	if statusCode == http.StatusFound || statusCode == http.StatusMovedPermanently || statusCode == http.StatusSeeOther {
+	switch statusCode {
+	case http.StatusFound, http.StatusMovedPermanently, http.StatusSeeOther:
 		resp.Success = true
-	} else if statusCode == http.StatusOK {
+	case http.StatusOK:
 		// 2. Status code 200 with specific keywords (common in APIs).
 		if strings.Contains(bodyLower, `"success": true`) ||
 			strings.Contains(bodyLower, `"authenticated": true`) ||

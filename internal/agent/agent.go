@@ -1,4 +1,3 @@
-// internal/agent/agent.go
 package agent
 
 import (
@@ -9,16 +8,17 @@ import (
 	"strings"
 	"sync"
 	"time"
-    "github.com/google/uuid"
-    "github.com/jackc/pgx/v5/pgxpool"
-    "go.uber.org/zap"
 
-    "github.com/xkilldash9x/scalpel-cli/api/schemas"
-    "github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
-    "github.com/xkilldash9x/scalpel-cli/internal/browser/humanoid"
-    "github.com/xkilldash9x/scalpel-cli/internal/config"
-    "github.com/xkilldash9x/scalpel-cli/internal/knowledgegraph"
-    "github.com/xkilldash9x/scalpel-cli/internal/llmclient"
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"go.uber.org/zap"
+
+	"github.com/xkilldash9x/scalpel-cli/api/schemas"
+	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
+	"github.com/xkilldash9x/scalpel-cli/internal/browser/humanoid"
+	"github.com/xkilldash9x/scalpel-cli/internal/config"
+	"github.com/xkilldash9x/scalpel-cli/internal/knowledgegraph"
+	"github.com/xkilldash9x/scalpel-cli/internal/llmclient"
 )
 
 // Agent orchestrates the components of an autonomous security mission.
@@ -53,7 +53,7 @@ func NewGraphStoreFromConfig(
 		if pool == nil {
 			return nil, fmt.Errorf("PostgreSQL store requires a valid database connection pool")
 		}
-		return knowledgegraph.NewPostgresKG(pool), nil
+		return knowledgegraph.NewPostgresKG(pool, logger), nil
 	case "in-memory":
 		// Corrected initialization based on the prompt's context.
 		return knowledgegraph.NewInMemoryKG(logger)
@@ -84,7 +84,7 @@ func New(ctx context.Context, mission Mission, globalCtx *core.GlobalContext, se
 	mind := NewLLMMind(logger, llmRouter, globalCtx.Config.Agent, kg, bus)
 
 	// 3. Executors and Humanoid
-	projectRoot, _ := os.Getwd() 
+	projectRoot, _ := os.Getwd()
 	executors := NewExecutorRegistry(logger, projectRoot)
 	executors.UpdateSessionProvider(func() schemas.SessionContext {
 		return session
@@ -96,10 +96,10 @@ func New(ctx context.Context, mission Mission, globalCtx *core.GlobalContext, se
 	// This initializes the system but does not start monitoring yet.
 	selfHeal, err := NewSelfHealOrchestrator(logger, globalCtx.Config, llmRouter)
 	if err != nil {
-		// If initialization fails (e.g., missing log file config), log the error 
+		// If initialization fails (e.g., missing log file config), log the error
 		// but allow the agent to continue without self-healing.
 		logger.Error("Failed to initialize Self-Healing system. Proceeding without it.", zap.Error(err))
-		selfHeal = nil 
+		selfHeal = nil
 	}
 
 	agent := &Agent{
@@ -173,8 +173,7 @@ func (a *Agent) actionLoop(ctx context.Context) {
 
 	for {
 		select {
-		case 
-		msg, ok := <-actionChan:
+		case msg, ok := <-actionChan:
 			if !ok {
 				return
 			}
@@ -285,7 +284,7 @@ func (a *Agent) executeHumanoidAction(ctx context.Context, action Action) *Execu
 
 	if err != nil {
 		result.Status = "failed"
-		
+
 		// -- FIX APPLIED --
 		// Assumes ParseBrowserError returns an ErrorCode type, not a string.
 		errorCode, errorDetails := ParseBrowserError(err, action)

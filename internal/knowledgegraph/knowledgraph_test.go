@@ -3,10 +3,12 @@ package knowledgegraph
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -15,7 +17,6 @@ import (
 )
 
 // -- Test Fixture Setup --
-
 // kgTestFixture holds shared resources for the knowledge graph tests.
 type kgTestFixture struct {
 	Logger *zap.Logger
@@ -83,18 +84,16 @@ func TestNewInMemoryKG(t *testing.T) {
 		kg, err := NewInMemoryKG(globalFixture.Logger)
 		require.NoError(t, err)
 		assert.NotNil(t, kg)
-		// A bit of an internal check, but good for ensuring logger is passed.
-		assert.NotEqual(t, zap.NewNop(), kg.log)
+		assert.NotEqual(t, zap.NewNop(), kg.log, "Logger should not be a no-op when provided")
 	})
 
-	t.Run("should create KG with a Nop logger if nil is provided", func(t *testing.T) {
+	t.Run("should not panic if nil logger is provided", func(t *testing.T) {
 		t.Parallel()
+		// This test ensures the constructor is safe and provides a fallback
+		// without being brittle by inspecting unexported fields.
 		kg, err := NewInMemoryKG(nil)
 		require.NoError(t, err)
 		assert.NotNil(t, kg)
-		// In this case, we expect the fallback Nop logger.
-		// This requires a bit of introspection or checking an unexported field,
-		// but it's a key feature of the constructor.
 	})
 }
 
@@ -193,12 +192,15 @@ func TestGetNeighborsAndEdges(t *testing.T) {
 }
 
 func TestConcurrency(t *testing.T) {
+	// Note: It is highly recommended to run this test with the -race flag
+	// to detect potential data races: `go test -race ./...`
 	t.Parallel()
 	kg, err := NewInMemoryKG(globalFixture.Logger)
 	require.NoError(t, err)
 
 	var wg sync.WaitGroup
 	numRoutines := 100
+	errChan := make(chan error, numRoutines*2) // Buffer for potential errors from writers
 
 	// -- seed with an initial node --
 	_ = kg.AddNode(context.Background(), schemas.Node{ID: "node-0"})
@@ -215,8 +217,12 @@ func TestConcurrency(t *testing.T) {
 			node := schemas.Node{ID: nodeID, Type: "Test"}
 			edge := schemas.Edge{ID: edgeID, From: "node-0", To: nodeID}
 
-			_ = kg.AddNode(context.Background(), node)
-			_ = kg.AddEdge(context.Background(), edge)
+			if err := kg.AddNode(context.Background(), node); err != nil {
+				errChan <- fmt.Errorf("writer failed to add node: %w", err)
+			}
+			if err := kg.AddEdge(context.Background(), edge); err != nil {
+				errChan <- fmt.Errorf("writer failed to add edge: %w", err)
+			}
 		}(i)
 
 		// Reader
@@ -228,9 +234,72 @@ func TestConcurrency(t *testing.T) {
 	}
 
 	wg.Wait()
+	close(errChan)
+
+	// -- check for any errors that occurred during concurrent writes --
+	for err := range errChan {
+		require.NoError(t, err, "Concurrency test encountered an unexpected error")
+	}
 
 	// -- final state check --
 	finalNeighbors, err := kg.GetNeighbors(context.Background(), "node-0")
 	require.NoError(t, err)
 	assert.Len(t, finalNeighbors, numRoutines, "All concurrently added neighbor nodes should be present")
+}
+
+func TestQueryImprovementHistory(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	// Setup: Create a KG with specific history nodes
+	kg, err := NewInMemoryKG(globalFixture.Logger)
+	require.NoError(t, err)
+
+	objectiveA := "Improve API response time"
+	objectiveB := "Reduce memory usage"
+
+	// Create properties for nodes
+	propsA1, _ := json.Marshal(schemas.ImprovementAttemptProperties{GoalObjective: objectiveA})
+	propsA2, _ := json.Marshal(schemas.ImprovementAttemptProperties{GoalObjective: objectiveA})
+	propsB1, _ := json.Marshal(schemas.ImprovementAttemptProperties{GoalObjective: objectiveB})
+
+	nodes := []schemas.Node{
+		// These two match objective A, with A2 being the most recent
+		{ID: "hist-a1", Type: schemas.NodeImprovementAttempt, Properties: propsA1, CreatedAt: time.Now().Add(-10 * time.Minute)},
+		{ID: "hist-a2", Type: schemas.NodeImprovementAttempt, Properties: propsA2, CreatedAt: time.Now().Add(-5 * time.Minute)},
+		// This one matches objective B
+		{ID: "hist-b1", Type: schemas.NodeImprovementAttempt, Properties: propsB1, CreatedAt: time.Now()},
+		// This is not an improvement attempt node and should be ignored
+		{ID: "other-node", Type: "URL", Label: "ignore me"},
+	}
+
+	for _, n := range nodes {
+		err := kg.AddNode(ctx, n)
+		require.NoError(t, err)
+	}
+
+	t.Run("should find all history for an objective and sort by most recent", func(t *testing.T) {
+		t.Parallel()
+		history, err := kg.QueryImprovementHistory(ctx, objectiveA, 0) // 0 limit means no limit
+		require.NoError(t, err)
+		require.Len(t, history, 2)
+		// Verify descending order by checking that the first result is the newest one
+		assert.Equal(t, "hist-a2", history[0].ID)
+		assert.Equal(t, "hist-a1", history[1].ID)
+	})
+
+	t.Run("should respect the limit parameter", func(t *testing.T) {
+		t.Parallel()
+		history, err := kg.QueryImprovementHistory(ctx, objectiveA, 1)
+		require.NoError(t, err)
+		require.Len(t, history, 1)
+		assert.Equal(t, "hist-a2", history[0].ID)
+	})
+
+	t.Run("should return empty slice for an objective with no history", func(t *testing.T) {
+		t.Parallel()
+		history, err := kg.QueryImprovementHistory(ctx, "A completely different objective", 0)
+		require.NoError(t, err)
+		assert.Empty(t, history)
+	})
 }

@@ -532,7 +532,8 @@ func (a *Analyzer) probePersistentSources(ctx context.Context, session SessionCo
 	return nil
 }
 
-//  injects probes into URL query parameters and the hash fragment.
+//	injects probes into URL query parameters and the hash fragment.
+//
 // REFACTOR: Updated signature to remove BrowserContext. Integrated pauses using operation context.
 func (a *Analyzer) probeURLSources(ctx context.Context, session SessionContext, h *humanoid.Humanoid) error {
 	baseURL := *a.config.Target
@@ -759,7 +760,8 @@ func (a *Analyzer) fetchAndEnqueueOAST() {
 	}
 }
 
-//  main dispatcher for incoming events. It routes events
+//	main dispatcher for incoming events. It routes events
+//
 // to the appropriate handler based on their type.
 func (a *Analyzer) processEvent(event Event) {
 	switch e := event.(type) {
@@ -774,7 +776,7 @@ func (a *Analyzer) processEvent(event Event) {
 	}
 }
 
-//  handles confirmed out of band callbacks and reports a finding.
+// handles confirmed out of band callbacks and reports a finding.
 func (a *Analyzer) processOASTInteraction(interaction OASTInteraction) {
 	a.probesMutex.RLock()
 	probe, ok := a.activeProbes[interaction.Canary]
@@ -792,9 +794,10 @@ func (a *Analyzer) processOASTInteraction(interaction OASTInteraction) {
 	)
 
 	detail := fmt.Sprintf("Out of Band interaction confirmed via %s protocol.", interaction.Protocol)
-	if probe.Type == schemas.ProbeTypeXSS || probe.Type == schemas.ProbeTypeSSTI {
+	switch probe.Type {
+	case schemas.ProbeTypeXSS, schemas.ProbeTypeSSTI:
 		detail = "Blind XSS/SSTI confirmed via OAST callback."
-	} else if probe.Type == schemas.ProbeTypeOAST {
+	case schemas.ProbeTypeOAST:
 		detail = "Blind vulnerability (e.g., SSRF, RCE) confirmed via OAST callback."
 	}
 

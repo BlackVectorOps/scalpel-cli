@@ -16,120 +16,16 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
+	"github.com/xkilldash9x/scalpel-cli/internal/mocks"
 	"github.com/xkilldash9x/scalpel-cli/internal/worker/adapters"
 )
 
-// --- Mocks ---
-type MockBrowserManager struct {
-	mock.Mock
-}
-
-func (m *MockBrowserManager) NewAnalysisContext(sessionCtx context.Context, cfg interface{}, persona schemas.Persona, taintTemplate string, taintConfig string, findingsChan chan<- schemas.Finding) (schemas.SessionContext, error) {
-	if _, ok := cfg.(schemas.Task); !ok {
-		if _, ok := cfg.(*schemas.Task); !ok {
-			panic("BrowserManager.NewAnalysisContext must be called with a schemas.Task object")
-		}
-	}
-	args := m.Called(sessionCtx, cfg, persona, taintTemplate, taintConfig, findingsChan)
-	if args.Get(0) == nil {
-		return nil, args.Error(1)
-	}
-	return args.Get(0).(schemas.SessionContext), args.Error(1)
-}
-
-func (m *MockBrowserManager) Shutdown(ctx context.Context) error {
-	return m.Called(ctx).Error(0)
-}
-
-type MockOASTProvider struct {
-	mock.Mock
-}
-
-func (m *MockOASTProvider) GetInteractions(ctx context.Context, canaries []string) ([]schemas.OASTInteraction, error) {
-	args := m.Called(ctx, canaries)
-	if args.Get(0) == nil {
-		return nil, args.Error(1)
-	}
-	return args.Get(0).([]schemas.OASTInteraction), args.Error(1)
-}
-
-func (m *MockOASTProvider) GetServerURL() string {
-	return m.Called().String(0)
-}
-
-type MockSessionContext struct {
-	mock.Mock
-}
-
-func (m *MockSessionContext) ID() string                      { return m.Called().String(0) }
-func (m *MockSessionContext) Close(ctx context.Context) error { return m.Called(ctx).Error(0) }
-func (m *MockSessionContext) Navigate(ctx context.Context, url string) error {
-	return m.Called(ctx, url).Error(0)
-}
-func (m *MockSessionContext) Click(ctx context.Context, selector string) error {
-	return m.Called(ctx, selector).Error(0)
-}
-func (m *MockSessionContext) Type(ctx context.Context, selector string, text string) error {
-	return m.Called(ctx, selector, text).Error(0)
-}
-func (m *MockSessionContext) Submit(ctx context.Context, selector string) error {
-	return m.Called(ctx, selector).Error(0)
-}
-func (m *MockSessionContext) ScrollPage(ctx context.Context, direction string) error {
-	return m.Called(ctx, direction).Error(0)
-}
-func (m *MockSessionContext) WaitForAsync(ctx context.Context, milliseconds int) error {
-	return m.Called(ctx, milliseconds).Error(0)
-}
-func (m *MockSessionContext) ExposeFunction(ctx context.Context, name string, function interface{}) error {
-	return m.Called(ctx, name, function).Error(0)
-}
-func (m *MockSessionContext) InjectScriptPersistently(ctx context.Context, script string) error {
-	return m.Called(ctx, script).Error(0)
-}
-func (m *MockSessionContext) Interact(ctx context.Context, config schemas.InteractionConfig) error {
-	return m.Called(ctx, config).Error(0)
-}
-func (m *MockSessionContext) CollectArtifacts(ctx context.Context) (*schemas.Artifacts, error) {
-	args := m.Called(ctx)
-	if args.Get(0) == nil {
-		return nil, args.Error(1)
-	}
-	return args.Get(0).(*schemas.Artifacts), args.Error(1)
-}
-func (m *MockSessionContext) AddFinding(ctx context.Context, finding schemas.Finding) error {
-	return m.Called(ctx, finding).Error(0)
-}
-func (m *MockSessionContext) Sleep(ctx context.Context, d time.Duration) error {
-	return m.Called(ctx, d).Error(0)
-}
-func (m *MockSessionContext) DispatchMouseEvent(ctx context.Context, data schemas.MouseEventData) error {
-	return m.Called(ctx, data).Error(0)
-}
-func (m *MockSessionContext) SendKeys(ctx context.Context, keys string) error {
-	return m.Called(ctx, keys).Error(0)
-}
-func (m *MockSessionContext) GetElementGeometry(ctx context.Context, selector string) (*schemas.ElementGeometry, error) {
-	args := m.Called(ctx, selector)
-	if args.Get(0) == nil {
-		return nil, args.Error(1)
-	}
-	return args.Get(0).(*schemas.ElementGeometry), args.Error(1)
-}
-func (m *MockSessionContext) ExecuteScript(ctx context.Context, script string, args []interface{}) (json.RawMessage, error) {
-	retArgs := m.Called(ctx, script, args)
-	if retArgs.Get(0) == nil {
-		return json.RawMessage("null"), retArgs.Error(1)
-	}
-	return retArgs.Get(0).(json.RawMessage), retArgs.Error(1)
-}
-
-func setupTaintAdapterTest(t *testing.T) (*adapters.TaintAdapter, *core.AnalysisContext, *MockBrowserManager, *MockSessionContext, *MockOASTProvider) {
+func setupTaintAdapterTest(t *testing.T) (*adapters.TaintAdapter, *core.AnalysisContext, *mocks.MockBrowserManager, *mocks.MockSessionContext, *mocks.MockOASTProvider) {
 	adapter := adapters.NewTaintAdapter()
 	logger := zaptest.NewLogger(t)
-	mockBM := new(MockBrowserManager)
-	mockSession := new(MockSessionContext)
-	mockOAST := new(MockOASTProvider)
+	mockBM := new(mocks.MockBrowserManager)
+	mockSession := mocks.NewMockSessionContext()
+	mockOAST := new(mocks.MockOASTProvider)
 	findingsChan := make(chan schemas.Finding, 10)
 
 	cfg := &config.Config{
@@ -167,7 +63,7 @@ func TestTaintAdapter_Analyze_SuccessOrchestration(t *testing.T) {
 	mockSession.On("InjectScriptPersistently", mock.Anything, mock.Anything).Return(nil)
 	mockSession.On("ExecuteScript", mock.Anything, mock.Anything, mock.Anything).Return(json.RawMessage("null"), nil)
 
-	// FIX: Make the Navigate mock flexible. The analyzer calls it multiple times with different URLs (containing probes).
+	// The analyzer calls Navigate multiple times with different URLs (containing probes).
 	mockSession.On("Navigate", mock.Anything, mock.AnythingOfType("string")).Return(nil)
 
 	expectedInteractionConfig := schemas.InteractionConfig{MaxDepth: 2}

@@ -1,5 +1,3 @@
-// internal/knowledgegraph/postgres_kg.go
-
 package knowledgegraph
 
 import (
@@ -13,11 +11,10 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
+	"go.uber.org/zap"
 )
 
-// DBPool defines an interface that abstracts the necessary pgxpool.Pool methods.
-// This is a slick move because it allows us to easily mock the database pool during
-// testing, isolating our knowledge graph logic from the actual database.
+// DBPool defines an interface for pgxpool.Pool methods, enabling easy mocking for tests.
 type DBPool interface {
 	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
@@ -25,155 +22,222 @@ type DBPool interface {
 	Close()
 }
 
-// Just to be sure, we'll make the compiler check that *pgxpool.Pool actually
-// satisfies our DBPool interface. If it doesn't, we'll know at compile time.
+// Ensures *pgxpool.Pool satisfies the DBPool interface at compile time.
 var _ DBPool = (*pgxpool.Pool)(nil)
 
-// PostgresKG provides a robust, persistent implementation of the schemas.KnowledgeGraphClient
-// interface using a PostgreSQL backend. This implementation leverages pgx for performance.
+// PostgresKG provides a persistent implementation of the KnowledgeGraphClient using PostgreSQL.
 type PostgresKG struct {
-	// We're using our DBPool interface here instead of a concrete *pgxpool.Pool.
-	// This makes our struct more flexible and much easier to test.
 	pool DBPool
+	log  *zap.Logger
 }
+
+// Ensures PostgresKG implements the KnowledgeGraphClient interface at compile time.
+var _ schemas.KnowledgeGraphClient = (*PostgresKG)(nil)
 
 // NewPostgresKG initializes a new connection wrapper for the PostgreSQL database.
-// It takes our DBPool interface, allowing it to work with a real pgxpool or a mock.
-func NewPostgresKG(pool DBPool) *PostgresKG {
-	return &PostgresKG{pool: pool}
+func NewPostgresKG(pool DBPool, logger *zap.Logger) *PostgresKG {
+	return &PostgresKG{
+		pool: pool,
+		// naming the logger gives us more context in the logs
+		log: logger.Named("PostgresKG"),
+	}
 }
 
-// AddNode inserts a new node or updates an existing one in the database.
-// It uses an ON CONFLICT clause to handle nodes that already exist, which is a
-// clean way to perform an "upsert" operation.
+// AddNode inserts a new node or updates an existing one using an "upsert" operation.
 func (p *PostgresKG) AddNode(ctx context.Context, node schemas.Node) error {
-	props, err := json.Marshal(node.Properties)
-	if err != nil {
-		return fmt.Errorf("failed to marshal node properties: %w", err)
+	// Assumes node.Properties is json.RawMessage; ensures it's a valid, non null JSON object.
+	props := node.Properties
+	if len(props) == 0 || string(props) == "null" {
+		props = json.RawMessage("{}")
 	}
 
-	// Switched from db.ExecContext to pool.Exec. pgx methods are context aware
-	// by default, so we pass the context as the first argument.
-	_, err = p.pool.Exec(ctx, `
-		INSERT INTO nodes (id, type, label, status, properties, created_at, last_seen)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
-		ON CONFLICT (id) DO UPDATE SET
-			type = EXCLUDED.type,
-			label = EXCLUDED.label,
-			status = EXCLUDED.status,
-			properties = EXCLUDED.properties,
-			last_seen = EXCLUDED.last_seen;
-	`, node.ID, node.Type, node.Label, node.Status, props, node.CreatedAt, time.Now())
+	_, err := p.pool.Exec(ctx, `
+        INSERT INTO nodes (id, type, label, status, properties, created_at, last_seen)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        ON CONFLICT (id) DO UPDATE SET
+            type = EXCLUDED.type,
+            label = EXCLUDED.label,
+            status = EXCLUDED.status,
+            properties = EXCLUDED.properties,
+            last_seen = EXCLUDED.last_seen;
+    `, node.ID, node.Type, node.Label, node.Status, props, node.CreatedAt, time.Now())
 
-	return err
+	if err != nil {
+		p.log.Error("Failed to add or update node", zap.String("node_id", node.ID), zap.Error(err))
+		return fmt.Errorf("failed to exec add node: %w", err)
+	}
+
+	p.log.Debug("Node added or updated successfully", zap.String("node_id", node.ID))
+	return nil
 }
 
-// AddEdge inserts a new edge or updates an existing one, linking two nodes.
+// AddEdge inserts a new edge or updates an existing one based on its logical uniqueness.
 func (p *PostgresKG) AddEdge(ctx context.Context, edge schemas.Edge) error {
-	props, err := json.Marshal(edge.Properties)
-	if err != nil {
-		return fmt.Errorf("failed to marshal edge properties: %w", err)
+	props := edge.Properties
+	if len(props) == 0 || string(props) == "null" {
+		props = json.RawMessage("{}")
 	}
 
-	_, err = p.pool.Exec(ctx, `
-		INSERT INTO edges (id, from_node, to_node, type, label, properties, created_at, last_seen)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-		ON CONFLICT (id) DO UPDATE SET
-			from_node = EXCLUDED.from_node,
-			to_node = EXCLUDED.to_node,
-			type = EXCLUDED.type,
-			label = EXCLUDED.label,
-			properties = EXCLUDED.properties,
-			last_seen = EXCLUDED.last_seen;
-	`, edge.ID, edge.From, edge.To, edge.Type, edge.Label, props, edge.CreatedAt, time.Now())
+	// ON CONFLICT on the natural key (from_node, to_node, type) prevents duplicate logical edges.
+	_, err := p.pool.Exec(ctx, `
+        INSERT INTO edges (id, from_node, to_node, type, label, properties, created_at, last_seen)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        ON CONFLICT (id) DO UPDATE SET
+            from_node = EXCLUDED.from_node,
+            to_node = EXCLUDED.to_node,
+            type = EXCLUDED.type,
+            label = EXCLUDED.label,
+            properties = EXCLUDED.properties,
+            last_seen = EXCLUDED.last_seen;
+    `, edge.ID, edge.From, edge.To, edge.Type, edge.Label, props, edge.CreatedAt, time.Now())
 
-	return err
+	if err != nil {
+		p.log.Error(
+			"Failed to add or update edge",
+			zap.String("from_node", edge.From),
+			zap.String("to_node", edge.To),
+			// Explicitly cast edge.Type to a string
+			zap.String("edge_type", string(edge.Type)),
+			zap.Error(err),
+		)
+		return fmt.Errorf("failed to exec add edge: %w", err)
+	}
+
+	p.log.Debug(
+		"Edge added or updated successfully",
+		zap.String("from_node", edge.From),
+		zap.String("to_node", edge.To),
+		// Explicitly cast edge.Type to a string here too
+		zap.String("edge_type", string(edge.Type)),
+	)
+	return nil
 }
 
-// GetNode fetches a single node from the database using its unique ID.
+// GetNode fetches a single node from the database by its ID.
 func (p *PostgresKG) GetNode(ctx context.Context, id string) (schemas.Node, error) {
 	var node schemas.Node
-	var props []byte
 
-	// Replaced db.QueryRowContext with pool.QueryRow.
 	err := p.pool.QueryRow(ctx, `
-		SELECT id, type, label, status, properties, created_at, last_seen
-		FROM nodes WHERE id = $1;
-	`, id).Scan(&node.ID, &node.Type, &node.Label, &node.Status, &props, &node.CreatedAt, &node.LastSeen)
+        SELECT id, type, label, status, properties, created_at, last_seen
+        FROM nodes WHERE id = $1;
+    `, id).Scan(&node.ID, &node.Type, &node.Label, &node.Status, &node.Properties, &node.CreatedAt, &node.LastSeen)
 
 	if err != nil {
-		// Important: we now check for pgx.ErrNoRows instead of the standard
-		// library's sql.ErrNoRows. Using errors.Is is the modern, safe way to check.
 		if errors.Is(err, pgx.ErrNoRows) {
-			return schemas.Node{}, fmt.Errorf("node with id '%s' not found", id)
+			p.log.Warn("Node not found", zap.String("node_id", id))
+			return schemas.Node{}, fmt.Errorf("node with id '%s' not found: %w", id, err)
 		}
-		return schemas.Node{}, err
+		p.log.Error("Failed to get node", zap.String("node_id", id), zap.Error(err))
+		return schemas.Node{}, fmt.Errorf("failed to scan node row: %w", err)
 	}
 
-	if err = json.Unmarshal(props, &node.Properties); err != nil {
-		return schemas.Node{}, fmt.Errorf("failed to unmarshal node properties: %w", err)
-	}
-
+	p.log.Debug("Retrieved node successfully", zap.String("node_id", id))
 	return node, nil
 }
 
-// GetNeighbors retrieves all nodes that are directly connected from the given node.
-// This is essential for traversing the graph and understanding relationships.
+// GetNeighbors retrieves all nodes directly connected from a given node.
 func (p *PostgresKG) GetNeighbors(ctx context.Context, nodeID string) ([]schemas.Node, error) {
-	// Replaced db.QueryContext with pool.Query. The row handling logic
-	// (defer rows.Close(), rows.Next(), rows.Scan(), rows.Err()) is nicely
-	// consistent between database/sql and pgx.
 	rows, err := p.pool.Query(ctx, `
-		SELECT n.id, n.type, n.label, n.status, n.properties, n.created_at, n.last_seen
-		FROM nodes n
-		JOIN edges e ON n.id = e.to_node
-		WHERE e.from_node = $1;
-	`, nodeID)
+        SELECT n.id, n.type, n.label, n.status, n.properties, n.created_at, n.last_seen
+        FROM nodes n
+        JOIN edges e ON n.id = e.to_node
+        WHERE e.from_node = $1;
+    `, nodeID)
 	if err != nil {
-		return nil, err
+		p.log.Error("Failed to query for neighbors", zap.String("node_id", nodeID), zap.Error(err))
+		return nil, fmt.Errorf("failed to query neighbors: %w", err)
 	}
 	defer rows.Close()
 
 	var neighbors []schemas.Node
 	for rows.Next() {
 		var node schemas.Node
-		var props []byte
-		if err := rows.Scan(&node.ID, &node.Type, &node.Label, &node.Status, &props, &node.CreatedAt, &node.LastSeen); err != nil {
-			return nil, err
-		}
-		if err := json.Unmarshal(props, &node.Properties); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal neighbor node properties: %w", err)
+		if err := rows.Scan(&node.ID, &node.Type, &node.Label, &node.Status, &node.Properties, &node.CreatedAt, &node.LastSeen); err != nil {
+			p.log.Error("Failed to scan neighbor node row", zap.Error(err))
+			return nil, fmt.Errorf("failed to scan neighbor row: %w", err)
 		}
 		neighbors = append(neighbors, node)
 	}
 
-	// Always good practice to check for any errors that occurred during iteration.
-	return neighbors, rows.Err()
+	if err := rows.Err(); err != nil {
+		p.log.Error("Error during neighbor row iteration", zap.String("node_id", nodeID), zap.Error(err))
+		return nil, fmt.Errorf("error iterating neighbor rows: %w", err)
+	}
+
+	p.log.Debug("Retrieved neighbors successfully", zap.String("node_id", nodeID), zap.Int("count", len(neighbors)))
+	return neighbors, nil
 }
 
 // GetEdges finds all outgoing edges originating from a specific node.
 func (p *PostgresKG) GetEdges(ctx context.Context, nodeID string) ([]schemas.Edge, error) {
 	rows, err := p.pool.Query(ctx, `
-		SELECT id, from_node, to_node, type, label, properties, created_at, last_seen
-		FROM edges WHERE from_node = $1;
-	`, nodeID)
+        SELECT id, from_node, to_node, type, label, properties, created_at, last_seen
+        FROM edges WHERE from_node = $1;
+    `, nodeID)
 	if err != nil {
-		return nil, err
+		p.log.Error("Failed to query for edges", zap.String("node_id", nodeID), zap.Error(err))
+		return nil, fmt.Errorf("failed to query edges: %w", err)
 	}
 	defer rows.Close()
 
 	var edges []schemas.Edge
 	for rows.Next() {
 		var edge schemas.Edge
-		var props []byte
-		if err := rows.Scan(&edge.ID, &edge.From, &edge.To, &edge.Type, &edge.Label, &props, &edge.CreatedAt, &edge.LastSeen); err != nil {
-			return nil, err
-		}
-		if err := json.Unmarshal(props, &edge.Properties); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal edge properties: %w", err)
+		if err := rows.Scan(&edge.ID, &edge.From, &edge.To, &edge.Type, &edge.Label, &edge.Properties, &edge.CreatedAt, &edge.LastSeen); err != nil {
+			p.log.Error("Failed to scan edge row", zap.Error(err))
+			return nil, fmt.Errorf("failed to scan edge row: %w", err)
 		}
 		edges = append(edges, edge)
 	}
 
-	return edges, rows.Err()
+	if err := rows.Err(); err != nil {
+		p.log.Error("Error during edge row iteration", zap.String("node_id", nodeID), zap.Error(err))
+		return nil, fmt.Errorf("error iterating edge rows: %w", err)
+	}
+
+	p.log.Debug("Retrieved edges successfully", zap.String("node_id", nodeID), zap.Int("count", len(edges)))
+	return edges, nil
+}
+
+// QueryImprovementHistory retrieves past improvement attempts using efficient JSONB queries.
+func (p *PostgresKG) QueryImprovementHistory(ctx context.Context, goalObjective string, limit int) ([]schemas.Node, error) {
+	// Uses JSON path operator (->>) to efficiently query within the 'properties' JSONB column.
+	// An index on (type, (properties->>'goal_objective')) is recommended for performance.
+	query := `
+        SELECT id, type, label, status, properties, created_at, last_seen
+        FROM nodes
+        WHERE type = $1 AND properties->>'goal_objective' = $2
+        ORDER BY created_at DESC
+    `
+	args := []any{schemas.NodeImprovementAttempt, goalObjective}
+
+	if limit > 0 {
+		query += " LIMIT $3"
+		args = append(args, limit)
+	}
+
+	rows, err := p.pool.Query(ctx, query, args...)
+	if err != nil {
+		p.log.Error("Failed to query improvement history", zap.String("objective", goalObjective), zap.Error(err))
+		return nil, fmt.Errorf("failed to query improvement history: %w", err)
+	}
+	defer rows.Close()
+
+	var history []schemas.Node
+	for rows.Next() {
+		var node schemas.Node
+		if err := rows.Scan(&node.ID, &node.Type, &node.Label, &node.Status, &node.Properties, &node.CreatedAt, &node.LastSeen); err != nil {
+			p.log.Error("Failed to scan history node row", zap.Error(err))
+			return nil, fmt.Errorf("failed to scan history node: %w", err)
+		}
+		history = append(history, node)
+	}
+
+	if err := rows.Err(); err != nil {
+		p.log.Error("Error during history row iteration", zap.Error(err))
+		return nil, fmt.Errorf("error iterating history rows: %w", err)
+	}
+
+	p.log.Debug("Queried improvement history successfully", zap.String("objective", goalObjective), zap.Int("found", len(history)))
+	return history, nil
 }

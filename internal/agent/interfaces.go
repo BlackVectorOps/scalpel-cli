@@ -1,4 +1,3 @@
-// in: internal/agent/interfaces.go
 package agent
 
 import (
@@ -14,6 +13,7 @@ type GraphStore interface {
 	AddEdge(ctx context.Context, edge schemas.Edge) error
 	GetEdges(ctx context.Context, nodeID string) ([]schemas.Edge, error)
 	GetNeighbors(ctx context.Context, nodeID string) ([]schemas.Node, error)
+	QueryImprovementHistory(ctx context.Context, goalObjective string, limit int) ([]schemas.Node, error)
 }
 
 // Mind defines the cognitive core of the agent.
@@ -27,5 +27,3 @@ type Mind interface {
 type ActionExecutor interface {
 	Execute(ctx context.Context, action Action) (*ExecutionResult, error)
 }
-
-// The internal SessionContext interface was removed as the codebase now relies on schemas.SessionContext.

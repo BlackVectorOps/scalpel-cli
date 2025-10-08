@@ -132,12 +132,13 @@ func TestSession_NavigationAndStateUpdate(t *testing.T) {
 func TestSession_HandleRedirect(t *testing.T) {
 	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/start" {
+		switch r.URL.Path {
+		case "/start":
 			fmt.Fprintln(w, `<html></html>`)
-		} else if r.URL.Path == "/redirect" {
+		case "/redirect":
 			assert.Contains(t, r.Header.Get("Referer"), "/start")
 			http.Redirect(w, r, "/final", http.StatusFound)
-		} else if r.URL.Path == "/final" {
+		case "/final":
 			assert.Contains(t, r.Header.Get("Referer"), "/redirect")
 			fmt.Fprintln(w, `<html><title>Final Page</title></html>`)
 		}

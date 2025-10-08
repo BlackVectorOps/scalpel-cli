@@ -12,19 +12,20 @@ import (
 	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
+	"github.com/xkilldash9x/scalpel-cli/internal/mocks"
 )
 
 // -- Test Setup Helper --
 
 // setupRouter creates a standard LLMRouter instance for testing, along with its mocks and a log observer.
-func setupRouter(t *testing.T) (*LLMRouter, *MockLLMClient, *MockLLMClient, *observer.ObservedLogs) {
+func setupRouter(t *testing.T) (*LLMRouter, *mocks.MockLLMClient, *mocks.MockLLMClient, *observer.ObservedLogs) {
 	t.Helper()
 	// Set up logger with observer to inspect log outputs (e.g., routing decisions)
 	loggerCore, observedLogs := observer.New(zap.DebugLevel)
 	logger := zap.New(loggerCore)
 
-	fastClient := &MockLLMClient{Name: "FastClient"}
-	powerfulClient := &MockLLMClient{Name: "PowerfulClient"}
+	fastClient := &mocks.MockLLMClient{}
+	powerfulClient := &mocks.MockLLMClient{}
 
 	router, err := NewLLMRouter(logger, fastClient, powerfulClient)
 	require.NoError(t, err, "NewLLMRouter should initialize successfully")
@@ -49,7 +50,7 @@ func TestNewLLMRouter_Success(t *testing.T) {
 // Verifies error handling when required clients are nil.
 func TestNewLLMRouter_Failure_MissingClients(t *testing.T) {
 	logger := setupTestLogger(t)
-	validClient := new(MockLLMClient)
+	validClient := new(mocks.MockLLMClient)
 	expectedError := "both fast and powerful tier clients must be provided"
 
 	tests := []struct {

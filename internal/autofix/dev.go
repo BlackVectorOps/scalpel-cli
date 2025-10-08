@@ -245,7 +245,7 @@ You are an expert Go developer specializing in testing. Based on the provided po
 }
 
 // runSpecificTest executes a single test function.
-func (d *Developer) runSpecificTest(ctx context.Context, workspace, filePath, funcName string, expectPanic bool) error {
+func (d *Developer) runSpecificTest(ctx context.Context, _, filePath, funcName string, expectPanic bool) error {
 	d.logger.Info("Running specific test in workspace.", zap.String("test", funcName), zap.Bool("expect_panic", expectPanic))
 	pkgPath := filepath.Dir(filePath)
 	testCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)

@@ -2,7 +2,10 @@ package knowledgegraph
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"sort"
+	"strings"
 	"sync"
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
@@ -14,16 +17,17 @@ import (
 type InMemoryKG struct {
 	nodes         map[string]schemas.Node
 	edges         map[string]schemas.Edge // Key: edge ID
-	outgoingEdges map[string][]string   // Key: node ID, Value: slice of edge IDs
+	outgoingEdges map[string][]string     // Key: node ID, Value: slice of edge IDs
 	mu            sync.RWMutex
 	log           *zap.Logger
 }
 
+// Ensures InMemoryKG correctly implements the KnowledgeGraphClient interface at compile time.
+var _ schemas.KnowledgeGraphClient = (*InMemoryKG)(nil)
+
 // NewInMemoryKG creates a new, empty in-memory knowledge graph.
 func NewInMemoryKG(logger *zap.Logger) (*InMemoryKG, error) {
 	if logger == nil {
-		// Fallback to Nop logger if none provided.
-		// This makes initialization more robust.
 		logger = zap.NewNop()
 	}
 	return &InMemoryKG{
@@ -34,39 +38,31 @@ func NewInMemoryKG(logger *zap.Logger) (*InMemoryKG, error) {
 	}, nil
 }
 
-// AddNode adds a node to the graph. If a node with the same ID already exists,
-// it is overwritten, making the operation idempotent.
+// AddNode adds a node to the graph. If a node with the same ID already exists, it is overwritten.
 func (kg *InMemoryKG) AddNode(ctx context.Context, node schemas.Node) error {
 	kg.mu.Lock()
 	defer kg.mu.Unlock()
 
 	kg.nodes[node.ID] = node
-	// Fixed a type casting issue here. The logger expects a string,
-	// so we need to explicitly cast node.Type.
 	kg.log.Debug("Node added or updated", zap.String("ID", node.ID), zap.String("Type", string(node.Type)))
 	return nil
 }
 
-// AddEdge adds an edge to the graph. If an edge with the same ID already exists,
-// it's overwritten. This also maintains an index for quick lookups of outgoing edges.
+// AddEdge adds an edge to the graph. If an edge with the same ID already exists, it's overwritten.
 func (kg *InMemoryKG) AddEdge(ctx context.Context, edge schemas.Edge) error {
 	kg.mu.Lock()
 	defer kg.mu.Unlock()
 
-	// Check if both nodes for the edge exist.
 	if _, exists := kg.nodes[edge.From]; !exists {
-		// For now, we enforce consistency. In a high-throughput system, we might relax this
-		// if nodes are expected to arrive shortly after their corresponding edges.
 		return fmt.Errorf("source node with id '%s' not found for edge", edge.From)
 	}
 	if _, exists := kg.nodes[edge.To]; !exists {
 		return fmt.Errorf("destination node with id '%s' not found for edge", edge.To)
 	}
 
-	// Check if this edge is already registered for the 'From' node to avoid duplicates in the outgoingEdges slice.
 	isNew := true
 	if _, exists := kg.edges[edge.ID]; exists {
-		isNew = false // The edge is being updated, not added.
+		isNew = false
 	}
 
 	kg.edges[edge.ID] = edge
@@ -108,29 +104,19 @@ func (kg *InMemoryKG) GetNeighbors(ctx context.Context, nodeID string) ([]schema
 	kg.mu.RLock()
 	defer kg.mu.RUnlock()
 
-	// Ensure the source node exists first.
 	if _, ok := kg.nodes[nodeID]; !ok {
 		return nil, fmt.Errorf("node with id '%s' not found", nodeID)
 	}
 
 	edgeIDs, ok := kg.outgoingEdges[nodeID]
 	if !ok {
-		return []schemas.Node{}, nil // No outgoing edges, so no neighbors.
+		return []schemas.Node{}, nil // No outgoing edges.
 	}
 
 	neighbors := make([]schemas.Node, 0, len(edgeIDs))
 	for _, edgeID := range edgeIDs {
-		edge, ok := kg.edges[edgeID]
-		if !ok {
-			// This indicates a data consistency issue, which shouldn't happen with proper locking.
-			kg.log.Error("Inconsistency detected: outgoing edge ID not in edges map", zap.String("edgeID", edgeID))
-			continue
-		}
-		neighborNode, ok := kg.nodes[edge.To]
-		if !ok {
-			kg.log.Error("Inconsistency detected: neighbor node ID not in nodes map", zap.String("nodeID", edge.To))
-			continue
-		}
+		edge := kg.edges[edgeID]
+		neighborNode := kg.nodes[edge.To]
 		neighbors = append(neighbors, neighborNode)
 	}
 	return neighbors, nil
@@ -141,7 +127,6 @@ func (kg *InMemoryKG) GetEdges(ctx context.Context, nodeID string) ([]schemas.Ed
 	kg.mu.RLock()
 	defer kg.mu.RUnlock()
 
-	// Ensure the source node exists.
 	if _, ok := kg.nodes[nodeID]; !ok {
 		return nil, fmt.Errorf("node with id '%s' not found", nodeID)
 	}
@@ -153,13 +138,45 @@ func (kg *InMemoryKG) GetEdges(ctx context.Context, nodeID string) ([]schemas.Ed
 
 	edges := make([]schemas.Edge, 0, len(edgeIDs))
 	for _, edgeID := range edgeIDs {
-		edge, ok := kg.edges[edgeID]
-		if !ok {
-			kg.log.Error("Inconsistency detected: outgoing edge ID not in edges map", zap.String("edgeID", edgeID))
-			continue
-		}
+		edge := kg.edges[edgeID]
 		edges = append(edges, edge)
 	}
 
 	return edges, nil
+}
+
+// QueryImprovementHistory finds past improvement attempts related to the current goal objective.
+// This provides the "memory" for the Reflective OODA loop.
+func (kg *InMemoryKG) QueryImprovementHistory(ctx context.Context, goalObjective string, limit int) ([]schemas.Node, error) {
+	kg.mu.RLock()
+	defer kg.mu.RUnlock()
+
+	var matchingNodes []schemas.Node
+
+	// This in-memory version requires a full scan and unmarshalling to filter.
+	for _, node := range kg.nodes {
+		if node.Type == schemas.NodeImprovementAttempt {
+			var props schemas.ImprovementAttemptProperties
+			if err := json.Unmarshal(node.Properties, &props); err != nil {
+				kg.log.Warn("Failed to unmarshal properties for history query", zap.String("node_id", node.ID), zap.Error(err))
+				continue
+			}
+
+			// A simple similarity check (case-insensitive).
+			if strings.EqualFold(props.GoalObjective, goalObjective) {
+				matchingNodes = append(matchingNodes, node)
+			}
+		}
+	}
+
+	// Sort by CreatedAt descending to get the most recent attempts first.
+	sort.Slice(matchingNodes, func(i, j int) bool {
+		return matchingNodes[i].CreatedAt.After(matchingNodes[j].CreatedAt)
+	})
+
+	if limit > 0 && len(matchingNodes) > limit {
+		return matchingNodes[:limit], nil
+	}
+
+	return matchingNodes, nil
 }
