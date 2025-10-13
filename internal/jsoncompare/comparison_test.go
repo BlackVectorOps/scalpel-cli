@@ -1,4 +1,4 @@
-// internal/jsoncompare/compare_test.go
+// internal/jsoncompare/comparison_test.go
 package jsoncompare
 
 import (
@@ -12,6 +12,7 @@ import (
 func TestCompare_Integration(t *testing.T) {
 	t.Parallel()
 	opts := DefaultOptions()
+	service := NewService()
 
 	testCases := []struct {
 		name        string
@@ -31,33 +32,42 @@ func TestCompare_Integration(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		runCompareTest(t, tc.name, tc.jsonA, tc.jsonB, opts, tc.expectEqual)
+		runCompareTest(t, service, tc.name, tc.jsonA, tc.jsonB, opts, tc.expectEqual)
 	}
 }
 
 // TestCompare_Options verifies behavior when specific options are disabled.
 func TestCompare_Options(t *testing.T) {
 	t.Parallel()
+	service := NewService()
 	// IgnoreArrayOrder Disabled
 	optsStrictOrder := DefaultOptions()
 	optsStrictOrder.IgnoreArrayOrder = false
-	runCompareTest(t, "IgnoreArrayOrder Disabled", `[1, 2]`, `[2, 1]`, optsStrictOrder, false)
+	runCompareTest(t, service, "IgnoreArrayOrder Disabled", `[1, 2]`, `[2, 1]`, optsStrictOrder, false)
 
 	// EquateEmpty Disabled
 	optsStrictEmpty := DefaultOptions()
 	optsStrictEmpty.EquateEmpty = false
-	runCompareTest(t, "EquateEmpty Disabled", `{"data": []}`, `{"data": null}`, optsStrictEmpty, false)
+	runCompareTest(t, service, "EquateEmpty Disabled", `{"data": []}`, `{"data": null}`, optsStrictEmpty, false)
 }
 
 // TestCompare_ErrorHandling verifies that parsing errors are handled correctly.
 func TestCompare_ErrorHandling(t *testing.T) {
 	t.Parallel()
 	opts := DefaultOptions()
+	service := NewService()
 	jsonA := `{"key": "value"` // missing closing brace
 	jsonB := `{"key": "value"}`
-	_, err := Compare([]byte(jsonA), []byte(jsonB), opts)
-	if err == nil || !strings.Contains(err.Error(), "failed to parse JSON A") {
-		t.Errorf("Expected error parsing JSON A, got %v", err)
+	result, err := service.CompareWithOptions([]byte(jsonA), []byte(jsonB), opts)
+	if err != nil {
+		t.Fatalf("CompareWithOptions() returned unexpected error: %v", err)
+	}
+	// The service now handles non-JSON gracefully, so we check the result.
+	if result.AreEquivalent {
+		t.Error("Expected AreEquivalent to be false for invalid JSON, got true")
+	}
+	if !strings.Contains(result.Diff, "Content differs (Non-JSON or mixed types)") {
+		t.Errorf("Expected diff to indicate non-JSON content, got: %s", result.Diff)
 	}
 }
 
@@ -68,46 +78,46 @@ func FuzzCompare(f *testing.F) {
 	f.Add([]byte(`invalid json`), []byte(`{`))
 
 	opts := DefaultOptions()
+	service := NewService()
 	f.Fuzz(func(t *testing.T, dataA, dataB []byte) {
-		resAB, errA := Compare(dataA, dataB, opts)
-		resBA, errB := Compare(dataB, dataA, opts)
+		resAB, errA := service.CompareWithOptions(dataA, dataB, opts)
+		resBA, errB := service.CompareWithOptions(dataB, dataA, opts)
 
 		// The fuzzer automatically finds panics. Here, we add checks for logical invariants.
-		isErrA := errA != nil
-		isErrB := errB != nil
-		if isErrA != isErrB {
-			t.Fatalf("Symmetry broken: Compare(A, B) error state was %v, but Compare(B, A) was %v", isErrA, isErrB)
+		if errA != nil || errB != nil {
+			t.Fatalf("Symmetry broken: Compare(A, B) error state was %v, but Compare(B, A) was %v", errA, errB)
 		}
 
-		// If parsing succeeded, the results must be symmetrical.
-		if !isErrA {
-			if resAB.AreEqual != resBA.AreEqual {
-				t.Errorf("Symmetry violated: Compare(A, B) = %v, Compare(B, A) = %v", resAB.AreEqual, resBA.AreEqual)
-			}
+		if resAB.AreEquivalent != resBA.AreEquivalent {
+			t.Errorf("Symmetry violated: Compare(A, B) = %v, Compare(B, A) = %v", resAB.AreEquivalent, resBA.AreEquivalent)
 		}
 
-		// Check Reflexivity: Compare(A, A) must always be true for valid JSON.
-		resAA, errAA := Compare(dataA, dataA, opts)
-		if errAA == nil && !resAA.AreEqual {
-			t.Errorf("Reflexivity violated: Compare(A, A) returned false for valid JSON input.")
+		// Check Reflexivity: Compare(A, A) must always be true.
+		resAA, errAA := service.CompareWithOptions(dataA, dataA, opts)
+		if errAA != nil {
+			t.Fatalf("Reflexivity check failed with an error: %v", errAA)
+		}
+		if !resAA.AreEquivalent {
+			t.Errorf("Reflexivity violated: Compare(A, A) returned false for input:\n%s", string(dataA))
 		}
 	})
 }
 
 // runCompareTest is a helper that runs a single comparison and verifies internal consistency.
-func runCompareTest(t *testing.T, name, jsonA, jsonB string, opts Options, expectEqual bool) {
+func runCompareTest(t *testing.T, svc JSONComparison, name, jsonA, jsonB string, opts Options, expectEqual bool) {
 	t.Helper()
 	t.Run(name, func(t *testing.T) {
 		t.Parallel()
-		result, err := Compare([]byte(jsonA), []byte(jsonB), opts)
+		s := svc.(*service) // Assert to concrete type to access unexported methods.
+		result, err := s.CompareWithOptions([]byte(jsonA), []byte(jsonB), opts)
 		if err != nil {
 			t.Fatalf("Compare() returned unexpected error: %v", err)
 		}
-		if result.AreEqual != expectEqual {
-			t.Errorf("Compare() AreEqual = %v, want %v.\nDiff:\n%s", result.AreEqual, expectEqual, result.Diff)
+		if result.AreEquivalent != expectEqual {
+			t.Errorf("Compare() AreEquivalent = %v, want %v.\nDiff:\n%s", result.AreEquivalent, expectEqual, result.Diff)
 		}
 		// Self-verification: re-compare the normalized structures to ensure consistency.
-		cmpOptions := buildCmpOptions(opts)
+		cmpOptions := s.buildCmpOptions(opts)
 		normalizedDiff := cmp.Diff(result.NormalizedA, result.NormalizedB, cmpOptions...)
 		if (normalizedDiff == "") != expectEqual {
 			t.Errorf("Internal inconsistency: normalized diff does not match expectation.\nNormalized Diff:\n%s", normalizedDiff)
