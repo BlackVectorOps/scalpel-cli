@@ -6,6 +6,17 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 )
 
+// SessionProvider is a function type that retrieves the currently active browser session context.
+// This is now defined here to be accessible by the ActionRegistry interface.
+type SessionProvider func() schemas.SessionContext
+
+// ActionRegistry defines the interface for a component that dispatches actions.
+// This decouples the Agent from the concrete ExecutorRegistry, improving testability.
+type ActionRegistry interface {
+	Execute(ctx context.Context, action Action) (*ExecutionResult, error)
+	UpdateSessionProvider(provider SessionProvider)
+}
+
 // EvolutionEngine defines the interface for the proactive self-improvement system.
 type EvolutionEngine interface {
 	// Run initiates the OODA loop for a specific improvement goal.

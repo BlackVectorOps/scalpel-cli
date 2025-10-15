@@ -392,7 +392,7 @@ func TestFindNodeAtPoint(t *testing.T) {
 	require.NotNil(t, node)
 	assert.Equal(t, "div", node.Data)
 
-	node := te.Bridge.FindNodeAtPoint(10, 10)
+	node = te.Bridge.FindNodeAtPoint(10, 10)
 	require.NotNil(t, node)
 	assert.Equal(t, "body", node.Data)
 }

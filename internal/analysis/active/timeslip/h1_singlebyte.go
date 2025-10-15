@@ -150,7 +150,8 @@ func setupConnectionDetails(targetURL *url.URL, dialerConfig *network.DialerConf
 	scheme := targetURL.Scheme
 	port := targetURL.Port()
 
-	if scheme == "https" {
+	switch scheme {
+	case "https":
 		if port == "" {
 			port = "443"
 		}
@@ -160,12 +161,12 @@ func setupConnectionDetails(targetURL *url.URL, dialerConfig *network.DialerConf
 			// Force HTTP/1.1 for pipelining via ALPN.
 			dialerConfig.TLSConfig.NextProtos = []string{"http/1.1"}
 		}
-	} else if scheme == "http" {
+	case "http":
 		if port == "" {
 			port = "80"
 		}
 		dialerConfig.TLSConfig = nil
-	} else {
+	default:
 		return "", fmt.Errorf("%w: unsupported scheme: %s", ErrConfigurationError, scheme)
 	}
 
@@ -219,4 +220,3 @@ func preparePipelinedRequests(candidate *RaceCandidate, count int, host string) 
 	}
 	return preparedRequests, nil
 }
-

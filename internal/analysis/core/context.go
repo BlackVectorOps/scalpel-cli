@@ -1,3 +1,4 @@
+// File: internal/analysis/core/context.go
 package core
 
 import (
@@ -9,6 +10,10 @@ import (
 	"go.uber.org/zap"
 )
 
+// NEW: AdapterRegistry defines the map of task types to their corresponding analyzers.
+// It is populated by the worker and made available in the GlobalContext.
+type AdapterRegistry map[schemas.TaskType]Analyzer
+
 // GlobalContext holds application-wide services and configurations shared across all tasks.
 type GlobalContext struct {
 	Config         config.Interface
@@ -18,6 +23,8 @@ type GlobalContext struct {
 	KGClient       schemas.KnowledgeGraphClient
 	OASTProvider   schemas.OASTProvider
 	FindingsChan   chan<- schemas.Finding
+	// NEW: Provides access to analysis adapters for dynamic invocation (e.g., by the Agent).
+	Adapters AdapterRegistry
 }
 
 // AnalysisContext provides the specific context for a single analysis task.
@@ -30,6 +37,8 @@ type AnalysisContext struct {
 	Artifacts *schemas.Artifacts
 	Findings  []schemas.Finding
 	KGUpdates *schemas.KnowledgeGraphUpdate
+	// NEW: Optional existing browser session.
+	Session schemas.SessionContext
 }
 
 // AddFinding is a helper method to append a finding to the context.
