@@ -72,8 +72,6 @@ func (m *LLMMind) Start(ctx context.Context) error {
 	m.wg.Add(1)
 	go m.runObserverLoop(ctx)
 
-	// -- FIX APPLIED HERE --
-	// Lock is added to protect the read of currentState, preventing the race condition.
 	m.mu.RLock()
 	initialState := m.currentState
 	m.mu.RUnlock()
@@ -315,6 +313,7 @@ func (m *LLMMind) decideNextAction(ctx context.Context, contextSnapshot *schemas
 
 	action.ID = uuid.NewString()
 	action.MissionID = m.currentMission.ID
+	action.ScanID = m.currentMission.ScanID
 	action.Timestamp = time.Now().UTC()
 	return action, nil
 }
@@ -345,8 +344,12 @@ func (m *LLMMind) generateSystemPrompt() string {
 	- PERFORM_COMPLEX_TASK: Instruct the agent to perform a high level action (e.g., 'LOGIN'). Use sparingly.
 
 	3. Analysis & System:
-	- ANALYZE_PROTOTYPE_POLLUTION: Actively scan the current page for client-side prototype pollution and DOM clobbering. Use this after navigation or significant UI changes.
-	  Example: {"type": "ANALYZE_PROTOTYPE_POLLUTION", "rationale": "Analyzing the dashboard for potential client-side vulnerabilities."}
+	- ANALYZE_TAINT: (Active) Scan the current page context for data flows (Taint analysis/XSS). Use after navigation or significant UI changes. The analysis runs on the current browser state.
+	  Example: {"type": "ANALYZE_TAINT", "rationale": "Analyzing the user profile page inputs for XSS vulnerabilities."}
+	- ANALYZE_PROTO_POLLUTION: (Active) Scan the current page context for client-side prototype pollution and DOM clobbering.
+	  Example: {"type": "ANALYZE_PROTO_POLLUTION", "rationale": "Analyzing the dashboard JS environment for pollution vulnerabilities."}
+	- ANALYZE_HEADERS: (Passive) Analyze the HTTP headers captured in the current browser state artifacts for security misconfigurations.
+	  Example: {"type": "ANALYZE_HEADERS", "rationale": "Checking security headers on the main application responses."}
 	- GATHER_CODEBASE_CONTEXT: Read source code for a module. (Params: metadata={"module_path": "..."})
 	- CONCLUDE: Finish the mission.
 `
@@ -611,10 +614,60 @@ func (m *LLMMind) marshalProperties(propsMap map[string]interface{}) (json.RawMe
 	return propsBytes, nil
 }
 
-// Creates a new node and edge in the KG for an observation.
+// Creates a new node and edge in the KG for an observation, AND applies any embedded KGUpdates.
 func (m *LLMMind) recordObservationKG(ctx context.Context, obs Observation) error {
 	now := time.Now().UTC()
 
+	// 1. Apply KG Updates from the observation result (if any)
+	if obs.Result.KGUpdates != nil && (len(obs.Result.KGUpdates.NodesToAdd) > 0 || len(obs.Result.KGUpdates.EdgesToAdd) > 0) {
+		m.logger.Debug("Applying KG Updates from observation",
+			zap.String("obs_id", obs.ID),
+			zap.Int("nodes", len(obs.Result.KGUpdates.NodesToAdd)),
+			zap.Int("edges", len(obs.Result.KGUpdates.EdgesToAdd)))
+
+		// Apply nodes
+		for _, nodeInput := range obs.Result.KGUpdates.NodesToAdd {
+			node := schemas.Node{
+				ID:         nodeInput.ID,
+				Type:       nodeInput.Type,
+				Label:      nodeInput.Label,
+				Status:     nodeInput.Status,
+				Properties: nodeInput.Properties,
+				CreatedAt:  now,
+				LastSeen:   now,
+			}
+			if node.ID == "" {
+				node.ID = uuid.NewString() // Ensure ID exists
+			}
+			if err := m.kg.AddNode(ctx, node); err != nil {
+				m.logger.Error("Failed to add node from KGUpdate", zap.String("node_id", node.ID), zap.Error(err))
+				// Continue processing other updates even if one fails.
+			}
+		}
+
+		// Apply edges
+		for _, edgeInput := range obs.Result.KGUpdates.EdgesToAdd {
+			edge := schemas.Edge{
+				ID:         edgeInput.ID,
+				From:       edgeInput.From,
+				To:         edgeInput.To,
+				Type:       edgeInput.Type,
+				Label:      edgeInput.Label,
+				Properties: edgeInput.Properties,
+				CreatedAt:  now,
+				LastSeen:   now,
+			}
+			// Generate ID if missing
+			if edge.ID == "" {
+				edge.ID = uuid.NewString()
+			}
+			if err := m.kg.AddEdge(ctx, edge); err != nil {
+				m.logger.Error("Failed to add edge from KGUpdate", zap.String("edge_id", edge.ID), zap.Error(err))
+			}
+		}
+	}
+
+	// 2. Record the observation node itself (existing logic)
 	propsMap := map[string]interface{}{
 		"type":               string(obs.Type),
 		"timestamp":          obs.Timestamp,

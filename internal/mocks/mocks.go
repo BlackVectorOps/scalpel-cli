@@ -8,10 +8,10 @@ import (
 	"sync"
 	"time"
 
-	// Removed unused import "github.com/spf13/cobra"
 	"github.com/stretchr/testify/mock"
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
+	"github.com/xkilldash9x/scalpel-cli/internal/browser/humanoid"
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
 )
 
@@ -151,8 +151,6 @@ func (m *MockConfig) SetBrowserHumanoidClickHoldMinMs(ms int) {
 func (m *MockConfig) SetBrowserHumanoidClickHoldMaxMs(ms int) {
 	m.Called(ms)
 }
-
-// Removed extraneous SetBrowserHumanoidKeyHoldMean
 
 func (m *MockConfig) SetNetworkCaptureResponseBodies(b bool) {
 	m.Called(b)
@@ -362,6 +360,11 @@ type MockAnalyzer struct {
 	mock.Mock
 }
 
+// NewMockAnalyzer creates a new mock instance.
+func NewMockAnalyzer() *MockAnalyzer {
+	return &MockAnalyzer{}
+}
+
 func (m *MockAnalyzer) Analyze(ctx context.Context, analysisCtx *core.AnalysisContext) error {
 	return m.Called(ctx, analysisCtx).Error(0)
 }
@@ -468,4 +471,31 @@ func (m *MockDiscoveryEngine) Start(ctx context.Context, targets []string) (<-ch
 
 func (m *MockDiscoveryEngine) Stop() {
 	m.Called()
+}
+
+// -- Humanoid Controller Mock --
+
+// MockHumanoidController mocks the humanoid.Controller interface.
+type MockHumanoidController struct {
+	mock.Mock
+}
+
+func (m *MockHumanoidController) MoveTo(ctx context.Context, selector string, opts *humanoid.InteractionOptions) error {
+	return m.Called(ctx, selector, opts).Error(0)
+}
+
+func (m *MockHumanoidController) IntelligentClick(ctx context.Context, selector string, opts *humanoid.InteractionOptions) error {
+	return m.Called(ctx, selector, opts).Error(0)
+}
+
+func (m *MockHumanoidController) DragAndDrop(ctx context.Context, startSelector, endSelector string, opts *humanoid.InteractionOptions) error {
+	return m.Called(ctx, startSelector, endSelector, opts).Error(0)
+}
+
+func (m *MockHumanoidController) Type(ctx context.Context, selector string, text string, opts *humanoid.InteractionOptions) error {
+	return m.Called(ctx, selector, text, opts).Error(0)
+}
+
+func (m *MockHumanoidController) CognitivePause(ctx context.Context, meanScale, stdDevScale float64) error {
+	return m.Called(ctx, meanScale, stdDevScale).Error(0)
 }

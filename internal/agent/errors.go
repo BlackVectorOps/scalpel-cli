@@ -34,4 +34,7 @@ const (
 
 	// -- Evolution-specific errors --
 	ErrCodeEvolutionFailure ErrorCode = "EVOLUTION_FAILURE"
+
+	// -- Internal System Errors --
+	ErrCodeExecutorPanic ErrorCode = "EXECUTOR_PANIC"
 )
