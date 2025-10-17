@@ -378,6 +378,13 @@ type AgentConfig struct {
 	LLM            LLMRouterConfig      `mapstructure:"llm" yaml:"llm"`
 	Evolution      EvolutionConfig      `mapstructure:"evolution" yaml:"evolution"`
 	KnowledgeGraph KnowledgeGraphConfig `mapstructure:"knowledge_graph" yaml:"knowledge_graph"`
+	LTM            LTMConfig            `mapstructure:"ltm" yaml:"ltm"`
+}
+
+// LTMConfig holds the configuration for the Long-Term Memory module.
+type LTMConfig struct {
+	CacheTTLSeconds             int `mapstructure:"cache_ttl_seconds" yaml:"cache_ttl_seconds"`
+	CacheJanitorIntervalSeconds int `mapstructure:"cache_janitor_interval_seconds" yaml:"cache_janitor_interval_seconds"`
 }
 
 // EvolutionConfig holds settings for the proactive self-improvement (evolution) subsystem.
@@ -507,6 +514,10 @@ func SetDefaults(v *viper.Viper) {
 	v.SetDefault("agent.evolution.enabled", false)
 	v.SetDefault("agent.evolution.max_cycles", 15)
 	v.SetDefault("agent.evolution.settle_time", "500ms")
+
+	// -- Agent LTM --
+	v.SetDefault("agent.ltm.cache_ttl_seconds", 300)             // 5 minutes
+	v.SetDefault("agent.ltm.cache_janitor_interval_seconds", 60) // 1 minute
 
 	// -- Autofix --
 	v.SetDefault("autofix.enabled", false)
@@ -663,8 +674,8 @@ func (c *Config) Validate() error {
 	if err := c.AutofixCfg.Validate(); err != nil {
 		return fmt.Errorf("autofix configuration invalid: %w", err)
 	}
-	if err := c.AgentCfg.Evolution.Validate(); err != nil {
-		return fmt.Errorf("agent.evolution configuration invalid: %w", err)
+	if err := c.AgentCfg.Validate(); err != nil {
+		return fmt.Errorf("agent configuration invalid: %w", err)
 	}
 	return nil
 }
@@ -696,6 +707,28 @@ func (e *EvolutionConfig) Validate() error {
 	}
 	if e.SettleTime <= 0 {
 		return fmt.Errorf("settle_time must be a positive duration")
+	}
+	return nil
+}
+
+// Validate checks the AgentConfig settings, delegating to its sub-components.
+func (a *AgentConfig) Validate() error {
+	if err := a.Evolution.Validate(); err != nil {
+		return err
+	}
+	if err := a.LTM.Validate(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// Validate checks the LTMConfig settings.
+func (l *LTMConfig) Validate() error {
+	if l.CacheTTLSeconds <= 0 {
+		return fmt.Errorf("agent.ltm.cache_ttl_seconds must be a positive integer")
+	}
+	if l.CacheJanitorIntervalSeconds <= 0 {
+		return fmt.Errorf("agent.ltm.cache_janitor_interval_seconds must be a positive integer")
 	}
 	return nil
 }

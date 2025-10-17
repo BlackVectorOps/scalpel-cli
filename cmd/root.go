@@ -16,8 +16,6 @@ import (
 )
 
 var (
-	cfgFile     string
-	validateFix bool // Flag for validation runs during self-healing
 	// osExit allows mocking os.Exit in tests.
 	osExit = os.Exit
 )
@@ -27,65 +25,81 @@ type configKeyType struct{}
 
 var configKey = configKeyType{}
 
-// rootCmd represents the base command when called without any subcommands
-var rootCmd = &cobra.Command{
-	Use:     "scalpel-cli",
-	Short:   "Scalpel is an AI-native security scanner.",
-	Version: Version,
-	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-		// Create a new, local viper instance for this execution.
-		v := viper.New()
+// NewRootCommand creates and returns a new, fully configured root cobra command.
+// This factory function is used to ensure a stateless command instance for each execution,
+// which is crucial for both single-shot commands and the interactive shell.
+func NewRootCommand() *cobra.Command {
+	var cfgFile string
+	var validateFix bool
 
-		// 1. Initialize configuration loading into our local viper instance.
-		if err := initializeConfig(cmd, v); err != nil {
-			// Use a basic logger if the main one can't be initialized.
-			basicLogger, _ := zap.NewDevelopment()
-			defer basicLogger.Sync()
-			basicLogger.Error("Failed to initialize configuration", zap.Error(err))
-			return fmt.Errorf("failed to initialize configuration: %w", err)
-		}
+	rootCmd := &cobra.Command{
+		Use:     "scalpel-cli",
+		Short:   "Scalpel is an AI-native security scanner.",
+		Version: Version,
+		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			// Create a new, local viper instance for this execution.
+			v := viper.New()
 
-		// 2. Create the config object from viper; this also validates it.
-		cfg, err := config.NewConfigFromViper(v)
-		if err != nil {
-			// Initialize with default logger settings if config is unreadable.
-			observability.InitializeLogger(config.LoggerConfig{Level: "info", Format: "console", ServiceName: "scalpel-cli"})
-			return fmt.Errorf("failed to load or validate config: %w", err)
-		}
+			// 1. Initialize configuration loading into our local viper instance.
+			if err := initializeConfig(cmd, v, cfgFile); err != nil {
+				// Use a basic logger if the main one can't be initialized.
+				basicLogger, _ := zap.NewDevelopment()
+				defer basicLogger.Sync()
+				basicLogger.Error("Failed to initialize configuration", zap.Error(err))
+				return fmt.Errorf("failed to initialize configuration: %w", err)
+			}
 
-		// 3. Initialize the logger using the validated config.
-		observability.InitializeLogger(cfg.Logger())
-		logger := observability.GetLogger()
-		logger.Info("Starting Scalpel-CLI", zap.String("version", Version))
+			// 2. Create the config object from viper; this also validates it.
+			cfg, err := config.NewConfigFromViper(v)
+			if err != nil {
+				// Initialize with default logger settings if config is unreadable.
+				observability.InitializeLogger(config.LoggerConfig{Level: "info", Format: "console", ServiceName: "scalpel-cli"})
+				return fmt.Errorf("failed to load or validate config: %w", err)
+			}
 
-		// 4. Store the validated config in the command's context for subcommands.
-		ctx := context.WithValue(cmd.Context(), configKey, cfg)
-		cmd.SetContext(ctx)
+			// 3. Initialize the logger using the validated config.
+			observability.InitializeLogger(cfg.Logger())
+			logger := observability.GetLogger()
+			logger.Info("Starting Scalpel-CLI", zap.String("version", Version))
 
-		// Handle the validation run flag
-		if validateFix {
-			logger.Info("===[ VALIDATION RUN: CONFIGURATION OK ]===")
-			cmd.Println("===[ VALIDATION RUN PASSED ]===")
-			osExit(0)
-		}
+			// 4. Store the validated config in the command's context for subcommands.
+			ctx := context.WithValue(cmd.Context(), configKey, cfg)
+			cmd.SetContext(ctx)
 
-		return nil
-	},
-}
+			// Handle the validation run flag
+			if validateFix {
+				logger.Info("===[ VALIDATION RUN: CONFIGURATION OK ]===")
+				cmd.Println("===[ VALIDATION RUN PASSED ]===")
+				osExit(0)
+			}
 
-// Execute adds all child commands to the root command and sets flags appropriately.
-func Execute(ctx context.Context) error {
-	// Initialize the component factories/providers for production.
+			return nil
+		},
+	}
+
+	// --- Flag Definitions ---
+	rootCmd.PersistentFlags().StringVarP(&cfgFile, "config", "c", "", "config file (default is ./config.yaml)")
+	rootCmd.PersistentFlags().BoolVar(&validateFix, "validate-fix", false, "Internal flag for self-healing validation.")
+	_ = rootCmd.PersistentFlags().MarkHidden("validate-fix")
+
+	// --- Sub-command Initialization ---
 	componentFactory := NewComponentFactory()
 	storeProvider := NewStoreProvider()
 
-	// Inject the dependencies into their respective commands.
 	rootCmd.AddCommand(newScanCmd(componentFactory))
 	rootCmd.AddCommand(newReportCmd(storeProvider))
 	rootCmd.AddCommand(newSelfHealCmd())
 	rootCmd.AddCommand(newEvolveCmd())
 
-	if err := rootCmd.ExecuteContext(ctx); err != nil {
+	return rootCmd
+}
+
+// Execute creates a new root command and executes it.
+// This is the main entry point for the CLI application.
+func Execute(ctx context.Context) error {
+	cmd := NewRootCommand()
+
+	if err := cmd.ExecuteContext(ctx); err != nil {
 		logger := observability.GetLogger()
 		// Only log the error if the context wasn't canceled (i.e., not a Ctrl+C).
 		// This avoids redundant error messages on graceful shutdown.
@@ -102,14 +116,8 @@ func Execute(ctx context.Context) error {
 	return nil
 }
 
-func init() {
-	rootCmd.PersistentFlags().StringVarP(&cfgFile, "config", "c", "", "config file (default is ./config.yaml)")
-	rootCmd.PersistentFlags().BoolVar(&validateFix, "validate-fix", false, "Internal flag for self-healing validation.")
-	_ = rootCmd.PersistentFlags().MarkHidden("validate-fix")
-}
-
 // initializeConfig sets up and loads configuration into the provided viper instance.
-func initializeConfig(cmd *cobra.Command, v *viper.Viper) error {
+func initializeConfig(cmd *cobra.Command, v *viper.Viper, cfgFile string) error {
 	// 1. Set default values.
 	config.SetDefaults(v)
 

@@ -7,6 +7,7 @@ Copyright © 2025 Kyle McAllister (xkilldash9x@proton.me)
 package main
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"os"
@@ -22,6 +23,20 @@ import (
 )
 
 const panicLogFile = "panic.log"
+
+// ASCII Art for scalpel-cli (Metasploit Style)
+const asciiArt = `
+              _______
+      ,           ,
+     /             \        "Precision is the difference between
+    ((__-^^-,-^^-__))        a butcher and a surgeon."
+    ` + "`" + `-_---' ` + "`" + `---_-'` + "`" + `
+     <__|o` + "`" + ` 'o|__>           [ scalpel-cli v0.1.0-alpha ]
+        \  ` + "`" + `  /             +-----------------------------+
+         ): : (              | 7 Analysis Modules        |
+         :o_o:              | 0 Payloads                  |
+         _..-'` + "`" + `              +-----------------------------+
+`
 
 // Define function variables for dependency injection/mocking in tests.
 var (
@@ -45,14 +60,69 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	// Execute the root command with the signal-aware context.
-	if err := cmd.Execute(ctx); err != nil {
-		// Error logging is handled within the cmd package.
+	// If arguments are passed, execute the command directly and exit.
+	if len(os.Args) > 1 {
+		if err := cmd.Execute(ctx); err != nil {
+			osExit(1)
+		}
+		return
+	}
+
+	// --- Interactive Mode ---
+fmt.Println("Exiting scalpel-cli")	scanner := bufio.NewScanner(os.Stdin)
+
+	for {
+		fmt.Print("scalpel-cli > ")
+		if !scanner.Scan() {
+			break // Exit on EOF (Ctrl+D)
+		}
+
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+
+		if line == "exit" || line == "quit" {
+			break
+		}
+
+		// Execute the command entered in the interactive session
+		executeInteractiveCommand(ctx, line)
+	}
+
+	if err := scanner.Err(); err != nil {
+		fmt.Fprintln(os.Stderr, "Error reading from stdin:", err)
 		osExit(1)
 	}
+
+	fmt.Println("\nExiting scalpel-cli.")
 }
 
-// handlePanic is the implementation of the Sentinel
+// executeInteractiveCommand parses and runs the command from the interactive shell.
+func executeInteractiveCommand(ctx context.Context, line string) {
+	// Create a new, clean command instance for each execution.
+	// This is critical for ensuring flags from one command don't leak into the next.
+	rootCmd := cmd.NewRootCommand()
+
+	args := strings.Fields(line)
+	rootCmd.SetArgs(args)
+
+	// Execute the command, capturing panics to avoid crashing the interactive session.
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				fmt.Fprintf(os.Stderr, "Error: Command panicked: %v\n", r)
+				// Optionally print stack trace for debugging
+				// debug.PrintStack()
+			}
+		}()
+		if err := rootCmd.ExecuteContext(ctx); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+		}
+	}()
+}
+
+// handlePanic is the implementation of the Sentinel for non-interactive mode.
 func handlePanic() {
 	if r := recover(); r != nil {
 		// Panic occurred.
