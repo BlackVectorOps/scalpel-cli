@@ -1,3 +1,4 @@
+// File: internal/agent/llm_mind_test.go
 package agent
 
 import (
@@ -19,13 +20,43 @@ import (
 )
 
 // -- Test Setup Helper --
+// -- LTM Mock --
+
+// MockLTM mocks the long-term memory interface.
+type MockLTM struct {
+	mock.Mock
+}
+
+// ProcessAndFlagObservation mocks the processing of an observation.
+func (m *MockLTM) ProcessAndFlagObservation(ctx context.Context, obs Observation) map[string]bool {
+	args := m.Called(ctx, obs)
+
+	// Safely get the return value, returning nil if not configured in the test.
+	if val := args.Get(0); val != nil {
+		if asMap, ok := val.(map[string]bool); ok {
+			return asMap
+		}
+	}
+	return nil
+}
+
+// Start mocks the startup process for the LTM.
+func (m *MockLTM) Start() {
+	m.Called()
+}
+
+// Stop mocks the cleanup/shutdown process.
+func (m *MockLTM) Stop() {
+	m.Called()
+}
 
 // setupLLMMind initializes the LLMMind and its dependencies for testing.
-func setupLLMMind(t *testing.T) (*LLMMind, *mocks.MockLLMClient, *mocks.MockKGClient, *CognitiveBus) {
+func setupLLMMind(t *testing.T) (*LLMMind, *mocks.MockLLMClient, *mocks.MockKGClient, *MockLTM, *CognitiveBus) {
 	t.Helper()
 	logger := zaptest.NewLogger(t)
 	mockLLM := new(mocks.MockLLMClient)
 	mockKG := new(mocks.MockKGClient)
+	mockLTM := new(MockLTM)
 	// Use a real CognitiveBus to properly test the integration of the OODA loop.
 	bus := NewCognitiveBus(logger, 50)
 
@@ -37,7 +68,10 @@ func setupLLMMind(t *testing.T) (*LLMMind, *mocks.MockLLMClient, *mocks.MockKGCl
 		},
 	}
 
-	mind := NewLLMMind(logger, mockLLM, cfg, mockKG, bus)
+	// The Stop method is called during cleanup, so we'll set a standing expectation for it.
+	mockLTM.On("Stop").Return()
+
+	mind := NewLLMMind(logger, mockLLM, cfg, mockKG, bus, mockLTM)
 
 	// Make sure all our resources are cleaned up when the test is done.
 	t.Cleanup(func() {
@@ -45,14 +79,14 @@ func setupLLMMind(t *testing.T) (*LLMMind, *mocks.MockLLMClient, *mocks.MockKGCl
 		bus.Shutdown()
 	})
 
-	return mind, mockLLM, mockKG, bus
+	return mind, mockLLM, mockKG, mockLTM, bus
 }
 
 // -- Test Cases: Initialization and State Management --
 
 // TestNewLLMMind_Initialization verifies the initial state and configuration.
 func TestNewLLMMind_Initialization(t *testing.T) {
-	mind, _, _, _ := setupLLMMind(t)
+	mind, _, _, _, _ := setupLLMMind(t)
 
 	// Peeking inside to verify the initial state.
 	assert.Equal(t, StateInitializing, mind.currentState)
@@ -61,7 +95,7 @@ func TestNewLLMMind_Initialization(t *testing.T) {
 
 // TestLLMMind_SetMission verifies the transition when a new mission is assigned.
 func TestLLMMind_SetMission(t *testing.T) {
-	mind, _, mockKG, _ := setupLLMMind(t)
+	mind, _, mockKG, _, _ := setupLLMMind(t)
 
 	mission := Mission{ID: "mission-set-test", Objective: "Test Objective"}
 
@@ -95,7 +129,7 @@ func TestLLMMind_SetMission(t *testing.T) {
 
 // TestParseActionResponse verifies the robust parsing of LLM responses, including markdown formatting.
 func TestParseActionResponse(t *testing.T) {
-	mind, _, _, _ := setupLLMMind(t)
+	mind, _, _, _, _ := setupLLMMind(t)
 
 	// The action we expect to get back from a valid response.
 	expectedAction := Action{
@@ -138,7 +172,7 @@ func TestParseActionResponse(t *testing.T) {
 
 // TestOODALoop_HappyPath verifies the full cycle: SetMission -> Orient -> Decide -> Act -> Observe -> Orient...
 func TestOODALoop_HappyPath(t *testing.T) {
-	mind, mockLLM, mockKG, bus := setupLLMMind(t)
+	mind, mockLLM, mockKG, mockLTM, bus := setupLLMMind(t)
 	// Use a context with timeout to prevent the test from hanging.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel() // Safety net cancel
@@ -206,6 +240,7 @@ func TestOODALoop_HappyPath(t *testing.T) {
 	assert.Equal(t, action1ID, postedAction1.ID)
 
 	// -- Expectations for Cycle 2 (Observe -> Act/Conclude) --
+	mockLTM.On("ProcessAndFlagObservation", mock.Anything, mock.AnythingOfType("Observation")).Return(nil).Once()
 	mockKG.On("AddNode", mock.Anything, mock.MatchedBy(func(n schemas.Node) bool { return n.Type == schemas.NodeObservation })).Return(nil).Once()
 	mockKG.On("AddEdge", mock.Anything, mock.Anything).Return(nil).Once()
 	action1Node := schemas.Node{ID: action1ID, Type: schemas.NodeAction, Properties: json.RawMessage(`{}`)}
@@ -252,6 +287,7 @@ func TestOODALoop_HappyPath(t *testing.T) {
 
 	mockKG.AssertExpectations(t)
 	mockLLM.AssertExpectations(t)
+	mockLTM.AssertExpectations(t)
 
 	cancel()
 	wg.Wait()
@@ -261,7 +297,7 @@ func TestOODALoop_HappyPath(t *testing.T) {
 
 // Verifies the Mind transitions to StateFailed if observation processing fails.
 func TestOODALoop_ObservationKGFailure(t *testing.T) {
-	mind, mockLLM, mockKG, bus := setupLLMMind(t)
+	mind, mockLLM, mockKG, mockLTM, bus := setupLLMMind(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -279,6 +315,8 @@ func TestOODALoop_ObservationKGFailure(t *testing.T) {
 
 	// -- Mocks for the actual test scenario --
 	expectedError := errors.New("KG critical failure")
+	// The LTM processes the observation before it's recorded in the KG.
+	mockLTM.On("ProcessAndFlagObservation", mock.Anything, mock.AnythingOfType("Observation")).Return(nil).Once()
 	mockKG.On("AddNode", mock.Anything, mock.MatchedBy(func(n schemas.Node) bool { return n.Type == schemas.NodeObservation })).Return(expectedError).Once()
 
 	var wg sync.WaitGroup
@@ -306,7 +344,7 @@ func TestOODALoop_ObservationKGFailure(t *testing.T) {
 
 // Verifies the Mind handles LLM API failures gracefully.
 func TestOODALoop_DecisionLLMFailure(t *testing.T) {
-	mind, mockLLM, mockKG, _ := setupLLMMind(t)
+	mind, mockLLM, mockKG, _, _ := setupLLMMind(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -370,7 +408,7 @@ func TestOODALoop_DecisionLLMFailure(t *testing.T) {
 
 // Verifies the Mind fails if it cannot record its decided action.
 func TestOODALoop_ActionKGFailure(t *testing.T) {
-	mind, mockLLM, mockKG, _ := setupLLMMind(t)
+	mind, mockLLM, mockKG, _, _ := setupLLMMind(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 

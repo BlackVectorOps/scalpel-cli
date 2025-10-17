@@ -15,6 +15,10 @@ import (
 // newPristineRootCmd creates a completely new instance of the rootCmd,
 // mirroring the setup in root.go to ensure test isolation.
 func newPristineRootCmd() *cobra.Command {
+	// FIX: Declare variables for flags to match the scope in root.go
+	var cfgFile string
+	var validateFix bool
+
 	// This function body mirrors the initialization logic typically found in root.go.
 	cmd := &cobra.Command{
 		Use:     "scalpel-cli",
@@ -24,7 +28,8 @@ func newPristineRootCmd() *cobra.Command {
 			v := viper.New()
 
 			// 1. Initialize configuration loading
-			if err := initializeConfig(cmd, v); err != nil {
+			// FIX: Pass the 'cfgFile' variable to match the function's signature.
+			if err := initializeConfig(cmd, v, cfgFile); err != nil {
 				basicLogger, _ := zap.NewDevelopment()
 				defer basicLogger.Sync()
 				basicLogger.Error("Failed to initialize configuration", zap.Error(err))
@@ -55,14 +60,13 @@ func newPristineRootCmd() *cobra.Command {
 			return nil
 		},
 	}
-	// Initialize persistent flags.
+	// Initialize persistent flags. These now have variables to bind to.
 	cmd.PersistentFlags().StringVarP(&cfgFile, "config", "c", "", "config file (default is ./config.yaml)")
 	cmd.PersistentFlags().BoolVar(&validateFix, "validate-fix", false, "Internal flag for self-healing validation.")
 	_ = cmd.PersistentFlags().MarkHidden("validate-fix")
 
 	// Re-attach subcommands, providing their required dependencies.
 	cmd.AddCommand(newScanCmd(NewComponentFactory()))
-	// FIX: Provide the storeProvider dependency to newReportCmd.
 	cmd.AddCommand(newReportCmd(NewStoreProvider()))
 
 	// Assuming these commands exist and are correctly defined elsewhere in the cmd package.

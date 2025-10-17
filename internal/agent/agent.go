@@ -1,5 +1,4 @@
-// agent.go
-
+// File: internal/agent/agent.go
 package agent
 
 import (
@@ -26,20 +25,20 @@ import (
 
 // Agent orchestrates the components of an autonomous security mission.
 type Agent struct {
-	mission            Mission
-	logger             *zap.Logger
-	globalCtx          *core.GlobalContext
-	mind               Mind
-	bus                *CognitiveBus
-	executors          ActionExecutor
-	missionWg          sync.WaitGroup
-	resultChan         chan MissionResult
-	isFinished         bool
-	mu                 sync.Mutex
-	humanoid           humanoid.Controller
-	kg                 GraphStore
-	llmClient          schemas.LLMClient
-	actionDispatchChan chan CognitiveMessage // Pushes actions to the worker pool
+	mission    Mission
+	logger     *zap.Logger
+	globalCtx  *core.GlobalContext
+	mind       Mind
+	bus        *CognitiveBus
+	executors  ActionExecutor
+	wg         sync.WaitGroup
+	resultChan chan MissionResult
+	isFinished bool
+	mu         sync.Mutex
+	humanoid   humanoid.Controller
+	kg         GraphStore
+	llmClient  schemas.LLMClient
+	ltm        LTM
 
 	// Manages the self-healing subsystem.
 	selfHeal *SelfHealOrchestrator
@@ -61,7 +60,6 @@ func NewGraphStoreFromConfig(
 		}
 		return knowledgegraph.NewPostgresKG(pool, logger), nil
 	case "in-memory":
-		// Corrected initialization based on the prompt's context.
 		return knowledgegraph.NewInMemoryKG(logger)
 	default:
 		return nil, fmt.Errorf("unknown knowledge_graph type specified: %s", cfg.Type)
@@ -73,7 +71,10 @@ func New(ctx context.Context, mission Mission, globalCtx *core.GlobalContext, se
 	agentID := uuid.New().String()[:8]
 	logger := globalCtx.Logger.With(zap.String("agent_id", agentID), zap.String("mission_id", mission.ID))
 
-	// 1. Core Components (Bus, KG, LLM)
+	// 1. Long-Term Memory (LTM)
+	ltm := NewLTM(globalCtx.Config.Agent().LTM, logger)
+
+	// 2. Core Components (Bus, KG, LLM)
 	bus := NewCognitiveBus(logger, 100)
 
 	kg, err := NewGraphStoreFromConfig(ctx, globalCtx.Config.Agent().KnowledgeGraph, globalCtx.DBPool, logger)
@@ -86,10 +87,10 @@ func New(ctx context.Context, mission Mission, globalCtx *core.GlobalContext, se
 		return nil, fmt.Errorf("failed to create LLM router for agent: %w", err)
 	}
 
-	// 2. Mind
-	mind := NewLLMMind(logger, llmRouter, globalCtx.Config.Agent(), kg, bus)
+	// 3. Mind
+	mind := NewLLMMind(logger, llmRouter, globalCtx.Config.Agent(), kg, bus, ltm)
 
-	// 3. Executors and Humanoid
+	// 4. Executors and Humanoid
 	projectRoot, _ := os.Getwd()
 	executors := NewExecutorRegistry(logger, projectRoot, globalCtx)
 	executors.UpdateSessionProvider(func() schemas.SessionContext {
@@ -100,7 +101,7 @@ func New(ctx context.Context, mission Mission, globalCtx *core.GlobalContext, se
 	browserCfg := globalCtx.Config.Browser()
 	h := humanoid.New(browserCfg.Humanoid, logger.Named("humanoid"), session)
 
-	// 4. Initialize Self-Healing (Autofix) System.
+	// 5. Initialize Self-Healing (Autofix) System.
 	// This initializes the system but does not start monitoring yet.
 	selfHeal, err := NewSelfHealOrchestrator(logger, globalCtx.Config, llmRouter)
 	if err != nil {
@@ -110,7 +111,7 @@ func New(ctx context.Context, mission Mission, globalCtx *core.GlobalContext, se
 		selfHeal = nil
 	}
 
-	// 5. Initialize Self-Improvement (Evolution) System.
+	// 6. Initialize Self-Improvement (Evolution) System.
 	evoAnalyst, err := analyst.NewImprovementAnalyst(logger, globalCtx.Config, llmRouter, kg)
 	if err != nil {
 		// If initialization fails (e.g., cannot determine project root), log the error
@@ -119,19 +120,19 @@ func New(ctx context.Context, mission Mission, globalCtx *core.GlobalContext, se
 	}
 
 	agent := &Agent{
-		mission:            mission,
-		logger:             logger,
-		globalCtx:          globalCtx,
-		mind:               mind,
-		bus:                bus,
-		executors:          executors,
-		resultChan:         make(chan MissionResult, 1),
-		actionDispatchChan: make(chan CognitiveMessage, 100), // Buffer for workers
-		humanoid:           h,
-		kg:                 kg,
-		llmClient:          llmRouter,
-		selfHeal:           selfHeal,
-		evolution:          evoAnalyst, // Assign the analyst (which might be nil if disabled)
+		mission:    mission,
+		logger:     logger,
+		globalCtx:  globalCtx,
+		mind:       mind,
+		bus:        bus,
+		executors:  executors,
+		resultChan: make(chan MissionResult, 1),
+		humanoid:   h,
+		kg:         kg,
+		llmClient:  llmRouter,
+		ltm:        ltm,
+		selfHeal:   selfHeal,
+		evolution:  evoAnalyst, // Assign the analyst (which might be nil if disabled)
 	}
 	return agent, nil
 }
@@ -140,8 +141,12 @@ func New(ctx context.Context, mission Mission, globalCtx *core.GlobalContext, se
 func (a *Agent) RunMission(ctx context.Context) (*MissionResult, error) {
 	a.logger.Info("Agent is commencing mission.", zap.String("objective", a.mission.Objective))
 	missionCtx, cancelMission := context.WithCancel(ctx)
-	defer cancelMission() // Ensures all subsystems (including selfHeal) are stopped when mission ends.
+	defer cancelMission() // Ensures all subsystems are stopped when mission ends.
 	startupErrChan := make(chan error, 1)
+
+	// Start the LTM's background processes.
+	a.ltm.Start()
+
 	// Start the Self-Healing system if initialized.
 	if a.selfHeal != nil {
 		// The self-healing system runs concurrently for the duration of the mission context.
@@ -149,24 +154,22 @@ func (a *Agent) RunMission(ctx context.Context) (*MissionResult, error) {
 	}
 
 	// Start the Mind's cognitive loop.
-	a.missionWg.Add(1)
+	a.wg.Add(1)
 	go func() {
-		defer a.missionWg.Done()
+		defer a.wg.Done()
 		if err := a.mind.Start(missionCtx); err != nil {
 			// If the mind fails to start and the context wasn't already cancelled,
 			// it's a critical startup failure.
 			if missionCtx.Err() == nil {
-				a.logger.Error("Mind process failed", zap.Error(err))
+				a.logger.Error("Mind process failed to start", zap.Error(err))
 				startupErrChan <- err
 			}
 		}
 	}()
 
-	// Start the action dispatcher and worker pool.
-	// Using a pool of 4 workers to limit concurrency.
-	a.startActionWorkers(missionCtx, 4)
-	a.missionWg.Add(1)
-	go a.actionDispatcherLoop(missionCtx)
+	// Start the Action execution loop.
+	a.wg.Add(1)
+	go a.actionLoop(missionCtx)
 
 	// Kick off the mission.
 	a.mind.SetMission(a.mission)
@@ -198,9 +201,8 @@ func (a *Agent) RunMission(ctx context.Context) (*MissionResult, error) {
 	}
 }
 
-// actionDispatcherLoop subscribes to the bus and pushes actions to the worker pool channel.
-func (a *Agent) actionDispatcherLoop(ctx context.Context) {
-	defer a.missionWg.Done()
+func (a *Agent) actionLoop(ctx context.Context) {
+	defer a.wg.Done()
 	actionChan, unsubscribe := a.bus.Subscribe(MessageTypeAction)
 	defer unsubscribe()
 
@@ -208,113 +210,82 @@ func (a *Agent) actionDispatcherLoop(ctx context.Context) {
 		select {
 		case msg, ok := <-actionChan:
 			if !ok {
-				a.logger.Info("Action bus channel closed, dispatcher shutting down.")
 				return
 			}
-			// Non-blocking send to the dispatch channel
-			select {
-			case a.actionDispatchChan <- msg:
-			case <-ctx.Done():
-				return
-			default:
-				a.logger.Warn("Action dispatch channel is full. Action dropped.", zap.String("action_id", msg.ID))
-				// Acknowledge the dropped message to prevent bus stalls.
-				a.bus.Acknowledge(msg)
-			}
+
+			go func(actionMsg CognitiveMessage) {
+				defer a.bus.Acknowledge(actionMsg)
+
+				action, ok := actionMsg.Payload.(Action)
+				if !ok {
+					a.logger.Error("Received invalid payload for ACTION message", zap.Any("payload", actionMsg.Payload))
+					return
+				}
+
+				var execResult *ExecutionResult
+
+				switch action.Type {
+				case ActionConclude:
+					a.logger.Info("Mind decided to conclude mission.", zap.String("rationale", action.Rationale))
+					result, err := a.concludeMission(ctx)
+					if err != nil {
+						a.logger.Error("Failed to generate final mission result", zap.Error(err))
+					}
+					if result != nil {
+						a.finish(*result)
+					}
+					return
+
+				case ActionEvolveCodebase:
+					a.logger.Info("Agent decided to initiate self-improvement (Evolution).", zap.String("rationale", action.Rationale))
+					// Evolution runs synchronously within this goroutine.
+					execResult = a.executeEvolution(ctx, action)
+
+				case ActionClick, ActionInputText, ActionHumanoidDragAndDrop:
+					a.logger.Debug("Orchestrating humanoid action", zap.String("type", string(action.Type)))
+					execResult = a.executeHumanoidAction(ctx, action)
+
+				case ActionPerformComplexTask:
+					a.logger.Info("Agent is orchestrating a complex task (Placeholder)", zap.Any("metadata", action.Metadata))
+					taskName, _ := action.Metadata["task_name"].(string)
+					execResult = &ExecutionResult{
+						Status:          "failed",
+						ObservationType: ObservedSystemState,
+						ErrorCode:       ErrCodeNotImplemented,
+						ErrorDetails:    map[string]interface{}{"task_name": taskName},
+					}
+
+				case ActionGatherCodebaseContext, ActionNavigate, ActionWaitForAsync, ActionSubmitForm, ActionScroll, ActionAnalyzeTaint, ActionAnalyzeProtoPollution, ActionAnalyzeHeaders:
+					a.logger.Debug("Dispatching action to ExecutorRegistry", zap.String("type", string(action.Type)))
+					var err error
+					execResult, err = a.executors.Execute(ctx, action)
+					if err != nil {
+						a.logger.Error("ExecutorRegistry failed with raw error", zap.String("action_type", string(action.Type)), zap.Error(err))
+						execResult = &ExecutionResult{
+							Status:          "failed",
+							ObservationType: ObservedSystemState,
+							ErrorCode:       ErrCodeExecutionFailure,
+							ErrorDetails:    map[string]interface{}{"message": err.Error()},
+						}
+					}
+
+				default:
+					a.logger.Warn("Received unknown action type", zap.String("type", string(action.Type)))
+					execResult = &ExecutionResult{
+						Status:          "failed",
+						ObservationType: ObservedSystemState,
+						ErrorCode:       ErrCodeUnknownAction,
+					}
+				}
+
+				a.postObservation(ctx, action, execResult)
+
+			}(msg)
+
 		case <-ctx.Done():
-			a.logger.Info("Context cancelled, dispatcher shutting down.")
 			return
 		}
 	}
-}
-
-// startActionWorkers launches a pool of goroutines to execute actions.
-func (a *Agent) startActionWorkers(ctx context.Context, numWorkers int) {
-	a.missionWg.Add(numWorkers)
-	for i := 0; i < numWorkers; i++ {
-		go func(workerID int) {
-			defer a.missionWg.Done()
-			a.logger.Info("Action worker started", zap.Int("worker_id", workerID))
-			for {
-				select {
-				case actionMsg, ok := <-a.actionDispatchChan:
-					if !ok {
-						return // Channel closed
-					}
-					a.processAction(ctx, actionMsg)
-				case <-ctx.Done():
-					return
-				}
-			}
-		}(i)
-	}
-}
-
-// processAction is executed by a worker to handle a single action and its result.
-func (a *Agent) processAction(ctx context.Context, actionMsg CognitiveMessage) {
-	// Ensure panics in executors don't crash the agent.
-	defer func() {
-		if r := recover(); r != nil {
-			a.logger.Error("Panic recovered in action processor", zap.Any("panic", r), zap.String("action_id", actionMsg.ID))
-			// Create a synthetic error result to inform the mind.
-			action, _ := actionMsg.Payload.(Action)
-			result := &ExecutionResult{
-				Status:          "failed",
-				ObservationType: ObservedSystemState,
-				ErrorCode:       ErrCodeExecutorPanic,
-				ErrorDetails:    map[string]interface{}{"message": fmt.Sprintf("panic: %v", r)},
-			}
-			a.postObservation(ctx, action, result)
-		}
-		// Always acknowledge the message.
-		a.bus.Acknowledge(actionMsg)
-	}()
-
-	action, ok := actionMsg.Payload.(Action)
-	if !ok {
-		a.logger.Error("Received invalid payload for ACTION message", zap.Any("payload", actionMsg.Payload))
-		return
-	}
-
-	var execResult *ExecutionResult
-
-	switch action.Type {
-	case ActionConclude:
-		a.logger.Info("Mind decided to conclude mission.", zap.String("rationale", action.Rationale))
-		result, err := a.concludeMission(ctx)
-		if err != nil {
-			a.logger.Error("Failed to generate final mission result", zap.Error(err))
-		}
-		if result != nil {
-			a.finish(*result)
-		}
-		return // No observation to post for conclusion.
-
-	case ActionEvolveCodebase:
-		a.logger.Info("Agent decided to initiate self-improvement (Evolution).", zap.String("rationale", action.Rationale))
-		execResult = a.executeEvolution(ctx, action)
-
-	case ActionClick, ActionInputText, ActionHumanoidDragAndDrop:
-		a.logger.Debug("Orchestrating humanoid action", zap.String("type", string(action.Type)))
-		execResult = a.executeHumanoidAction(ctx, action)
-
-	// Other cases remain the same, just extracted from the unbounded goroutine.
-	default:
-		a.logger.Debug("Dispatching action to ExecutorRegistry", zap.String("type", string(action.Type)))
-		var err error
-		execResult, err = a.executors.Execute(ctx, action)
-		if err != nil {
-			a.logger.Error("ExecutorRegistry failed with raw error", zap.String("action_type", string(action.Type)), zap.Error(err))
-			execResult = &ExecutionResult{
-				Status:          "failed",
-				ObservationType: ObservedSystemState,
-				ErrorCode:       ErrCodeExecutionFailure,
-				ErrorDetails:    map[string]interface{}{"message": err.Error()},
-			}
-		}
-	}
-
-	a.postObservation(ctx, action, execResult)
 }
 
 func (a *Agent) executeHumanoidAction(ctx context.Context, action Action) *ExecutionResult {
@@ -585,7 +556,5 @@ func (a *Agent) finish(result MissionResult) {
 	a.isFinished = true
 	a.mind.Stop()
 	a.bus.Shutdown()
-	close(a.actionDispatchChan) // Signal workers to stop
-	a.missionWg.Wait()          // Wait for all mission goroutines to finish
 	a.resultChan <- result
 }

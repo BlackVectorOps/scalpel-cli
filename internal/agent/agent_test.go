@@ -4,6 +4,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -55,7 +56,8 @@ func (m *MockExecutorRegistry) UpdateSessionProvider(provider SessionProvider) {
 }
 
 // setupAgentTest initializes a complete agent with mocked dependencies.
-func setupAgentTest(t *testing.T) (*Agent, *MockMind, *CognitiveBus, *MockExecutorRegistry, *mocks.MockHumanoidController, *mocks.MockKGClient, *mocks.MockLLMClient) {
+// Note: MockLTM is defined in llm_mind_test.go and is available here.
+func setupAgentTest(t *testing.T) (*Agent, *MockMind, *CognitiveBus, *MockExecutorRegistry, *mocks.MockHumanoidController, *mocks.MockKGClient, *mocks.MockLLMClient, *MockLTM) {
 	t.Helper()
 	logger := zaptest.NewLogger(t)
 	mission := Mission{ID: "test-mission", Objective: "test-objective"}
@@ -67,38 +69,39 @@ func setupAgentTest(t *testing.T) (*Agent, *MockMind, *CognitiveBus, *MockExecut
 	mockHumanoid := new(mocks.MockHumanoidController)
 	mockKG := new(mocks.MockKGClient)
 	mockLLM := new(mocks.MockLLMClient)
+	mockLTM := new(MockLTM) // Instantiate the mock
 
 	agent := &Agent{
-		mission:            mission,
-		logger:             logger,
-		mind:               mockMind,
-		bus:                bus,
-		executors:          mockExecutors,
-		humanoid:           mockHumanoid,
-		kg:                 mockKG,
-		llmClient:          mockLLM,
-		resultChan:         make(chan MissionResult, 1),
-		actionDispatchChan: make(chan CognitiveMessage, 50),
-		// missionWg is implicitly initialized to zero, which is fine for tests
-		// that don't call the full RunMission.
+		mission:    mission,
+		logger:     logger,
+		mind:       mockMind,
+		bus:        bus,
+		executors:  mockExecutors,
+		humanoid:   mockHumanoid,
+		kg:         mockKG,
+		llmClient:  mockLLM,
+		ltm:        mockLTM, // Assign the mock to the agent struct
+		resultChan: make(chan MissionResult, 1),
 	}
 
 	t.Cleanup(func() {
 		bus.Shutdown()
 	})
 
-	return agent, mockMind, bus, mockExecutors, mockHumanoid, mockKG, mockLLM
+	return agent, mockMind, bus, mockExecutors, mockHumanoid, mockKG, mockLLM, mockLTM
 }
 
 // TestAgent_RunMission_Success verifies the happy path of a mission execution.
 func TestAgent_RunMission_Success(t *testing.T) {
-	agent, mockMind, _, _, _, _, _ := setupAgentTest(t)
+	agent, mockMind, _, _, _, _, _, mockLTM := setupAgentTest(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
+	// Set expectations for all required components
 	mockMind.On("SetMission", agent.mission).Return().Once()
 	mockMind.On("Start", mock.Anything).Return(nil).Once()
 	mockMind.On("Stop").Return().Once()
+	mockLTM.On("Start").Return().Once() // Expect LTM to be started
 
 	expectedResult := MissionResult{Summary: "Mission accomplished"}
 	go func() {
@@ -111,12 +114,13 @@ func TestAgent_RunMission_Success(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, &expectedResult, result)
 	mockMind.AssertExpectations(t)
+	mockLTM.AssertExpectations(t) // Verify LTM mock expectations
 }
 
 // TestAgent_RunMission_MindFailure verifies the agent fails fast if the Mind fails to start.
 func TestAgent_RunMission_MindFailure(t *testing.T) {
 	// Arrange
-	agent, mockMind, _, _, _, _, _ := setupAgentTest(t)
+	agent, mockMind, _, _, _, _, _, mockLTM := setupAgentTest(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
@@ -124,6 +128,7 @@ func TestAgent_RunMission_MindFailure(t *testing.T) {
 
 	mockMind.On("SetMission", agent.mission).Return().Once()
 	mockMind.On("Start", mock.Anything).Return(mindError).Once()
+	mockLTM.On("Start").Return() // LTM start is called before mind start
 
 	// Act: Run the mission. We expect it to fail immediately.
 	result, err := agent.RunMission(ctx)
@@ -135,29 +140,35 @@ func TestAgent_RunMission_MindFailure(t *testing.T) {
 
 	// Verify that all expected mock calls were made.
 	mockMind.AssertExpectations(t)
+	mockLTM.AssertExpectations(t)
 }
 
 // TestAgent_ActionLoop verifies the correct dispatching of various action types.
 func TestAgent_ActionLoop(t *testing.T) {
-
 	t.Run("ConcludeAction", func(t *testing.T) {
 		rootCtx, cancelRoot := context.WithCancel(context.Background())
 		defer cancelRoot()
-		agent, mockMind, _, _, _, mockKG, mockLLM := setupAgentTest(t)
-
-		// The agent's finish method will call Stop, so we need to expect it.
+		agent, mockMind, bus, _, _, mockKG, mockLLM, _ := setupAgentTest(t)
+		// i want to use context aware waiting for all the deferments that need to happen to eliminate races
 		mockMind.On("Stop").Return()
 
-		// Run workers in the background.
-		go agent.startActionWorkers(rootCtx, 1)
+		// Start the action loop in the background.
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			agent.actionLoop(rootCtx)
+		}()
 
 		mockKG.On("GetNode", mock.Anything, agent.mission.ID).Return(schemas.Node{}, nil).Once()
 		mockKG.On("GetEdges", mock.Anything, agent.mission.ID).Return(nil, nil).Once()
 		mockLLM.On("Generate", mock.Anything, mock.Anything).Return("Mission concluded.", nil).Once()
 
+		// Act
 		action := Action{Type: ActionConclude, Rationale: "Finished"}
-		agent.actionDispatchChan <- CognitiveMessage{Type: MessageTypeAction, Payload: action}
+		bus.Post(rootCtx, CognitiveMessage{ID: "test-msg", Type: MessageTypeAction, Payload: action})
 
+		// Assert
 		select {
 		case result := <-agent.resultChan:
 			assert.Equal(t, "Mission concluded.", result.Summary)
@@ -165,118 +176,151 @@ func TestAgent_ActionLoop(t *testing.T) {
 			t.Fatal("Timeout waiting for conclusion")
 		}
 
-		// Clean shutdown.
-		close(agent.actionDispatchChan)
-		agent.missionWg.Wait()
+		// Wait for shutdown initiated by finish().
+		cancelRoot() // Ensure actionLoop terminates
+		wg.Wait()
 		mockMind.AssertExpectations(t)
 	})
 
 	t.Run("HumanoidAction", func(t *testing.T) {
 		rootCtx, cancelRoot := context.WithCancel(context.Background())
 		defer cancelRoot()
+		agent, _, bus, _, mockHumanoid, _, _, _ := setupAgentTest(t)
+		obsChan, unsub := bus.Subscribe(MessageTypeObservation)
+		defer unsub()
 
-		agent, _, bus, _, mockHumanoid, _, _ := setupAgentTest(t)
-
-		agent.missionWg.Add(1)
-		agent.startActionWorkers(rootCtx, 1)
-		agent.missionWg.Add(1)
-		go agent.actionDispatcherLoop(rootCtx)
-
+		// Arrange
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			agent.actionLoop(rootCtx)
+		}()
 		mockHumanoid.On("IntelligentClick", mock.Anything, "#button", (*humanoid.InteractionOptions)(nil)).Return(nil).Once()
 
+		// Act
 		action := Action{Type: ActionClick, Selector: "#button"}
-		bus.Post(context.Background(), CognitiveMessage{Type: MessageTypeAction, Payload: action})
+		bus.Post(rootCtx, CognitiveMessage{ID: "test-msg", Type: MessageTypeAction, Payload: action})
 
-		time.Sleep(50 * time.Millisecond)
-		mockHumanoid.AssertExpectations(t)
-		close(agent.actionDispatchChan)
-		agent.missionWg.Wait()
+		// Assert
+		select {
+		case <-obsChan:
+			// observation received, action was processed
+			mockHumanoid.AssertExpectations(t)
+		case <-time.After(2 * time.Second):
+			t.Fatal("Timeout waiting for humanoid action to be processed")
+		}
+
+		// Clean shutdown
+		cancelRoot() // signal workers to stop
+		wg.Wait()
 	})
 
 	t.Run("ExecutorRegistryAction", func(t *testing.T) {
 		rootCtx, cancelRoot := context.WithCancel(context.Background())
 		defer cancelRoot()
-		agent, _, bus, mockExecutors, _, _, _ := setupAgentTest(t)
+		agent, _, bus, mockExecutors, _, _, _, _ := setupAgentTest(t)
+		obsChan, unsub := bus.Subscribe(MessageTypeObservation)
+		defer unsub()
 
-		agent.missionWg.Add(1)
-		agent.startActionWorkers(rootCtx, 1)
-		agent.missionWg.Add(1)
-		go agent.actionDispatcherLoop(rootCtx)
-
+		// Arrange
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			agent.actionLoop(rootCtx)
+		}()
 		action := Action{Type: ActionNavigate, Value: "http://test.com"}
 		execResult := &ExecutionResult{Status: "success"}
 		mockExecutors.On("Execute", mock.Anything, action).Return(execResult, nil).Once()
 
-		bus.Post(context.Background(), CognitiveMessage{Type: MessageTypeAction, Payload: action})
+		// Act
+		bus.Post(rootCtx, CognitiveMessage{ID: "test-msg", Type: MessageTypeAction, Payload: action})
 
-		time.Sleep(50 * time.Millisecond)
-		mockExecutors.AssertExpectations(t)
-		close(agent.actionDispatchChan)
-		agent.missionWg.Wait()
+		// Assert
+		select {
+		case <-obsChan:
+			mockExecutors.AssertExpectations(t)
+		case <-time.After(2 * time.Second):
+			t.Fatal("Timeout waiting for executor action to be processed")
+		}
+
+		// Clean shutdown
+		cancelRoot()
+		wg.Wait()
 	})
 
 	t.Run("UnknownAction", func(t *testing.T) {
 		rootCtx, cancelRoot := context.WithCancel(context.Background())
 		defer cancelRoot()
-		agent, _, bus, _, _, _, _ := setupAgentTest(t)
-		observationChan, unsub := bus.Subscribe(MessageTypeObservation)
+		agent, _, bus, _, _, _, _, _ := setupAgentTest(t)
+		obsChan, unsub := bus.Subscribe(MessageTypeObservation)
 		defer unsub()
 
-		agent.missionWg.Add(1)
-		agent.startActionWorkers(rootCtx, 1)
-		agent.missionWg.Add(1)
-		go agent.actionDispatcherLoop(rootCtx)
+		// Arrange
+		var wg sync.WaitGroup
+		wg.Add(1) // Expect one goroutine
+		go func() {
+			defer wg.Done()
+			agent.actionLoop(rootCtx)
+		}()
 
+		// Act
 		action := Action{Type: "UNKNOWN_ACTION"}
-		bus.Post(context.Background(), CognitiveMessage{Type: MessageTypeAction, Payload: action})
+		bus.Post(rootCtx, CognitiveMessage{ID: "test-msg", Type: MessageTypeAction, Payload: action})
 
+		// Assert
 		select {
-		case msg := <-observationChan:
+		case msg := <-obsChan:
 			obs, ok := msg.Payload.(Observation)
 			require.True(t, ok)
 			assert.Equal(t, "failed", obs.Result.Status)
 			assert.Equal(t, ErrCodeUnknownAction, obs.Result.ErrorCode)
-			bus.Acknowledge(msg)
 		case <-time.After(2 * time.Second):
 			t.Fatal("Timeout waiting for observation of unknown action")
 		}
-		close(agent.actionDispatchChan)
-		agent.missionWg.Wait()
+
+		// Clean shutdown
+		cancelRoot()
+		wg.Wait()
 	})
 
 	t.Run("PanicInExecutor", func(t *testing.T) {
 		rootCtx, cancelRoot := context.WithCancel(context.Background())
 		defer cancelRoot()
-		agent, _, bus, mockExecutors, _, _, _ := setupAgentTest(t)
-		observationChan, unsub := bus.Subscribe(MessageTypeObservation)
+		agent, _, bus, mockExecutors, _, _, _, _ := setupAgentTest(t)
+		obsChan, unsub := bus.Subscribe(MessageTypeObservation)
 		defer unsub()
 
-		agent.missionWg.Add(1)
-		agent.startActionWorkers(rootCtx, 1)
-		agent.missionWg.Add(1)
-		go agent.actionDispatcherLoop(rootCtx)
-
+		// Arrange
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			agent.actionLoop(rootCtx)
+		}()
 		action := Action{Type: ActionNavigate, Value: "http://test.com"}
-
-		// Setup the mock to panic when called
 		mockExecutors.On("Execute", mock.Anything, action).Run(func(args mock.Arguments) {
 			panic("executor exploded")
 		}).Return(nil, nil).Once()
 
-		bus.Post(context.Background(), CognitiveMessage{Type: MessageTypeAction, Payload: action})
+		// Act
+		bus.Post(rootCtx, CognitiveMessage{ID: "test-msg", Type: MessageTypeAction, Payload: action})
 
+		// Assert
 		select {
-		case msg := <-observationChan:
+		case msg := <-obsChan:
 			obs, ok := msg.Payload.(Observation)
 			require.True(t, ok)
 			assert.Equal(t, "failed", obs.Result.Status)
 			assert.Equal(t, ErrCodeExecutorPanic, obs.Result.ErrorCode)
 			assert.Contains(t, obs.Result.ErrorDetails["message"], "panic: executor exploded")
-			bus.Acknowledge(msg)
 		case <-time.After(2 * time.Second):
 			t.Fatal("Timeout waiting for panic observation")
 		}
-		close(agent.actionDispatchChan)
-		agent.missionWg.Wait()
+
+		// Clean shutdown
+		cancelRoot()
+		wg.Wait()
 	})
 }

@@ -1,3 +1,4 @@
+// File: internal/agent/interfaces.go
 package agent
 
 import (
@@ -22,6 +23,13 @@ type EvolutionEngine interface {
 	// Run initiates the OODA loop for a specific improvement goal.
 	// It blocks until the goal is achieved, fails, or times out.
 	Run(ctx context.Context, objective string, targetFiles []string) error
+}
+
+// LTM defines the interface for the Long-Term Memory module, including lifecycle management.
+type LTM interface {
+	Start()
+	Stop()
+	ProcessAndFlagObservation(ctx context.Context, obs Observation) map[string]bool
 }
 
 // GraphStore defines the interface the agent's mind uses to interact with the knowledge graph.

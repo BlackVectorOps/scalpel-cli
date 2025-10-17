@@ -22,17 +22,19 @@ import (
 // It operates on an OODA (Observe, Orient, Decide, Act) loop, interacting with other
 // agent components via the CognitiveBus and using a Knowledge Graph for memory.
 type LLMMind struct {
-	cfg                  config.AgentConfig
-	logger               *zap.Logger
-	kg                   GraphStore
-	bus                  *CognitiveBus
-	llmClient            schemas.LLMClient
-	currentMission       Mission
-	currentState         AgentState
-	mu                   sync.RWMutex
-	wg                   sync.WaitGroup
-	stopChan             chan struct{}
-	stateReadyChan       chan struct{}
+	cfg            config.AgentConfig
+	logger         *zap.Logger
+	kg             GraphStore
+	bus            *CognitiveBus
+	llmClient      schemas.LLMClient
+	ltm            LTM
+	currentMission Mission
+	currentState   AgentState
+	mu             sync.RWMutex
+	wg             sync.WaitGroup
+	stopChan       chan struct{}
+	stateReadyChan chan struct{}
+
 	contextLookbackSteps int
 }
 
@@ -46,7 +48,9 @@ func NewLLMMind(
 	cfg config.AgentConfig,
 	kg GraphStore,
 	bus *CognitiveBus,
+	ltm LTM,
 ) *LLMMind {
+
 	contextLookbackSteps := 10 // Default lookback
 
 	m := &LLMMind{
@@ -55,6 +59,7 @@ func NewLLMMind(
 		cfg:                  cfg,
 		kg:                   kg,
 		bus:                  bus,
+		ltm:                  ltm,
 		currentState:         StateInitializing,
 		stopChan:             make(chan struct{}),
 		stateReadyChan:       make(chan struct{}, 1),
@@ -324,64 +329,63 @@ func (m *LLMMind) decideNextAction(ctx context.Context, contextSnapshot *schemas
 // explicit instructions for error handling strategies, and conditional inclusion
 // of the EVOLVE_CODEBASE capability.
 func (m *LLMMind) generateSystemPrompt() string {
-	basePrompt := `You are the Mind of 'scalpel-cli', an advanced, autonomous security analysis agent. Your goal is to achieve the Mission Objective by exploring a web application, analyzing its components, and identifying vulnerabilities.
-	You operate in a continuous OODA loop. You receive the state as a JSON Knowledge Graph snapshot and must respond with a single JSON object for the next action.
+	basePrompt := `You are the Mind of 'scalpel-cli', an advanced, autonomous security analysis agent.
+Your goal is to achieve the Mission Objective by exploring a web application, analyzing its components, and identifying vulnerabilities.
+You operate in a continuous OODA loop. You receive the state as a JSON Knowledge Graph snapshot and must respond with a single JSON object for the next action.
+Available Action Types:
 
-	Available Action Types:
+    1. Basic Browser Interaction (Executed realistically via Humanoid):
+    - NAVIGATE: Go to a specific URL. (Params: value)
+    - CLICK: Click on an element. (Params: selector)
+    - INPUT_TEXT: Type text into a field. (Params: selector, value)
+    - SUBMIT_FORM: Submit a form. (Params: selector)
+    - SCROLL: Scroll the page. (Params: value="up" or "down")
+    - WAIT_FOR_ASYNC: Pause execution. (Params: metadata={"duration_ms": 1500})
 
-	1. Basic Browser Interaction (Executed realistically via Humanoid):
-	- NAVIGATE: Go to a specific URL. (Params: value)
-	- CLICK: Click on an element. (Params: selector)
-	- INPUT_TEXT: Type text into a field. (Params: selector, value)
-	- SUBMIT_FORM: Submit a form. (Params: selector)
-	- SCROLL: Scroll the page. (Params: value="up" or "down")
-	- WAIT_FOR_ASYNC: Pause execution. (Params: metadata={"duration_ms": 1500})
+    2. Advanced/Complex Interaction:
+    - HUMANOID_DRAG_AND_DROP: Move an element from one location to another. Use 'selector' for the element to drag, and 'metadata.target_selector' for the drop target.
+      Example: {"type": "HUMANOID_DRAG_AND_DROP", "selector": "#item-1", "metadata": {"target_selector": "#cart"}, "rationale": "Testing cart functionality."}
+    - PERFORM_COMPLEX_TASK: Instruct the agent to perform a high level action (e.g., 'LOGIN'). Use sparingly.
 
-	2. Advanced/Complex Interaction:
-	- HUMANOID_DRAG_AND_DROP: Move an element from one location to another.
-	  Use 'selector' for the element to drag, and 'metadata.target_selector' for the drop target.
-	  Example: {"type": "HUMANOID_DRAG_AND_DROP", "selector": "#item-1", "metadata": {"target_selector": "#cart"}, "rationale": "Testing cart functionality."}
-	- PERFORM_COMPLEX_TASK: Instruct the agent to perform a high level action (e.g., 'LOGIN'). Use sparingly.
-
-	3. Analysis & System:
-	- ANALYZE_TAINT: (Active) Scan the current page context for data flows (Taint analysis/XSS). Use after navigation or significant UI changes. The analysis runs on the current browser state.
-	  Example: {"type": "ANALYZE_TAINT", "rationale": "Analyzing the user profile page inputs for XSS vulnerabilities."}
-	- ANALYZE_PROTO_POLLUTION: (Active) Scan the current page context for client-side prototype pollution and DOM clobbering.
-	  Example: {"type": "ANALYZE_PROTO_POLLUTION", "rationale": "Analyzing the dashboard JS environment for pollution vulnerabilities."}
-	- ANALYZE_HEADERS: (Passive) Analyze the HTTP headers captured in the current browser state artifacts for security misconfigurations.
-	  Example: {"type": "ANALYZE_HEADERS", "rationale": "Checking security headers on the main application responses."}
-	- GATHER_CODEBASE_CONTEXT: Read source code for a module. (Params: metadata={"module_path": "..."})
-	- CONCLUDE: Finish the mission.
+    3. Analysis & System:
+    - ANALYZE_TAINT: (Active) Scan the current page context for data flows (Taint analysis/XSS). Use after navigation or significant UI changes. The analysis runs on the current browser state.
+      Example: {"type": "ANALYZE_TAINT", "rationale": "Analyzing the user profile page inputs for XSS vulnerabilities."}
+    - ANALYZE_PROTO_POLLUTION: (Active) Scan the current page context for client-side prototype pollution and DOM clobbering.
+      Example: {"type": "ANALYZE_PROTO_POLLUTION", "rationale": "Analyzing the dashboard JS environment for pollution vulnerabilities."}
+    - ANALYZE_HEADERS: (Passive) Analyze the HTTP headers captured in the current browser state artifacts for security misconfigurations.
+      Example: {"type": "ANALYZE_HEADERS", "rationale": "Checking security headers on the main application responses."}
+    - GATHER_CODEBASE_CONTEXT: Read source code for a module. (Params: metadata={"module_path": "..."})
+    - CONCLUDE: Finish the mission.
 `
 
 	// Conditionally include the evolution prompt if enabled in the configuration.
 	evolutionPrompt := ""
 	if m.cfg.Evolution.Enabled {
 		evolutionPrompt = `
-	4. Proactive Self-Improvement (Evolution):
-	- EVOLVE_CODEBASE: Initiate an autonomous OODA loop to improve the agent's own source code.
-	  **WHEN TO USE:** Only when you identify a limitation, bug, or inefficiency in the agent's capabilities that prevents achieving the mission objective, AND you have context about the relevant code (e.g., from GATHER_CODEBASE_CONTEXT).
-	  **PARAMETERS:**
-	    - value: The objective of the improvement (Required, String).
-	    - metadata.target_files: List of relevant file paths (Optional, Array[string]).
-	  Example: {"type": "EVOLVE_CODEBASE", "value": "Improve error handling for timeouts in BrowserExecutor", "metadata": {"target_files": ["internal/agent/executors.go"]}, "rationale": "Repeated timeouts require better handling."}
+    4. Proactive Self-Improvement (Evolution):
+    - EVOLVE_CODEBASE: Initiate an autonomous OODA loop to improve the agent's own source code.
+      **WHEN TO USE:** Only when you identify a limitation, bug, or inefficiency in the agent's capabilities that prevents achieving the mission objective, AND you have context about the relevant code (e.g., from GATHER_CODEBASE_CONTEXT).
+      **PARAMETERS:**
+        - value: The objective of the improvement (Required, String).
+        - metadata.target_files: List of relevant file paths (Optional, Array[string]).
+      Example: {"type": "EVOLVE_CODEBASE", "value": "Improve error handling for timeouts in BrowserExecutor", "metadata": {"target_files": ["internal/agent/executors.go"]}, "rationale": "Repeated timeouts require better handling."}
 `
 	}
 
 	errorHandlingPrompt := `
-	**Crucial Error Handling Instructions**:
-	Analyze the "error_code" (in the KG node properties) if a previous action failed (status="ERROR").
-	- ELEMENT_NOT_FOUND: The selector was incorrect or the element does not exist. Strategy: Try a different selector or navigate elsewhere.
-	- HUMANOID_GEOMETRY_INVALID: The element exists but has zero size or invalid structure. Strategy: Try interacting with a parent element or skip this target.
-	- HUMANOID_TARGET_NOT_VISIBLE: The element exists but is obscured or off-screen.
-	  -> Strategy: You MUST use SCROLL or interact with other UI elements (like closing a modal) to make it visible BEFORE retrying the interaction.
-	- TIMEOUT_ERROR: The operation took too long. Strategy: Consider using WAIT_FOR_ASYNC before retrying. If EVOLVE_CODEBASE timed out, the objective was likely too complex.
-	- NAVIGATION_ERROR: The URL could not be reached. Strategy: Verify the URL or navigate back.
-	- EVOLUTION_FAILURE: The self-improvement cycle failed. Strategy: Analyze the failure details (error_details), and either retry with a refined objective or abandon the evolution attempt.
-	- FEATURE_DISABLED: You attempted to use a feature (like EVOLVE_CODEBASE) that is disabled. Strategy: Find an alternative approach; do not retry the action.
-	- EXECUTION_FAILURE: If details suggest an internal bug. Strategy: If Evolution is enabled, consider using EVOLVE_CODEBASE to fix the bug after gathering context.
-
-	Analyze the provided state and objective, then decide your next move. Your response must be only the JSON for your chosen action.`
+    **Crucial Error Handling Instructions**:
+    Analyze the "error_code" (in the KG node properties) if a previous action failed (status="ERROR").
+    - ELEMENT_NOT_FOUND: The selector was incorrect or the element does not exist. Strategy: Try a different selector or navigate elsewhere.
+    - HUMANOID_GEOMETRY_INVALID: The element exists but has zero size or invalid structure. Strategy: Try interacting with a parent element or skip this target.
+    - HUMANOID_TARGET_NOT_VISIBLE: The element exists but is obscured or off-screen.
+      -> Strategy: You MUST use SCROLL or interact with other UI elements (like closing a modal) to make it visible BEFORE retrying the interaction.
+    - TIMEOUT_ERROR: The operation took too long. Strategy: Consider using WAIT_FOR_ASYNC before retrying. If EVOLVE_CODEBASE timed out, the objective was likely too complex.
+    - NAVIGATION_ERROR: The URL could not be reached. Strategy: Verify the URL or navigate back.
+    - EVOLUTION_FAILURE: The self-improvement cycle failed. Strategy: Analyze the failure details (error_details), and either retry with a refined objective or abandon the evolution attempt.
+    - FEATURE_DISABLED: You attempted to use a feature (like EVOLVE_CODEBASE) that is disabled. Strategy: Find an alternative approach; do not retry the action.
+    - EXECUTION_FAILURE: If details suggest an internal bug. Strategy: If Evolution is enabled, consider using EVOLVE_CODEBASE to fix the bug after gathering context.
+    Analyze the provided state and objective, then decide your next move.
+    Your response must be only the JSON for your chosen action.`
 	return basePrompt + evolutionPrompt + errorHandlingPrompt
 }
 
@@ -398,12 +402,12 @@ func (m *LLMMind) generateUserPrompt(contextSnapshot *schemas.Subgraph) (string,
 	m.mu.RUnlock()
 
 	return fmt.Sprintf(`Mission Objective: %s
-	Target: %s
+    Target: %s
 
-	Current Localized State (Knowledge Graph JSON):
-	%s
+    Current Localized State (Knowledge Graph JSON):
+    %s
 
-	Determine the next Action. Respond with a single JSON object.`, objective, targetURL, string(contextJSON)), nil
+    Determine the next Action. Respond with a single JSON object.`, objective, targetURL, string(contextJSON)), nil
 }
 
 // A regex to robustly extract a JSON object from a markdown code block.
@@ -452,7 +456,10 @@ func (m *LLMMind) parseActionResponse(response string) (Action, error) {
 func (m *LLMMind) processObservation(ctx context.Context, obs Observation) error {
 	m.logger.Debug("Processing observation", zap.String("obs_id", obs.ID), zap.String("type", string(obs.Type)))
 
-	if err := m.recordObservationKG(ctx, obs); err != nil {
+	// Call the LTM to get heuristic flags for the observation.
+	flags := m.ltm.ProcessAndFlagObservation(ctx, obs)
+
+	if err := m.recordObservationKG(ctx, obs, flags); err != nil {
 		return fmt.Errorf("failed to record observation in KG: %w", err)
 	}
 
@@ -476,15 +483,11 @@ func (m *LLMMind) orientOnObservation(ctx context.Context, obs Observation) erro
 	if obs.Type != ObservedCodebaseContext {
 		return nil
 	}
-	if obs.Data == nil {
-		m.logger.Debug("Observation data for codebase context is nil, skipping orientation.", zap.String("obs_id", obs.ID))
-		return nil
-	}
 
 	var codeContext string
 	if strData, ok := obs.Data.(string); ok {
 		codeContext = strData
-	} else {
+	} else if obs.Data != nil { // Keep nil check here since json.Marshal(nil) -> "null"
 		dataBytes, err := json.Marshal(obs.Data)
 		if err != nil {
 			m.logger.Warn("Failed to marshal non-string observation data for codebase context.", zap.Error(err))
@@ -494,7 +497,7 @@ func (m *LLMMind) orientOnObservation(ctx context.Context, obs Observation) erro
 	}
 
 	if codeContext == "" || codeContext == "null" {
-		m.logger.Debug("Observation data for codebase context is empty, skipping orientation.", zap.String("obs_id", obs.ID))
+		m.logger.Debug("Observation data for codebase context is empty or nil, skipping orientation.", zap.String("obs_id", obs.ID))
 		return nil
 	}
 
@@ -615,7 +618,7 @@ func (m *LLMMind) marshalProperties(propsMap map[string]interface{}) (json.RawMe
 }
 
 // Creates a new node and edge in the KG for an observation, AND applies any embedded KGUpdates.
-func (m *LLMMind) recordObservationKG(ctx context.Context, obs Observation) error {
+func (m *LLMMind) recordObservationKG(ctx context.Context, obs Observation, flags map[string]bool) error {
 	now := time.Now().UTC()
 
 	// 1. Apply KG Updates from the observation result (if any)
@@ -675,6 +678,7 @@ func (m *LLMMind) recordObservationKG(ctx context.Context, obs Observation) erro
 		"exec_status":        obs.Result.Status,
 		"exec_error_code":    obs.Result.ErrorCode,
 		"exec_error_details": obs.Result.ErrorDetails,
+		"ltm_flags":          flags,
 	}
 	propsBytes, err := m.marshalProperties(propsMap)
 	if err != nil {
@@ -832,5 +836,6 @@ func (m *LLMMind) Stop() {
 	case <-m.stopChan:
 	default:
 		close(m.stopChan)
+		m.ltm.Stop() // Gracefully stop the LTM's background processes.
 	}
 }

@@ -238,6 +238,26 @@ func (m *MockKGClient) QueryImprovementHistory(ctx context.Context, goal string,
 	return nil, args.Error(1)
 }
 
+// -- LTM Mock --
+
+// MockLTM mocks the long-term memory interface.
+type MockLTM struct {
+	mock.Mock
+}
+
+// ProcessAndFlagObservation mocks the processing of an observation.
+// It uses interface{} for the observation payload to avoid a circular dependency
+// between the agent and mocks packages.
+func (m *MockLTM) ProcessAndFlagObservation(ctx context.Context, obs interface{}) error {
+	args := m.Called(ctx, obs)
+	return args.Error(0)
+}
+
+// Stop mocks the cleanup/shutdown process.
+func (m *MockLTM) Stop() {
+	m.Called()
+}
+
 // -- Session Context Mock --
 
 type MockSessionContext struct {
