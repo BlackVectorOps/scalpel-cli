@@ -123,9 +123,11 @@ func TestGenerateShim(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, shim)
 
-	assert.Contains(t, shim, fmt.Sprintf(`SinkCallbackName: "%s"`, JSCallbackSinkEvent))
-	assert.Contains(t, shim, fmt.Sprintf(`ProofCallbackName: "%s"`, JSCallbackExecutionProof))
-	assert.Contains(t, shim, fmt.Sprintf(`ErrorCallbackName: "%s"`, JSCallbackShimError))
+	// VULN-FIX: Assert that the shim contains the session-specific randomized names, not the static constants.
+	assert.Contains(t, shim, fmt.Sprintf(`SinkCallbackName: "%s"`, analyzer.jsCallbackSinkEventName))
+	assert.Contains(t, shim, fmt.Sprintf(`ProofCallbackName: "%s"`, analyzer.jsCallbackExecutionProofName))
+	assert.Contains(t, shim, fmt.Sprintf(`ErrorCallbackName: "%s"`, analyzer.jsCallbackShimErrorName))
+	assert.NotContains(t, shim, fmt.Sprintf(`SinkCallbackName: "%s"`, JSCallbackSinkEvent))
 
 	expectedSinksJSON := `[{"Name":"eval","Type":"EVAL","Setter":false,"ArgIndex":0},{"Name":"Element.prototype.innerHTML","Type":"INNER_HTML","Setter":true,"ArgIndex":0,"ConditionID":"COND_TEST"}]`
 	assert.Contains(t, shim, "Sinks: "+expectedSinksJSON+",")
@@ -136,9 +138,17 @@ func TestInstrument_Success(t *testing.T) {
 	mockSession := mocks.NewMockSessionContext()
 	ctx := context.Background()
 
-	mockSession.On("ExposeFunction", ctx, JSCallbackSinkEvent, mock.AnythingOfType("func(taint.SinkEvent)")).Return(nil).Once()
-	mockSession.On("ExposeFunction", ctx, JSCallbackExecutionProof, mock.AnythingOfType("func(taint.ExecutionProofEvent)")).Return(nil).Once()
-	mockSession.On("ExposeFunction", ctx, JSCallbackShimError, mock.AnythingOfType("func(taint.ShimErrorEvent)")).Return(nil).Once()
+	// VULN-FIX: The callback names are now randomized. The mock should expect any string that
+	// matches the base prefix, rather than a hardcoded static value. This makes the test robust.
+	mockSession.On("ExposeFunction", ctx, mock.MatchedBy(func(name string) bool {
+		return strings.HasPrefix(name, JSCallbackSinkEvent)
+	}), mock.AnythingOfType("func(taint.SinkEvent)")).Return(nil).Once()
+	mockSession.On("ExposeFunction", ctx, mock.MatchedBy(func(name string) bool {
+		return strings.HasPrefix(name, JSCallbackExecutionProof)
+	}), mock.AnythingOfType("func(taint.ExecutionProofEvent)")).Return(nil).Once()
+	mockSession.On("ExposeFunction", ctx, mock.MatchedBy(func(name string) bool {
+		return strings.HasPrefix(name, JSCallbackShimError)
+	}), mock.AnythingOfType("func(taint.ShimErrorEvent)")).Return(nil).Once()
 	mockSession.On("InjectScriptPersistently", ctx, mock.AnythingOfType("string")).Return(nil).Once()
 
 	err := analyzer.instrument(ctx, mockSession)
@@ -153,7 +163,10 @@ func TestInstrument_Failure_ExposeFunction(t *testing.T) {
 	ctx := context.Background()
 
 	expectedError := errors.New("browser connection lost")
-	mockSession.On("ExposeFunction", ctx, JSCallbackSinkEvent, mock.Anything).Return(expectedError).Once()
+	// VULN-FIX: Match against the randomized prefix, not the static constant.
+	mockSession.On("ExposeFunction", ctx, mock.MatchedBy(func(name string) bool {
+		return strings.HasPrefix(name, JSCallbackSinkEvent)
+	}), mock.Anything).Return(expectedError).Once()
 
 	err := analyzer.instrument(ctx, mockSession)
 
@@ -734,7 +747,8 @@ func TestAnalyze_HappyPath(t *testing.T) {
 		}
 		analyzer.probesMutex.RUnlock()
 		require.NotEmpty(t, activeCanary)
-		simulateCallback(t, mockSession, JSCallbackSinkEvent, SinkEvent{Type: schemas.SinkFetchURL, Value: "http://oast.example.com/" + activeCanary})
+		// VULN-FIX: Use the dynamic callback name from the analyzer instance.
+		simulateCallback(t, mockSession, analyzer.jsCallbackSinkEventName, SinkEvent{Type: schemas.SinkFetchURL, Value: "http://oast.example.com/" + activeCanary})
 		reporter.On("Report", mock.MatchedBy(func(f CorrelatedFinding) bool {
 			return f.Canary == activeCanary && f.Sink == schemas.SinkFetchURL
 		})).Once()
