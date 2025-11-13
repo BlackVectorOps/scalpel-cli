@@ -31,6 +31,24 @@
         log: (...args) => scope.console.log(`[Scalpel Taint Shim - ${CONTEXT_NAME}]`, ...args)
     };
 
+    // --- VULN-FIX START: Capture Callbacks in Closure ---
+    // Immediately capture the callback functions from the global scope into a local,
+    // closure-scoped variable. This prevents DOM Clobbering that occurs after the
+    // shim has initialized from affecting the shim's own reporting mechanisms.
+    const SinkCallback = scope[CONFIG.SinkCallbackName];
+    const ProofCallback = scope[CONFIG.ProofCallbackName];
+    const ErrorCallback = scope[CONFIG.ErrorCallbackName];
+
+    // Validate that the callbacks were exposed correctly. If not, the analysis is blind.
+    // Use the raw console.error as our own ErrorCallback might be the one that's broken.
+    if (typeof SinkCallback !== 'function' || typeof ProofCallback !== 'function' || typeof ErrorCallback !== 'function') {
+        scope.console.error("[Scalpel] Critical Error: Backend callbacks not exposed correctly or were clobbered before shim initialization. Analysis may be ineffective.");
+        // Abort initialization as the shim cannot function without its callbacks.
+        return;
+    }
+    // --- VULN-FIX END ---
+
+
     // Predefined condition handlers for CSP compatibility.
     const ConditionHandlers = {
         'IS_STRING_ARG0': (args) => typeof args[0] === 'string',
@@ -45,7 +63,8 @@
      * ROBUSTNESS: Reports internal instrumentation errors back to the Go backend.
      */
     function reportShimError(error, location, stack = null) {
-        const callback = scope[CONFIG.ErrorCallbackName];
+        // VULN-FIX: Use the closure-scoped `ErrorCallback` instead of re-resolving from the global scope.
+        const callback = ErrorCallback;
         if (typeof callback === 'function') {
             // Execute asynchronously
             setTimeout(() => {
@@ -61,6 +80,7 @@
                 }
             }, 0);
         } else {
+            // This case should theoretically not be reached due to the initial check, but is kept for robustness.
             logger.error(`Shim Error at ${location}:`, error);
         }
     }
@@ -196,7 +216,8 @@
      * Reports a detected sink event to the Go backend.
      */
     function reportSink(type, value, detail) {
-        const callback = scope[CONFIG.SinkCallbackName];
+        // VULN-FIX: Use the closure-scoped `SinkCallback` instead of re-resolving from the global scope.
+        const callback = SinkCallback;
         if (typeof callback === 'function') {
             const stack = getStackTrace();
             // FIX: Capture page context for FP reduction.
@@ -243,13 +264,17 @@
      * Overrides the execution proof callback to capture stack trace.
      */
     function initializeExecutionProofCallback() {
-        const originalCallback = scope[CONFIG.ProofCallbackName];
+        // VULN-FIX: Use the closure-scoped `ProofCallback` as the original function to wrap.
+        const originalCallback = ProofCallback;
         if (typeof originalCallback !== 'function') {
+            // This case should not be reached due to the initial check, but is kept for robustness.
             logger.error("Backend execution proof callback not exposed correctly.");
             return;
         }
 
         // Replace the exposed Go function (which is a direct binding) with a JS wrapper.
+        // This is necessary because the XSS payload can only call the global function directly.
+        // Our wrapper adds the stack trace before calling the real (captured) callback.
         scope[CONFIG.ProofCallbackName] = function(canary) {
             const stack = getStackTrace();
             // FIX: Capture page context for FP reduction.
