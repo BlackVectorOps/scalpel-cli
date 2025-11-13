@@ -65,8 +65,9 @@ var ValidTaintFlows = map[TaintFlowPath]bool{
 // Pollution, and OAST-based checks. This list serves as the default configuration
 // for the taint analyzer.
 func DefaultProbes() []ProbeDefinition {
-	// Define the execution proof function call.
-	executionProofCall := `window.` + JSCallbackExecutionProof + `('{{.Canary}}')`
+	// VULN-FIX: Use a template placeholder for the callback name in the execution proof.
+	// This will be replaced by the session-specific randomized name in the analyzer.
+	executionProofCall := `window.{{.ProofCallbackName}}('{{.Canary}}')`
 
 	// OAST Integration: Define the OAST callback formats.
 	// {{.OASTServer}} is replaced by the Analyzer if an OAST provider is configured.

@@ -57,6 +57,11 @@ type Analyzer struct {
 	producersWG      sync.WaitGroup
 	backgroundCtx    context.Context
 	backgroundCancel context.CancelFunc
+
+	// VULN-FIX: Store session-specific, randomized callback names to prevent DOM Clobbering.
+	jsCallbackSinkEventName      string
+	jsCallbackExecutionProofName string
+	jsCallbackShimErrorName      string
 }
 
 // NewAnalyzer creates and initializes a new taint Analyzer instance. It reads
@@ -89,6 +94,13 @@ func NewAnalyzer(config Config, reporter ResultsReporter, oastProvider OASTProvi
 		taskLogger.Info("No OAST provider configured; out-of-band tests will be skipped.")
 	}
 
+	// VULN-FIX: Generate unique callback names for this analysis session to prevent DOM Clobbering.
+	// This makes it impossible for a target page to predict and overwrite the callback functions.
+	shortID := uuid.New().String()[:8]
+	sinkCallbackName := fmt.Sprintf("%s_%s", JSCallbackSinkEvent, shortID)
+	proofCallbackName := fmt.Sprintf("%s_%s", JSCallbackExecutionProof, shortID)
+	errorCallbackName := fmt.Sprintf("%s_%s", JSCallbackShimError, shortID)
+
 	return &Analyzer{
 		config:          config,
 		reporter:        reporter,
@@ -99,6 +111,11 @@ func NewAnalyzer(config Config, reporter ResultsReporter, oastProvider OASTProvi
 		eventsChan:      make(chan Event, config.EventChannelBuffer),
 		shimTemplate:    templateContent, // <-- Store the raw string
 		validTaintFlows: localValidTaintFlows,
+
+		// VULN-FIX: Store the generated unique names.
+		jsCallbackSinkEventName:      sinkCallbackName,
+		jsCallbackExecutionProofName: proofCallbackName,
+		jsCallbackShimErrorName:      errorCallbackName,
 	}, nil
 }
 
@@ -115,7 +132,7 @@ func (a *Analyzer) UpdateTaintFlowRuleForTesting(flow TaintFlowPath, isValid boo
 // JavaScript instrumentation shim from a template string and a JSON configuration
 // for sinks. This allows the session manager to prepare the shim before the
 // analyzer is fully instantiated.
-func BuildTaintShim(templateContent string, configJSON string) (string, error) {
+func BuildTaintShim(templateContent string, configJSON string, sinkCallback, proofCallback, errorCallback string) (string, error) {
 	// 1. Parse the template content passed as an argument.
 	tmpl, err := template.New("shim").Parse(templateContent)
 	if err != nil {
@@ -130,9 +147,9 @@ func BuildTaintShim(templateContent string, configJSON string) (string, error) {
 		ErrorCallbackName string
 	}{
 		SinksJSON:         configJSON,
-		SinkCallbackName:  JSCallbackSinkEvent,
-		ProofCallbackName: JSCallbackExecutionProof,
-		ErrorCallbackName: JSCallbackShimError,
+		SinkCallbackName:  sinkCallback,
+		ProofCallbackName: proofCallback,
+		ErrorCallbackName: errorCallback,
 	}
 
 	// 3. Execute the template into a buffer.
@@ -268,13 +285,14 @@ func (a *Analyzer) startBackgroundWorkers() {
 // instrument hooks into the client side by exposing Go functions to JavaScript
 // and injecting the instrumentation shim.
 func (a *Analyzer) instrument(ctx context.Context, session SessionContext) error {
-	if err := session.ExposeFunction(ctx, JSCallbackSinkEvent, a.handleSinkEvent); err != nil {
+	// VULN-FIX: Use the randomized, session-specific names when exposing functions.
+	if err := session.ExposeFunction(ctx, a.jsCallbackSinkEventName, a.handleSinkEvent); err != nil {
 		return fmt.Errorf("failed to expose sink event callback: %w", err)
 	}
-	if err := session.ExposeFunction(ctx, JSCallbackExecutionProof, a.handleExecutionProof); err != nil {
+	if err := session.ExposeFunction(ctx, a.jsCallbackExecutionProofName, a.handleExecutionProof); err != nil {
 		return fmt.Errorf("failed to expose execution proof callback: %w", err)
 	}
-	if err := session.ExposeFunction(ctx, JSCallbackShimError, a.handleShimError); err != nil {
+	if err := session.ExposeFunction(ctx, a.jsCallbackShimErrorName, a.handleShimError); err != nil {
 		return fmt.Errorf("failed to expose shim error callback: %w", err)
 	}
 
@@ -300,7 +318,8 @@ func (a *Analyzer) generateShim() (string, error) {
 	}
 
 	// 2. Call the exported BuildTaintShim function with the pre-loaded template string.
-	return BuildTaintShim(a.shimTemplate, string(sinksJSON))
+	// VULN-FIX: Pass the session-specific randomized callback names to be injected into the shim template.
+	return BuildTaintShim(a.shimTemplate, string(sinksJSON), a.jsCallbackSinkEventName, a.jsCallbackExecutionProofName, a.jsCallbackShimErrorName)
 }
 
 // enqueueEvent provides a safe, non blocking mechanism for sending an event to the correlation engine.
@@ -448,7 +467,13 @@ func (a *Analyzer) preparePayload(probeDef ProbeDefinition, canary string) strin
 		return ""
 	}
 
-	replacements := []string{"{{.Canary}}", canary}
+	// VULN-FIX: Add the dynamic, session-specific proof callback name to the replacements.
+	// This ensures that XSS probes are generated with the correct, non-clobberable callback.
+	replacements := []string{
+		"{{.Canary}}", canary,
+		"{{.ProofCallbackName}}", a.jsCallbackExecutionProofName,
+	}
+
 	if requiresOAST {
 		// We can now safely access oastProvider as oastConfigured is true.
 		oastURL := a.oastProvider.GetServerURL()
