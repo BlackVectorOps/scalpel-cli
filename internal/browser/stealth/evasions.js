@@ -23,19 +23,33 @@
         }
     };
 
-    // Utility function to make functions appear native (Advanced: Double Masking).
+    // Define the function that mimics the native toString appearance globally.
+    // (Fix for Bug 1: Infinite Masking)
+    // We use a function expression for a slightly more authentic appearance.
+    const nativeToString = function toString() { return 'function toString() { [native code] }'; };
+    // Implement recursive masking (Triple Masking and beyond).
+    try {
+        // Self-referential toString for infinite recursion.
+        Object.defineProperty(nativeToString, 'toString', {
+            value: nativeToString,
+            configurable: true,
+        });
+    } catch (e) {}
+
+
+    // Utility function to make functions appear native (Advanced: Infinite Masking).
     const maskAsNative = (func, nameHint = '') => {
         try {
             const name = nameHint || func.name || '';
             const nativeString = `function ${name}() { [native code] }`;
 
-            // Define the spoofed toString function
+            // Define the spoofed toString function (Masking Level 1)
             const spoofedToString = () => nativeString;
 
-            // Advanced Evasion: Mask the toString function itself (Double Masking)
-            // This defeats detectors that check func.toString.toString().
+            // Advanced Evasion: Mask the toString function itself (Masking Level 2+)
+            // We use the pre-defined nativeToString which handles infinite recursion.
             Object.defineProperty(spoofedToString, 'toString', {
-                 value: () => 'function toString() { [native code] }',
+                 value: nativeToString,
                  configurable: true,
             });
 
@@ -103,13 +117,21 @@
         overrideGetter(Screen.prototype, 'colorDepth', colorDepth);
         overrideGetter(Screen.prototype, 'pixelDepth', pixelDepth);
         
-        // Also spoof outerWidth/Height on the window object.
+        // Spoof window dimensions (outerWidth/Height and innerWidth/innerHeight).
+        // (Fix for Bug 3: Inconsistent Dimensions)
         try {
             if (window.outerWidth !== persona.width) {
                 Object.defineProperty(window, 'outerWidth', { get: () => persona.width, configurable: true });
             }
             if (window.outerHeight !== persona.height) {
                 Object.defineProperty(window, 'outerHeight', { get: () => persona.height, configurable: true });
+            }
+            // Also spoof innerWidth/innerHeight for consistency.
+            if (window.innerWidth !== persona.width) {
+                Object.defineProperty(window, 'innerWidth', { get: () => persona.width, configurable: true });
+            }
+            if (window.innerHeight !== persona.height) {
+                Object.defineProperty(window, 'innerHeight', { get: () => persona.height, configurable: true });
             }
         } catch (e) {}
     }
@@ -181,21 +203,63 @@
 
 
                 if (parameters.name === 'notifications') {
-                    // Return consistent 'prompt' state instead of 'granted'/'denied' which headless often defaults to.
-                    const permissionState = (window.Notification && Notification.permission === 'default') ? 'prompt' : Notification.permission;
+                    // Return consistent 'prompt' state.
+                    // (Fix for Bug 2: Handle missing window.Notification).
+                    const permissionState = window.Notification
+                        ? ((Notification.permission === 'default') ? 'prompt' : Notification.permission)
+                        : 'prompt';
                     
-                    // Return a realistic PermissionStatus object instance.
-                    return Promise.resolve(Object.create(PermissionStatus.prototype, {
-                        state: { value: permissionState, enumerable: true },
-                        name: { value: 'notifications', enumerable: true },
-                        onchange: { value: null, writable: true, enumerable: true }
-                    }));
+                    // (Fix for Bug 4: Detectable Object Structure)
+                    // Ensure we return a genuine PermissionStatus object.
+                    // Strategy: Temporarily override the prototype getter, call the original query, and restore.
+
+                    const originalDescriptor = Object.getOwnPropertyDescriptor(PermissionStatus.prototype, 'state');
+                    if (!originalDescriptor || !originalDescriptor.get) {
+                        // Fallback if we can't access the descriptor (should be rare).
+                        return originalQuery.call(this, parameters);
+                    }
+
+                    // Override the prototype getter temporarily.
+                    Object.defineProperty(PermissionStatus.prototype, 'state', {
+                        get: () => permissionState,
+                        configurable: true,
+                        enumerable: true
+                    });
+
+                    try {
+                        // Call the original query. The resulting object will use our spoofed getter.
+                        return originalQuery.call(this, parameters).then(result => {
+                            // Restore the original getter immediately after the promise resolves.
+                            Object.defineProperty(PermissionStatus.prototype, 'state', originalDescriptor);
+                            
+                            // FIX for Bug 1: Persist the spoofed state using a Proxy.
+                            // Even though the prototype is restored, this Proxy ensures that accessing 'state'
+                            // on THIS specific object returns the spoofed permissionState, without defining
+                            // a detectable 'own property'.
+                            return new Proxy(result, {
+                                get: function(target, prop, receiver) {
+                                    if (prop === 'state') {
+                                        return permissionState;
+                                    }
+                                    return Reflect.get(target, prop, receiver);
+                                }
+                            });
+                        }).catch(error => {
+                            // Restore in case of error too.
+                            Object.defineProperty(PermissionStatus.prototype, 'state', originalDescriptor);
+                            throw error;
+                        });
+                    } catch (error) {
+                        // Handle synchronous errors during the call (e.g. invalid parameter name).
+                        Object.defineProperty(PermissionStatus.prototype, 'state', originalDescriptor);
+                        throw error;
+                    }
                 }
                 // Use the context of the navigator.permissions object
                 return originalQuery.call(this, parameters);
             };
 
-            // Masking: Make the function appear native (includes Double Masking).
+            // Masking: Make the function appear native.
             maskAsNative(spoofedQuery);
 
             Object.defineProperty(navigator.permissions, 'query', {
@@ -208,29 +272,31 @@
         // console.warn("Scalpel Stealth: Failed to spoof Permissions API", error);
     }
 
-    // --- Evasion: WebGL (Basic) ---
-    // Basic spoofing of WebGL vendor/renderer if persona data is available.
+    // --- Evasion: WebGL (Advanced) ---
+    // Spoofing of WebGL vendor/renderer if persona data is available.
     if (persona.webGLVendor && persona.webGLRenderer) {
         try {
+            // Constants for WEBGL_debug_renderer_info (Fix for Bug 7: Robustness)
+            const UNMASKED_VENDOR_WEBGL = 0x9245;
+            const UNMASKED_RENDERER_WEBGL = 0x9246;
+
             const overrideWebGLContext = (proto) => {
                 const originalGetParameter = proto.getParameter;
                 
                 const spoofedGetParameter = function getParameter(parameter) {
-                    const gl = this;
-                    const debugInfo = gl.getExtension('WEBGL_debug_renderer_info');
                     
-                    if (debugInfo) {
-                        if (parameter === debugInfo.UNMASKED_VENDOR_WEBGL) return persona.webGLVendor;
-                        if (parameter === debugInfo.UNMASKED_RENDERER_WEBGL) return persona.webGLRenderer;
-                    }
-                    // Fallback for standard parameters
-                    if (parameter === gl.VENDOR) return persona.webGLVendor;
-                    if (parameter === gl.RENDERER) return persona.webGLRenderer;
+                    // Check against hardcoded constants (Fix for Bug 7).
+                    if (parameter === UNMASKED_VENDOR_WEBGL) return persona.webGLVendor;
+                    if (parameter === UNMASKED_RENDERER_WEBGL) return persona.webGLRenderer;
+
+                    // (Fix for Bug 6: Aggressive Spoofing)
+                    // We do NOT override standard gl.VENDOR/gl.RENDERER. They should return
+                    // the browser's generic values (e.g. "Google Inc."), not high-entropy hardware data.
 
                     return originalGetParameter.call(this, parameter);
                 };
                 
-                // Masking getParameter (includes Double Masking)
+                // Masking getParameter
                 maskAsNative(spoofedGetParameter);
 
                 Object.defineProperty(proto, 'getParameter', {
