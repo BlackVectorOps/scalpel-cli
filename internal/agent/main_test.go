@@ -1,4 +1,6 @@
-package agent
+
+// File: internal/agent/main_test.go
+package agent_test
 
 import (
 	"os"
@@ -6,18 +8,33 @@ import (
 
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
 	"github.com/xkilldash9x/scalpel-cli/internal/observability"
+	"go.uber.org/zap/zapcore"
 )
 
-// TestMain is executed before any tests in this package.
+// TestMain serves as the entry point for all tests in the agent package.
+// It instantiates the global dependency-injected logger before running tests.
 func TestMain(m *testing.M) {
-	// Initialize a simple logger for testing purposes to avoid spamming the console.
-	// This prevents the "Global logger requested before initialization" warning.
-	cfg := config.NewDefaultConfig().Logger()
-	cfg.Level = "fatal" // Silence all logs except fatal during tests
-	observability.InitializeLogger(cfg)
+	// 1. Load default configuration.
+	appConfig := config.NewDefaultConfig()
+	logConfig := appConfig.Logger()
 
-	// After running all tests, ensure logs are flushed.
-	defer observability.Sync()
+	// 2. Override settings for the test environment.
+	logConfig.Level = "debug"
+	logConfig.ServiceName = "test-suite"
+	logConfig.Format = "console"
 
-	os.Exit(m.Run())
+	// 3. Initialize the global logger.
+	observability.Initialize(logConfig, zapcore.Lock(os.Stdout))
+
+	// 4. Run the tests.
+	exitCode := m.Run()
+
+	// 5. Teardown and Sync.
+	observability.Sync()
+
+	// Explicitly reset the global state to be clean.
+	observability.ResetForTest()
+
+	// 6. Exit with the result code.
+	os.Exit(exitCode)
 }

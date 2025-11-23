@@ -1,6 +1,5 @@
-
-// File: internal/jsoncompare/main_test.go
-package jsoncompare_test
+// File: internal/observability/main_test.go
+package observability_test
 
 import (
 	"os"
@@ -11,8 +10,10 @@ import (
 	"go.uber.org/zap/zapcore"
 )
 
-// TestMain serves as the entry point for all tests in the jsoncompare package.
+// TestMain serves as the entry point for all tests in the observability package.
 // It instantiates the global dependency-injected logger before running tests.
+// Note: Individual tests (like TestInitializeLogger) may ResetForTest() and
+// re-initialize the logger to verify specific behaviors.
 func TestMain(m *testing.M) {
 	// 1. Load default configuration.
 	appConfig := config.NewDefaultConfig()

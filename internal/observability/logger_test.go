@@ -4,7 +4,7 @@ package observability
 import (
 	"bytes"
 	"encoding/json"
-	"io/ioutil"
+	"io"
 	"os"
 	"testing"
 
@@ -86,7 +86,7 @@ func TestInitializeLogger(t *testing.T) {
 	t.Run("should write to a log file if configured", func(t *testing.T) {
 		ResetForTest()
 		// -- create a temporary file for the log output --
-		tmpFile, err := ioutil.TempFile("", "logger-test-*.log")
+		tmpFile, err := os.CreateTemp("", "logger-test-*.log")
 		require.NoError(t, err)
 		defer os.Remove(tmpFile.Name())
 
@@ -96,13 +96,13 @@ func TestInitializeLogger(t *testing.T) {
 			LogFile: tmpFile.Name(),
 			MaxSize: 1, // 1 MB
 		}
-		// We use the production convenience wrapper here as we are testing file output.
-		InitializeLogger(cfg)
+		// We call Initialize directly to avoid writing to the console.
+		Initialize(cfg, zapcore.AddSync(io.Discard))
 		logger := GetLogger()
 		logger.Error("This should go to the file.")
 		Sync()
 
-		content, err := ioutil.ReadFile(tmpFile.Name())
+		content, err := os.ReadFile(tmpFile.Name())
 		require.NoError(t, err)
 		assert.Contains(t, string(content), "This should go to the file.", "Log file should contain the message")
 	})
@@ -140,11 +140,26 @@ func TestInitializeLogger(t *testing.T) {
 func TestGetLogger(t *testing.T) {
 	t.Run("should return a fallback logger if not initialized", func(t *testing.T) {
 		ResetForTest()
+
+		// Capture stderr to prevent the fallback warning from polluting test output.
+		oldStderr := os.Stderr
+		r, w, _ := os.Pipe()
+		os.Stderr = w
+
 		// -- we do not call InitializeLogger() here --
 		logger := GetLogger()
 		require.NotNil(t, logger)
 
-		// A non-nil check is a good indicator the fallback mechanism worked.
+		// Close the writer and restore stderr.
+		w.Close()
+		os.Stderr = oldStderr
+
+		// Read the captured output.
+		var buf bytes.Buffer
+		io.Copy(&buf, r)
+
+		// Assert that the warning was logged.
+		assert.Contains(t, buf.String(), "Global logger requested before initialization")
 	})
 
 	t.Run("should return the global logger after initialization", func(t *testing.T) {

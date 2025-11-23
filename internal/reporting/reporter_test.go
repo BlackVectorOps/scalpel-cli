@@ -4,7 +4,7 @@ package reporting_test
 // Implementation for Bug 4: Rewritten file with correct package name and comprehensive tests.
 
 import (
-	"io"
+	"bytes"
 	"os"
 	"path/filepath"
 	"testing"
@@ -104,39 +104,19 @@ func TestNew_Failure_FileCreation(t *testing.T) {
 	assert.Contains(t, err.Error(), "failed to create output file")
 }
 
-// MockWriterConcept that tracks if Write was called. (For TestNopWriteCloser_Concept)
-type MockWriterConcept struct {
-	writeCalled bool
-}
-
-func (m *MockWriterConcept) Write(p []byte) (n int, err error) {
-	m.writeCalled = true
-	return len(p), nil
-}
-
-// TestNopWriteCloser_Concept verifies the behavior of the nopWriteCloser pattern used in reporter.go.
-// Since the actual struct in reporter.go is private, we redefine the pattern here to test it conceptually.
-func TestNopWriteCloser_Concept(t *testing.T) {
-	// Define the pattern used in the implementation
-	type testNopWriteCloser struct {
-		io.Writer
-	}
-	// The key behavior: Close is a no-op returning nil.
-	var closeFunc = func(_ *testNopWriteCloser) error {
-		return nil
-	}
-
-	mw := &MockWriterConcept{}
-	nwc := &testNopWriteCloser{mw}
+// TestNopWriteCloser verifies the behavior of the public NopWriteCloser.
+func TestNopWriteCloser(t *testing.T) {
+	mockWriter := &bytes.Buffer{}
+	nwc := &reporting.NopWriteCloser{Writer: mockWriter}
 
 	// Verify Write passes through
 	data := []byte("test")
 	n, err := nwc.Write(data)
 	assert.NoError(t, err)
 	assert.Equal(t, len(data), n)
-	assert.True(t, mw.writeCalled)
+	assert.Equal(t, "test", mockWriter.String())
 
 	// Verify Close behavior
-	err = closeFunc(nwc)
+	err = nwc.Close()
 	assert.NoError(t, err, "Close should always return nil")
 }

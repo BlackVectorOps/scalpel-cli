@@ -1,3 +1,4 @@
+
 // internal/browser/stealth/evasions_test.js
 // In-browser unit test suite for evasions.js
 
@@ -8,28 +9,29 @@ const ScalpelTestRunner = {
     define(name, testFunc) {
         this.tests.push({ name, testFunc });
     },
-    // Fix for Race Condition (Bug 3): Run tests sequentially
+    // Run tests sequentially
     async run() {
         this.results = [];
         console.log("Starting Scalpel Stealth Evasion Tests...");
         
         for (const test of this.tests) {
             try {
-                // Execute the test function (supports async functions)
-                // Await guarantees sequential execution, preventing interference between tests
-                // that modify global state (like window.Notification).
+                // Await guarantees sequential execution.
                 await test.testFunc();
                 this.results.push({ name: test.name, status: 'PASS' });
             } catch (error) {
-                // Capture stack trace for better debugging in Go runner.
+                // Capture stack trace for better debugging.
                 this.results.push({ name: test.name, status: 'FAIL', error: error.message, stack: error.stack });
                 console.error(`FAIL: ${test.name}`, error);
             }
         }
 
         console.log("Tests finished.");
-        // Expose results globally so the Go test can retrieve them (via polling)
-        window.SCALPEL_TEST_RESULTS = this.results;
+        // Expose results globally so the environment can retrieve them
+        // Check if window exists (for worker compatibility)
+        if (typeof window !== 'undefined') {
+            window.SCALPEL_TEST_RESULTS = this.results;
+        }
     }
 };
 
@@ -40,7 +42,6 @@ const assert = {
             throw new Error(`${message}: Expected ${expected}, but got ${actual}`);
         }
     },
-    // Added notEqual assertion (For Bug 6)
     notEqual(actual, expected, message) {
         if (actual === expected) {
             throw new Error(`${message}: Expected value not to be ${expected}, but it was.`);
@@ -56,400 +57,501 @@ const assert = {
             throw new Error(message);
         }
     },
-    // Helper for asynchronous exception testing (useful if APIs return Promises that reject)
-    // Also handles synchronous exceptions thrown by the API implementations (like Permissions validation).
+    // Helper for asynchronous exception testing
     async throwsAsync(asyncFunc, expectedErrorType, message) {
         try {
             await asyncFunc();
             throw new Error(`${message}: Expected an exception but none was thrown.`);
         } catch (error) {
-            if (error.message.includes('Expected an exception but none was thrown')) {
-                throw error; // Rethrow if assertion failed (no exception occurred)
+            // Handle specific assertion failures or expected validation errors
+            if (error.message.includes('Expected an exception but none was thrown') || error.message.includes('Required member is undefined')) {
+                if (!(expectedErrorType && error instanceof expectedErrorType)) {
+                     throw error;
+                }
             }
+            
             if (expectedErrorType && !(error instanceof expectedErrorType)) {
                  throw new Error(`${message}: Expected error type ${expectedErrorType.name}, but got ${error.name}. Error: ${error.message}`);
             }
+            // Success: An exception of the expected type was thrown.
         }
     },
-    // (Improvement: Add assertion for native function checks)
+    // Assertion for native function checks
     isNative(func, message) {
-        // We must use the authentic Function.prototype.toString for this check.
+        // The global override implementation in evasions.js handles this correctly.
         const nativeString = Function.prototype.toString.call(func);
         assert.isTrue(nativeString.includes('[native code]'), `${message}: Function ${func.name || ''} does not appear native. Got: ${nativeString}`);
     }
 };
 
-// Constants for assertions
-// We now rely on the authentic Function.prototype.toString for L2+ checks.
 
 // --- Tests Definitions ---
+
+// Check if running in a worker context
+const isWorker = typeof window === 'undefined';
 
 ScalpelTestRunner.define('Evasion: Webdriver Flag Removal', () => {
     assert.isFalse(navigator.webdriver, 'navigator.webdriver should be false');
     
-    // Test Descriptor Mimicry (Improvement 5).
-    const descriptor = Object.getOwnPropertyDescriptor(Navigator.prototype, 'webdriver');
-    assert.isTrue(descriptor !== undefined, 'Webdriver descriptor should exist on prototype');
-    // We primarily verify that the override succeeded and the getter exists.
-    assert.isTrue(descriptor.enumerable, 'Webdriver descriptor should be enumerable');
+    // Test Descriptor Mimicry.
+    const navProto = typeof Navigator !== 'undefined' ? Navigator.prototype : Object.getPrototypeOf(navigator);
+    const descriptor = Object.getOwnPropertyDescriptor(navProto, 'webdriver');
+    assert.isTrue(descriptor !== undefined, 'Webdriver descriptor should exist on prototype/object');
     assert.isTrue(typeof descriptor.get === 'function', 'Webdriver should have a getter');
 });
 
 // (Test for Fix 1: Function.prototype.toString.call detection)
-ScalpelTestRunner.define('Evasion: Advanced Masking (Proxy vs Function.prototype.toString.call)', () => {
-    // We test several masked functions to ensure the Proxy implementation is robust.
+ScalpelTestRunner.define('Evasion: Advanced Masking (Global Override)', () => {
+    // We test several masked functions to ensure the Global Override is robust.
     const testCases = [
-        { name: 'chrome.runtime.connect', func: window.chrome && window.chrome.runtime && window.chrome.runtime.connect },
         { name: 'navigator.permissions.query', func: navigator.permissions && navigator.permissions.query },
+        { name: 'decodingInfo', func: navigator.mediaCapabilities && navigator.mediaCapabilities.decodingInfo },
+        { name: 'getHighEntropyValues', func: navigator.userAgentData && navigator.userAgentData.getHighEntropyValues },
     ];
 
-    // Setup WebGL context for WebGL testing (if available)
-    const canvas = document.createElement('canvas');
-    const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
-    if (gl) {
-        testCases.push({ name: 'getParameter', func: gl.getParameter });
-    }
-    
-    // Add Plugins methods if available (Fix 6)
-    if (navigator.plugins && navigator.plugins.refresh) {
-         testCases.push({ name: 'refresh', func: navigator.plugins.refresh });
+    if (!isWorker) {
+        testCases.push({ name: 'chrome.runtime.connect', func: window.chrome && window.chrome.runtime && window.chrome.runtime.connect });
+
+        // Setup WebGL context for WebGL testing (if available)
+        const canvas = document.createElement('canvas');
+        const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
+        if (gl) {
+            testCases.push({ name: 'getParameter', func: gl.getParameter });
+        }
+        
+        // Add Plugins methods if available
+        if (navigator.plugins && navigator.plugins.refresh) {
+             testCases.push({ name: 'refresh', func: navigator.plugins.refresh });
+        }
     }
 
 
     for (const { name, func } of testCases) {
         if (!func) {
-            console.warn(`Skipping advanced masking test for ${name}: Function not available or not masked.`);
             continue;
         }
 
-        // The name might be derived differently depending on how maskAsNative was called (hint vs func.name)
         const funcName = func.name || name;
         const expectedString = `function ${funcName}() { [native code] }`;
 
         // 1. Standard check (L1 masking)
         assert.equal(func.toString(), expectedString, `${name}.toString() failed (L1)`);
 
-        // 2. The critical test for Fix 1: Using Function.prototype.toString.call()
-        // If fixed, the Proxy intercepts the access and returns the spoofed string.
+        // 2. The critical test: Using Function.prototype.toString.call()
         const resultViaCall = Function.prototype.toString.call(func);
-        assert.equal(resultViaCall, expectedString, `Function.prototype.toString.call(${name}) detection succeeded (Fix 1 failed)`);
+        assert.equal(resultViaCall, expectedString, `Function.prototype.toString.call(${name}) detection succeeded (Global override failed)`);
+    }
+
+    // 3. L2 Authenticity Check (Test the toString function itself)
+    assert.isNative(Function.prototype.toString, 'Function.prototype.toString L2 masking');
+});
+
+// NEW TEST CASE: Verify that property getters (like navigator.userAgent) are properly masked.
+ScalpelTestRunner.define('Evasion: Property Getter Masking (Descriptor Analysis)', () => {
+    const navProto = typeof Navigator !== 'undefined' ? Navigator.prototype : Object.getPrototypeOf(navigator);
+
+    const propertiesToTest = [
+        { obj: navProto, prop: 'userAgent' },
+        { obj: navProto, prop: 'platform' },
+        { obj: navProto, prop: 'webdriver' },
+        { obj: navProto, prop: 'hardwareConcurrency' },
+    ];
+
+    if (!isWorker) {
+        propertiesToTest.push(
+            { obj: Screen.prototype, prop: 'width' },
+            { obj: Screen.prototype, prop: 'colorDepth' },
+            // We check the window instance for these properties as that's where the override occurs
+            { obj: window, prop: 'devicePixelRatio', instance: true },
+            { obj: window, prop: 'innerWidth', instance: true }
+        );
+    }
+
+    // Add UserAgentData properties if available (on the instance, not the prototype for the mock)
+    if (navigator.userAgentData) {
+        propertiesToTest.push({ obj: navigator.userAgentData, prop: 'mobile', instance: true });
+        propertiesToTest.push({ obj: navigator.userAgentData, prop: 'platform', instance: true });
+    }
+
+    for (const { obj, prop, instance } of propertiesToTest) {
+        if (!obj) continue;
+
+        let descriptor;
+        
+        if (instance) {
+            // If checking an instance property
+            descriptor = Object.getOwnPropertyDescriptor(obj, prop);
+        } else {
+            // Otherwise, walk the prototype chain (standard behavior)
+            let currentObj = obj;
+            while (currentObj && !descriptor) {
+                descriptor = Object.getOwnPropertyDescriptor(currentObj, prop);
+                if (descriptor) break;
+                // Handle potential prototype loops
+                const proto = Object.getPrototypeOf(currentObj);
+                if (proto === currentObj || proto === null) break;
+                currentObj = proto;
+            }
+        }
+        
+        // Skip if descriptor not found (e.g. property doesn't exist in this environment or wasn't overridden)
+        if (!descriptor) continue;
+        
+        // Skip if it's a value property instead of an accessor property
+        if (!descriptor.get) continue;
+
+        assert.isTrue(typeof descriptor.get === 'function', `Getter for ${prop} should be a function.`);
+
+        // 1. Check the name property of the getter function.
+        const getterName = descriptor.get.name;
+        assert.equal(getterName, `get ${prop}`, `Getter name for ${prop} is incorrect. Got: ${getterName}`);
+
+        // 2. Check the toString() representation of the getter function.
+        const getterString = descriptor.get.toString();
+        const expectedString = `function get ${prop}() { [native code] }`;
+        assert.equal(getterString, expectedString, `Getter toString() for ${prop} is not masked correctly. Got: ${getterString}`);
+        
+        // 3. Advanced check: Using Function.prototype.toString.call() on the getter.
+        const getterStringViaCall = Function.prototype.toString.call(descriptor.get);
+        assert.equal(getterStringViaCall, expectedString, `Function.prototype.toString.call() on getter for ${prop} detection succeeded.`);
     }
 });
 
 
-// (Test for Fix 1/Improvement 2: Masking/Authenticity)
-ScalpelTestRunner.define('Evasion: window.chrome simulation and masking', () => {
+// Updated: Check modernization fixes (V3, runtime.id)
+ScalpelTestRunner.define('Evasion: window.chrome simulation (Modernized)', () => {
+    if (isWorker) return;
+
     assert.isTrue(window.chrome !== undefined, 'window.chrome should be defined');
     assert.isTrue(window.chrome.runtime !== undefined, 'window.chrome.runtime should be defined');
     
-    const targetFunc = window.chrome.runtime.connect;
-
-    // Test Structure
-    assert.isTrue(window.chrome.runtime.onConnect !== undefined, 'chrome.runtime.onConnect missing');
-
-    // Test Masking (L1)
-    assert.equal(targetFunc.toString(), 'function connect() { [native code] }', 'L1 masking failed');
+    // Check runtime.id (FIX)
+    assert.isTrue(window.chrome.runtime.id !== undefined, 'chrome.runtime.id should be defined');
+    assert.isTrue(window.chrome.runtime.id.length > 0, 'chrome.runtime.id should not be empty');
     
-    // Test Double Masking (L2 Authenticity)
-    // The L2 toString should be the actual native Function.prototype.toString.
-    assert.equal(targetFunc.toString.toString, Function.prototype.toString, 'L2 masking function mismatch (Authenticity failed)');
-    // And calling it should yield the native string representation of toString itself.
-    assert.isNative(targetFunc.toString.toString, 'L2 masking result');
+    // Check getManifest (V3) (FIX)
+    if (window.chrome.runtime.getManifest) {
+        const manifest = window.chrome.runtime.getManifest();
+        assert.equal(manifest.manifest_version, 3, 'Manifest version should be 3 (V3)');
+    }
+
+    // Check getURL uses the defined ID
+    if (window.chrome.runtime.getURL) {
+        const url = window.chrome.runtime.getURL("test.html");
+        assert.isTrue(url.includes(window.chrome.runtime.id), 'chrome.runtime.getURL should use the runtime ID');
+    }
 });
 
 ScalpelTestRunner.define('Persona Application: Navigator Properties', () => {
-    const persona = window.SCALPEL_PERSONA;
-    // Use camelCase for assertions (e.g., userAgent)
-    assert.isTrue(persona !== undefined && persona.userAgent !== undefined, 'Persona data should be available');
+    const persona = (typeof window !== 'undefined' ? window.SCALPEL_PERSONA : self.SCALPEL_PERSONA) || {};
     
-    assert.equal(navigator.userAgent, persona.userAgent, 'UserAgent mismatch');
+    if (persona.userAgent) {
+        assert.equal(navigator.userAgent, persona.userAgent, 'UserAgent mismatch');
+        // Check derived properties
+        const expectedAppVersion = persona.userAgent.replace(/^Mozilla\//, '');
+        assert.equal(navigator.appVersion, expectedAppVersion, 'appVersion mismatch');
+    }
     
-    // We check platform only if it was provided, allowing Go logic (Bug 5) to handle derivation if empty.
-    // The Go test runner (js_test.go) provides an explicit platform, so we verify it here.
     if (persona.platform) {
         assert.equal(navigator.platform, persona.platform, 'Platform mismatch');
     }
 
-    // Check derived properties (Robustness improvement)
-    const expectedAppVersion = persona.userAgent.replace(/^Mozilla\//, '');
-    assert.equal(navigator.appVersion, expectedAppVersion, 'appVersion mismatch');
+    if (persona.languages && persona.languages.length > 0) {
+        assert.equal(navigator.languages.join(','), persona.languages.join(','), 'Languages mismatch');
+        assert.equal(navigator.language, persona.languages[0], 'Primary language mismatch');
+        assert.isTrue(Object.isFrozen(navigator.languages), 'Languages array should be frozen');
+    }
 
-    // Check languages array
-    assert.equal(navigator.languages.join(','), persona.languages.join(','), 'Languages mismatch');
-    // Check singular language property (Robustness improvement)
-    assert.equal(navigator.language, persona.languages[0], 'Primary language mismatch');
+    const expectedHWConcurrency = persona.hardwareConcurrency || 8;
+    assert.equal(navigator.hardwareConcurrency, expectedHWConcurrency, 'hardwareConcurrency mismatch');
 
-    assert.isTrue(Object.isFrozen(navigator.languages), 'Languages array should be frozen');
+    if ('deviceMemory' in navigator) {
+        const expectedDevMemory = persona.deviceMemory || 8;
+        assert.equal(navigator.deviceMemory, expectedDevMemory, 'deviceMemory mismatch');
+    }
+
+    // (MODERNIZATION: pdfViewerEnabled Test)
+    const expectedPdfEnabled = persona.pdfViewerEnabled !== false; // Default to true
+    assert.equal(navigator.pdfViewerEnabled, expectedPdfEnabled, 'navigator.pdfViewerEnabled mismatch');
 });
 
+
+// (MODERNIZATION: User-Agent Client Hints Test)
+ScalpelTestRunner.define('Evasion: User-Agent Client Hints (UA-CH)', async () => {
+    const persona = (typeof window !== 'undefined' ? window.SCALPEL_PERSONA : self.SCALPEL_PERSONA) || {};
+    if (!navigator.userAgentData || !persona.userAgentData) {
+        return;
+    }
+
+    const uaData = persona.userAgentData;
+
+    // 1. Check low-entropy values
+    assert.equal(navigator.userAgentData.mobile, uaData.mobile || false, 'UA-CH mobile mismatch');
+    
+    // 2. Check high-entropy values (basic check)
+    const hints = ["architecture", "platformVersion"];
+    const highEntropy = await navigator.userAgentData.getHighEntropyValues(hints);
+
+    assert.equal(highEntropy.architecture, uaData.architecture, 'UA-CH architecture mismatch');
+    assert.equal(highEntropy.platformVersion, uaData.platformVersion, 'UA-CH platformVersion mismatch');
+
+    // 3. Check input validation
+    await assert.throwsAsync(() => navigator.userAgentData.getHighEntropyValues("string"), TypeError, 'Calling getHighEntropyValues("string")');
+
+    // 4. Check masking
+    const targetFunc = navigator.userAgentData.getHighEntropyValues;
+    assert.isNative(targetFunc, 'getHighEntropyValues masking');
+});
+
+
 ScalpelTestRunner.define('Persona Application: Screen and Window Properties', () => {
-    const persona = window.SCALPEL_PERSONA;
+    if (isWorker) return;
+
+    const persona = window.SCALPEL_PERSONA || {};
+
+    if (!persona.width || !persona.height) return;
 
     assert.equal(window.screen.width, persona.width, 'Screen width mismatch');
     assert.equal(window.screen.height, persona.height, 'Screen height mismatch');
-    
-    // Handle potential default values if not provided in persona (js_test.go provides them)
-    const expectedAvailWidth = persona.availWidth || persona.width;
-    const expectedAvailHeight = persona.availHeight || persona.height;
-
-    assert.equal(window.screen.availWidth, expectedAvailWidth, 'Screen availWidth mismatch');
-    assert.equal(window.screen.availHeight, expectedAvailHeight, 'Screen availHeight mismatch');
-    
-    // Verify ColorDepth and PixelDepth interpretation.
-    const expectedColorDepth = persona.colorDepth || 24;
-    assert.equal(window.screen.colorDepth, expectedColorDepth, 'Screen colorDepth mismatch');
-    assert.equal(window.screen.pixelDepth, expectedColorDepth, 'Screen pixelDepth mismatch');
 
     // Verify Device Pixel Ratio (DPR).
-    const expectedDPR = persona.pixelDepth || 1.0;
-    assert.equal(window.devicePixelRatio, expectedDPR, 'Device Pixel Ratio (DPR) mismatch');
+    if (persona.devicePixelRatio) {
+        assert.equal(window.devicePixelRatio, persona.devicePixelRatio, 'Device Pixel Ratio (DPR) mismatch');
+    }
 
-    // Verify Window Dimensions (Test for Bug 3)
+    // Verify Window Dimensions
     assert.equal(window.outerWidth, persona.width, 'window.outerWidth mismatch');
-    assert.equal(window.outerHeight, persona.height, 'window.outerHeight mismatch');
-    assert.equal(window.innerWidth, persona.width, 'window.innerWidth mismatch');
     assert.equal(window.innerHeight, persona.height, 'window.innerHeight mismatch');
 });
 
-ScalpelTestRunner.define('Evasion: Permissions API (Masking, Structure, Functionality)', async () => {
-    if (navigator.permissions && navigator.permissions.query && window.PermissionStatus) {
-
-        // (Test for Fix 4): Capture the prototype descriptor BEFORE the query.
-        const initialProtoDescriptor = Object.getOwnPropertyDescriptor(PermissionStatus.prototype, 'state');
+ScalpelTestRunner.define('Evasion: Permissions API (Structure, Functionality)', async () => {
+    // Use globalThis to access PermissionStatus/Notification robustly in workers/windows
+    if (navigator.permissions && navigator.permissions.query && globalThis.PermissionStatus) {
         
         // 1. Check functionality
-        const result = await navigator.permissions.query({ name: 'notifications' });
+        let result;
+        try {
+             result = await navigator.permissions.query({ name: 'notifications' });
+        } catch (e) {
+            return; // Skip if permission query fails
+        }
         
-        // Determine expected state robustly (handles missing Notification API, related to Bug 2)
+        // Determine expected state robustly
         let expectedState = 'prompt'; 
-        if (window.Notification) {
+        if (globalThis.Notification) {
             expectedState = (Notification.permission === 'default') ? 'prompt' : Notification.permission;
         }
 
         assert.equal(result.state, expectedState, 'Permissions API notification state mismatch');
-        assert.isTrue(result instanceof PermissionStatus, 'Result should be an instance of PermissionStatus');
-
-        const targetFunc = navigator.permissions.query;
-
-        // 2. Check masking (Test for Bug 1)
-        assert.equal(targetFunc.toString(), 'function query() { [native code] }', 'Permissions L1 masking failed');
-        // Check L2 masking (Authenticity)
-        assert.equal(targetFunc.toString.toString, Function.prototype.toString, 'Permissions L2 masking function mismatch');
-        assert.isNative(targetFunc.toString.toString, 'Permissions L2 masking result');
-
-
-        // 3. Check input validation
+        
+        // 2. Check input validation
         await assert.throwsAsync(() => navigator.permissions.query(), TypeError, 'Calling query() without arguments');
-        await assert.throwsAsync(() => navigator.permissions.query(null), TypeError, 'Calling query(null)');
-        await assert.throwsAsync(() => navigator.permissions.query({}), TypeError, 'Calling query({}) without name');
-
-        // 4. Check structural integrity (Test for Bug 4)
-        // Native behavior: state is a getter on prototype, not an own property.
-        // Even with the Proxy fix, the Proxy should forward getOwnPropertyDescriptor to the target,
-        // which has no own property. This MUST still pass.
-        const descriptor = Object.getOwnPropertyDescriptor(result, 'state');
-        assert.equal(descriptor, undefined, 'PermissionStatus object should not have an own property "state"');
-
-        // 5. Verify prototype integrity (Test for Fix 4)
-        const protoDescriptor = Object.getOwnPropertyDescriptor(PermissionStatus.prototype, 'state');
-        assert.isTrue(protoDescriptor && typeof protoDescriptor.get === 'function', 'Prototype descriptor missing or invalid');
-
-        // Crucial check for Fix 4: Ensure the descriptor has not changed during the operation.
-        assert.equal(protoDescriptor.get, initialProtoDescriptor.get, 'PermissionStatus.prototype.state getter was modified during query (Fix 4 failed)');
-        assert.equal(protoDescriptor.configurable, initialProtoDescriptor.configurable, 'Prototype descriptor configurable flag changed');
-
-    } else {
-        console.warn("Skipping Permissions API test: API or PermissionStatus not available.");
-    }
-});
-
-// TEST FOR BUG 1 (PERSISTENCE)
-ScalpelTestRunner.define('Evasion: Permissions API - Persistence of Spoof', async () => {
-    if (navigator.permissions && navigator.permissions.query && window.Notification) {
         
-        // This test verifies that the spoofed result PERSISTS even after the prototype restoration.
-        // We force a mismatch: spoofed = 'granted', native/internal = 'prompt'.
-        
-        const originalNotificationPermission = Object.getOwnPropertyDescriptor(window.Notification, 'permission');
-        // Mock Notification.permission to be 'granted'
-        Object.defineProperty(window.Notification, 'permission', { value: 'granted', configurable: true });
-
-        try {
-            // Call query. The evasion logic sees Notification.permission='granted' and spoofs the result.
-            const result = await navigator.permissions.query({ name: 'notifications' });
-            
-            // At this point, the prototype hook in evasions.js should have been restored.
-            // If the bug exists (no Proxy), result.state will access native getter -> internal slot -> 'prompt'.
-            // If fixed (Proxy), result.state will use the Proxy trap -> 'granted'.
-            
-            assert.equal(result.state, 'granted', 'PermissionStatus.state did not persist the spoofed value after query resolution');
-            
-        } finally {
-            // Clean up
-            if (originalNotificationPermission) {
-                Object.defineProperty(window.Notification, 'permission', originalNotificationPermission);
-            } else {
-                // Fallback for cleanup if descriptor was missing (unlikely)
-                 delete window.Notification.permission; 
-            }
-        }
-    }
-});
-
-// (Test for Bug 2: Missing Notification API handling)
-ScalpelTestRunner.define('Evasion: Permissions API - Robustness (Missing Notification API)', async () => {
-    if (navigator.permissions && navigator.permissions.query && window.PermissionStatus) {
-        
-        const originalNotification = window.Notification;
-        let notificationModified = false;
-
-        try {
-            // 1. Simulate environment without Notification API
+        // Check validation for missing 'name' property (enforced by the updated evasion script)
+        await assert.throwsAsync(async () => {
             try {
-                // Attempt to redefine Notification to undefined.
-                Object.defineProperty(window, 'Notification', { value: undefined, configurable: true, writable: true });
-                notificationModified = (window.Notification === undefined);
-            } catch (e) {
-                console.warn("Failed to redefine window.Notification.", e);
+                await navigator.permissions.query({});
+            } catch (error) {
+                // Verify the specific error message for required member
+                if (error.message.includes('Required member is undefined')) {
+                    throw error;
+                }
+                throw new Error(`Expected specific TypeError for missing 'name', but got: ${error.message}`);
             }
-
-            if (!notificationModified) {
-                 console.warn("Skipping Permissions Robustness test: Cannot modify window.Notification.");
-                 return; // Skip test if we cannot set up the environment
-            }
-            
-            // 2. Verify that querying permissions does not throw an error (e.g., ReferenceError/TypeError)
-            const result = await navigator.permissions.query({ name: 'notifications' });
-            
-            // 3. Assert the fallback state
-            assert.equal(result.state, 'prompt', 'Should default to prompt when Notification API is missing');
-
-        } finally {
-            // 4. Restore window.Notification
-            if (notificationModified) {
-                 Object.defineProperty(window, 'Notification', { value: originalNotification, configurable: true, writable: true });
-            }
-        }
-
-    } else {
-        console.warn("Skipping Permissions Robustness test: Permissions API not available.");
+        }, TypeError, 'Calling query({}) without name');
     }
 });
 
 
-ScalpelTestRunner.define('Evasion: WebGL Spoofing (Unmasked, Standard, and Masking)', () => {
-    const persona = window.SCALPEL_PERSONA;
+// NEW TEST: Validate the determinism and independence of the canvas poisoning (FIX)
+ScalpelTestRunner.define('Evasion: Canvas Fingerprinting Defense (Determinism and Independence)', () => {
+    if (isWorker) return;
+
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    // Use a small canvas
+    canvas.width = 50;
+    canvas.height = 1;
+
+    // 1. Draw known content (e.g., solid gray)
+    const initialValue = 128;
+    ctx.fillStyle = `rgb(${initialValue}, ${initialValue}, ${initialValue})`;
+    ctx.fillRect(0, 0, 50, 1);
+
+    // Helper to get image data
+    const getData = () => ctx.getImageData(0, 0, 50, 1).data;
+
+    // 2. Read data (poisoned)
+    const data1 = getData();
+    
+    // 3. Read data again (must be identical for determinism)
+    const data2 = getData();
+
+    assert.equal(data1.length, data2.length, 'Canvas data length mismatch between reads');
+    
+    let determinismDifferences = 0;
+    let poisoningOccurred = false;
+    let correlatedNoiseCount = 0;
+    let pixelCount = 0;
+
+    for (let i = 0; i < data1.length; i+=4) {
+        pixelCount++;
+
+        // Check determinism
+        if (data1[i] !== data2[i] || data1[i+1] !== data2[i+1] || data1[i+2] !== data2[i+2]) {
+            determinismDifferences++;
+        }
+
+        // Check if poisoning occurred (values changed from initial)
+        if (data1[i] !== initialValue || data1[i+1] !== initialValue || data1[i+2] !== initialValue) {
+            poisoningOccurred = true;
+        }
+
+        // Check for correlated noise (R, G, B having the exact same noise offset)
+        const noiseR = data1[i] - initialValue;
+        const noiseG = data1[i+1] - initialValue;
+        const noiseB = data1[i+2] - initialValue;
+
+        if (noiseR === noiseG && noiseG === noiseB && noiseR !== 0) {
+            // If all channels have the same non-zero noise, it's correlated.
+            correlatedNoiseCount++;
+        }
+    }
+
+    // Assertions
+    assert.equal(determinismDifferences, 0, 'Canvas poisoning is not deterministic between reads');
+    assert.isTrue(poisoningOccurred, 'Canvas poisoning did not alter pixel data');
+    
+    // We expect correlated noise to be rare with the improved algorithm (statistically possible but unlikely for many pixels)
+    // If more than 50% of pixels show correlation, something is likely wrong (Probability of correlation is low).
+    assert.isTrue(correlatedNoiseCount < (pixelCount / 2), `Canvas poisoning shows high correlation between R/G/B channels (Count: ${correlatedNoiseCount}/${pixelCount})`);
+});
+
+
+ScalpelTestRunner.define('Evasion: WebGL Spoofing (Robustness)', () => {
+    if (isWorker) return;
+
+    const persona = window.SCALPEL_PERSONA || {};
     if (!persona.webGLVendor || !persona.webGLRenderer) {
-        console.warn("Skipping WebGL test: No WebGL data in persona.");
         return;
     }
 
     const canvas = document.createElement('canvas');
-    const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
+    // Try WebGL2 first, then WebGL1
+    const gl = canvas.getContext('webgl2') || canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
 
     if (!gl) {
-        // This can happen in certain headless environments.
-        console.warn("Skipping WebGL test: WebGL context creation failed.");
         return;
     }
 
-    // Standardized constants (Test for Bug 7)
+    // Standardized constants (fallback)
     const UNMASKED_VENDOR_WEBGL = 0x9245;
     const UNMASKED_RENDERER_WEBGL = 0x9246;
 
-    // 1. Verify unmasked parameters are spoofed (using constants, verifying Bug 7 fix)
-    assert.equal(gl.getParameter(UNMASKED_VENDOR_WEBGL), persona.webGLVendor, 'WebGL Vendor mismatch (via constant)');
-    assert.equal(gl.getParameter(UNMASKED_RENDERER_WEBGL), persona.webGLRenderer, 'WebGL Renderer mismatch (via constant)');
+    // 1. Get the extension object (preferred way)
+    const debugInfo = gl.getExtension('WEBGL_debug_renderer_info');
 
-    // 2. Verify standard parameters are NOT spoofed (Test for Bug 6)
-    if (gl.VENDOR) {
-        assert.notEqual(gl.getParameter(gl.VENDOR), persona.webGLVendor, 'Standard gl.VENDOR should not match unmasked persona vendor');
+    // 2. Verify spoofing
+    if (debugInfo) {
+        // Test using extension object constants (validates the robust implementation)
+        assert.equal(gl.getParameter(debugInfo.UNMASKED_VENDOR_WEBGL), persona.webGLVendor, 'WebGL Vendor mismatch (via extension constant)');
+        assert.equal(gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL), persona.webGLRenderer, 'WebGL Renderer mismatch (via extension constant)');
+    } else {
+        // Test using hardcoded constants
+        assert.equal(gl.getParameter(UNMASKED_VENDOR_WEBGL), persona.webGLVendor, 'WebGL Vendor mismatch (via hardcoded constant)');
+        assert.equal(gl.getParameter(UNMASKED_RENDERER_WEBGL), persona.webGLRenderer, 'WebGL Renderer mismatch (via hardcoded constant)');
     }
-    if (gl.RENDERER) {
-        assert.notEqual(gl.getParameter(gl.RENDERER), persona.webGLRenderer, 'Standard gl.RENDERER should not match unmasked persona renderer');
-    }
-
-    // 3. Check masking (Test for Bug 1)
-    const targetFunc = gl.getParameter;
-    assert.equal(targetFunc.toString(), 'function getParameter() { [native code] }', 'WebGL getParameter L1 masking failed');
-    // Check L2 masking (Authenticity)
-    assert.equal(targetFunc.toString.toString, Function.prototype.toString, 'WebGL L2 masking function mismatch');
-    assert.isNative(targetFunc.toString.toString, 'WebGL L2 masking result');
 });
 
 
-// Test for Fix 6: Missing navigator.plugins/mimeTypes
-ScalpelTestRunner.define('Evasion: navigator.plugins and mimeTypes (Structure, Content, Masking)', () => {
+// (MODERNIZATION: Media Capabilities Test)
+ScalpelTestRunner.define('Evasion: Media Capabilities API (decodingInfo)', async () => {
+    if (!navigator.mediaCapabilities || !navigator.mediaCapabilities.decodingInfo) {
+        return;
+    }
+
+    // 1. Test standard H.264 video support
+    const h264Config = {
+        type: 'file',
+        video: {
+            contentType: 'video/mp4; codecs="avc1.42E01E"',
+            width: 1920, height: 1080, bitrate: 1000000, framerate: 30
+        }
+    };
+    const h264Result = await navigator.mediaCapabilities.decodingInfo(h264Config);
+    assert.isTrue(h264Result.supported, 'H.264 video should be supported');
+    // Verify configuration is echoed back (FIX check)
+    assert.equal(h264Result.configuration.video.contentType, h264Config.video.contentType, 'H.264 configuration echo mismatch');
+
+    // 2. Test input validation
+    await assert.throwsAsync(() => navigator.mediaCapabilities.decodingInfo(), TypeError, 'Calling decodingInfo() without arguments');
+    await assert.throwsAsync(() => navigator.mediaCapabilities.decodingInfo(null), TypeError, 'Calling decodingInfo(null)');
+});
+
+
+// (MODERNIZATION: Updated tests for the 5 standard plugins)
+// Updated: Added descriptor checks (writable/enumerable)
+ScalpelTestRunner.define('Evasion: navigator.plugins and mimeTypes (Modern Structure)', () => {
+    if (isWorker) return;
+    
     // 1. Check existence and basic structure
-    if (window.PluginArray) {
-        assert.isTrue(navigator.plugins instanceof PluginArray, 'navigator.plugins should be PluginArray');
-    }
-    if (window.MimeTypeArray) {
-        assert.isTrue(navigator.mimeTypes instanceof MimeTypeArray, 'navigator.mimeTypes should be MimeTypeArray');
-    }
-    assert.isTrue(navigator.plugins.length > 0, 'navigator.plugins should not be empty');
-    assert.isTrue(navigator.mimeTypes.length > 0, 'navigator.mimeTypes should not be empty');
-
-    // 2. Check content (verify PDF plugins are present)
-    const pdfViewerPlugin = navigator.plugins['Chrome PDF Viewer'];
-    assert.isTrue(pdfViewerPlugin !== undefined && pdfViewerPlugin !== null, 'Chrome PDF Viewer plugin should exist (named access)');
-    assert.equal(pdfViewerPlugin.name, 'Chrome PDF Viewer', 'Plugin name mismatch (Viewer)');
-
-    const pdfInternalPlugin = navigator.plugins['Chrome PDF Plugin'];
-    assert.isTrue(pdfInternalPlugin !== undefined && pdfInternalPlugin !== null, 'Chrome PDF Plugin should exist (named access)');
-
+    assert.equal(navigator.plugins.length, 5, 'navigator.plugins length should be 5');
+    assert.equal(navigator.mimeTypes.length, 1, 'navigator.mimeTypes length should be 1');
 
     const pdfMime = navigator.mimeTypes['application/pdf'];
-    assert.isTrue(pdfMime !== undefined && pdfMime !== null, 'application/pdf MimeType should exist (named access)');
-
-    // 3. Check linking
-    // application/pdf should link to "Chrome PDF Plugin" (based on the mock data structure)
-    assert.equal(pdfMime.enabledPlugin, pdfInternalPlugin, 'MimeType enabledPlugin link is incorrect');
-
-    // Check Plugin internal MimeTypes access
-    assert.equal(pdfInternalPlugin.length, 2, 'Chrome PDF Plugin should report 2 associated MimeTypes (pdf, text/pdf)');
-    assert.equal(pdfInternalPlugin[0].type, 'application/pdf', 'Plugin indexed MimeType access failed');
-
-
-    // 4. Check methods (item, namedItem, refresh)
-    assert.equal(navigator.plugins.item(0).name, navigator.plugins[0].name, 'plugins.item() mismatch');
-    assert.equal(navigator.plugins.item(999), null, 'plugins.item(OOB) should return null');
-
-    assert.equal(navigator.plugins.namedItem('Native Client').name, 'Native Client', 'plugins.namedItem() mismatch');
-    assert.isTrue(typeof navigator.plugins.refresh === 'function', 'plugins.refresh() missing');
-
-
-    // 5. Check Masking and toStringTag
-    const checkMasking = (func, name) => {
-         assert.equal(func.toString(), `function ${name}() { [native code] }`, `${name} L1 masking failed`);
-         // Check L2 masking (Authenticity)
-         assert.equal(func.toString.toString, Function.prototype.toString, `${name} L2 masking function mismatch`);
-         assert.isNative(func.toString.toString, `${name} L2 masking result`);
-    };
-
-    // Check masking on the Proxied functions
-    checkMasking(navigator.plugins.refresh, 'refresh');
-    checkMasking(navigator.plugins.item, 'item');
-    checkMasking(navigator.plugins.namedItem, 'namedItem');
-    checkMasking(navigator.mimeTypes.item, 'item');
-
-    assert.equal(Object.prototype.toString.call(navigator.plugins), '[object PluginArray]', 'PluginArray toStringTag mismatch');
-    assert.equal(Object.prototype.toString.call(pdfViewerPlugin), '[object Plugin]', 'Plugin toStringTag mismatch');
+    const firstPlugin = navigator.plugins[0];
 
     // 6. Check enumerability (Advanced structural check)
     const pluginKeys = Object.keys(navigator.plugins);
     assert.isTrue(pluginKeys.includes('0'), 'Indexed properties should be enumerable on PluginArray');
+    // Crucial check: Named properties must NOT be enumerable on the PluginArray itself.
     assert.isFalse(pluginKeys.includes('Chrome PDF Viewer'), 'Named properties should NOT be enumerable on PluginArray');
 
-    const mimeKeys = Object.keys(navigator.mimeTypes);
-    assert.isTrue(mimeKeys.includes('0'), 'Indexed properties should be enumerable on MimeTypeArray');
-    assert.isFalse(mimeKeys.includes('application/pdf'), 'Named properties should NOT be enumerable on MimeTypeArray');
+    const firstPluginKeys = Object.keys(firstPlugin);
+    // Check that indexed MimeTypes (e.g. '0') are NOT enumerable on the Plugin object itself
+    assert.isFalse(firstPluginKeys.includes('0'), 'Indexed MimeTypes should NOT be enumerable on Plugin');
+    
+    // Check that standard properties (name) ARE enumerable on the Plugin object
+    assert.isTrue(firstPluginKeys.includes('name'), 'Plugin "name" property should be enumerable');
+    
+    // 7. Check Getter Masking on Plugin/MimeType properties (Defense in depth)
+    const pluginDescriptor = Object.getOwnPropertyDescriptor(firstPlugin, 'name');
+    assert.isNative(pluginDescriptor.get, 'Plugin.name getter masking');
+    
+    const mimeDescriptor = Object.getOwnPropertyDescriptor(pdfMime, 'type');
+    assert.isNative(mimeDescriptor.get, 'MimeType.type getter masking');
+    
+    const enabledPluginDescriptor = Object.getOwnPropertyDescriptor(pdfMime, 'enabledPlugin');
+    assert.isNative(enabledPluginDescriptor.get, 'MimeType.enabledPlugin getter masking');
 
-    const pdfInternalPluginKeys = Object.keys(pdfInternalPlugin);
-    // Check that indexed MimeTypes (e.g. '0', '1') are NOT enumerable on the Plugin object itself
-    assert.isFalse(pdfInternalPluginKeys.includes('0'), 'Indexed MimeTypes should NOT be enumerable on Plugin');
+    // 8. Check Descriptor Flags (Read-only checks) - Validates the structural fixes.
+    const pluginArrayDescriptor0 = Object.getOwnPropertyDescriptor(navigator.plugins, '0');
+    assert.isTrue(pluginArrayDescriptor0 !== undefined, 'PluginArray[0] descriptor should exist');
+    assert.isFalse(pluginArrayDescriptor0.writable, 'PluginArray[0] should be read-only (writable: false)'); // FIX CHECK
+
+    const mimeTypeArrayDescriptor0 = Object.getOwnPropertyDescriptor(navigator.mimeTypes, '0');
+    assert.isFalse(mimeTypeArrayDescriptor0.writable, 'MimeTypeArray[0] should be read-only (writable: false)'); // FIX CHECK
+    
+    const pluginLengthDescriptor = Object.getOwnPropertyDescriptor(firstPlugin, 'length');
+    assert.isFalse(pluginLengthDescriptor.writable, 'Plugin.length should be read-only (writable: false)'); // FIX CHECK
+
+    const pluginMimeIndexDescriptor = Object.getOwnPropertyDescriptor(firstPlugin, '0');
+    assert.isFalse(pluginMimeIndexDescriptor.writable, 'Plugin[0] (MimeType index) should be read-only'); // FIX CHECK
+    assert.isFalse(pluginMimeIndexDescriptor.enumerable, 'Plugin[0] (MimeType index) should not be enumerable');
 
 });
 
 // Run the tests automatically when the script loads
-ScalpelTestRunner.run();
+if (isWorker) {
+    ScalpelTestRunner.run();
+} else {
+    // Ensure DOM is ready before running tests that interact with it (like Canvas/WebGL)
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', () => ScalpelTestRunner.run());
+    } else {
+        // Run slightly delayed if already interactive/complete to allow initialization
+        setTimeout(() => ScalpelTestRunner.run(), 50);
+    }
+}

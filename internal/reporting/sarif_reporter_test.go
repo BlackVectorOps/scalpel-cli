@@ -4,9 +4,7 @@ package reporting_test
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"strings"
 	"sync"
 	"testing"
 
@@ -15,39 +13,34 @@ import (
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/reporting"
-
-	// Assuming the internal sarif definitions are located here
 	"github.com/xkilldash9x/scalpel-cli/internal/reporting/sarif"
 )
 
-// MockWriteCloser allows capturing output and simulating I/O errors.
+// MockWriteCloser is a mock for io.WriteCloser to test error handling.
 type MockWriteCloser struct {
-	Buffer    *bytes.Buffer
-	FailWrite bool
+	*bytes.Buffer
 	FailClose bool
+	FailWrite bool
 }
 
-// Write writes to the internal buffer, simulating a write error if configured.
-func (m *MockWriteCloser) Write(p []byte) (n int, err error) {
-	if m.FailWrite {
-		return 0, errors.New("simulated write error")
-	}
-	return m.Buffer.Write(p)
-}
-
-// Close simulates a closing error if configured.
 func (m *MockWriteCloser) Close() error {
 	if m.FailClose {
-		return errors.New("simulated close error")
+		return fmt.Errorf("mock close error")
 	}
 	return nil
 }
 
-func setupSARIFTest(_ *testing.T) (*reporting.SARIFReporter, *MockWriteCloser) {
-	mockWriter := &MockWriteCloser{Buffer: new(bytes.Buffer)}
-	// Test the dependency injection of the version string
-	reporter := reporting.NewSARIFReporter(mockWriter, "v1.2.3-test")
-	return reporter, mockWriter
+func (m *MockWriteCloser) Write(p []byte) (n int, err error) {
+	if m.FailWrite {
+		return 0, fmt.Errorf("mock write error")
+	}
+	return m.Buffer.Write(p)
+}
+
+func setupSARIFTest(_ *testing.T) (reporting.Reporter, *MockWriteCloser) {
+	writer := &MockWriteCloser{Buffer: new(bytes.Buffer)}
+	reporter := reporting.NewSARIFReporter(writer, "v1.2.3-test")
+	return reporter, writer
 }
 
 // TestSARIFReporter_Initialization verifies the structure of an empty report.
@@ -63,7 +56,7 @@ func TestSARIFReporter_Initialization(t *testing.T) {
 	err = json.Unmarshal(rawOutput, &log)
 	require.NoError(t, err, "Output should be valid SARIF JSON")
 
-	assert.Equal(t, reporting.SARIFVersion, log.Version)
+	assert.Equal(t, "2.1.0", log.Version)
 	require.Len(t, log.Runs, 1)
 	run := log.Runs[0]
 
@@ -81,7 +74,6 @@ func TestSARIFReporter_Initialization(t *testing.T) {
 }
 
 // TestSARIFReporter_WriteAndClose verifies the end-to-end process.
-// (Updated to verify fixes for Bug 1 and Bug 2)
 func TestSARIFReporter_WriteAndClose(t *testing.T) {
 	reporter, writer := setupSARIFTest(t)
 
@@ -111,7 +103,7 @@ func TestSARIFReporter_WriteAndClose(t *testing.T) {
 		CWE:               []string{"CWE-79"},
 	}
 
-	// Finding 4 tests empty description (creates a new rule because fingerprint differs) (Bug 1 verification)
+	// Finding 4 tests empty description (creates a new rule because fingerprint differs)
 	finding4 := schemas.Finding{
 		Target:            "http://example.com/4",
 		Severity:          schemas.SeverityLow,
@@ -150,7 +142,7 @@ func TestSARIFReporter_WriteAndClose(t *testing.T) {
 	assert.Equal(t, ruleID1, run.Results[2].RuleID)
 	assert.Equal(t, string(sarif.LevelWarning), string(run.Results[2].Level))
 
-	// Result 4 (Must have a new RuleID due to different fingerprint) (Bug 1 verification)
+	// Result 4 (Must have a new RuleID due to different fingerprint)
 	ruleID4 := run.Results[3].RuleID
 	assert.NotEqual(t, ruleID1, ruleID4)
 	// It should have a suffix because the base name collided.
@@ -172,7 +164,6 @@ func TestSARIFReporter_WriteAndClose(t *testing.T) {
 	require.NotNil(t, sqliRule)
 	require.NotNil(t, xssRuleEmptyDesc)
 
-	// FIX VERIFICATION (Bug 2): Ensure FullDescription uses Description, not Recommendation.
 	assert.Equal(t, "Details about XSS.", *xssRule.FullDescription.Text, "XSS FullDescription mismatch")
 	assert.Equal(t, "Details about SQLi.", *sqliRule.FullDescription.Text, "SQLi FullDescription mismatch")
 	assert.Equal(t, "", *xssRuleEmptyDesc.FullDescription.Text, "XSS Empty Desc FullDescription mismatch")
@@ -186,7 +177,7 @@ func TestSARIFReporter_WriteAndClose(t *testing.T) {
 }
 
 // TestSARIFReporter_RuleCollisionHandling verifies that findings with the same name
-// but different characteristics generate distinct rules. (Bug 1 verification)
+// but different characteristics generate distinct rules.
 func TestSARIFReporter_RuleCollisionHandling(t *testing.T) {
 	reporter, writer := setupSARIFTest(t)
 
@@ -272,7 +263,6 @@ func TestSARIFReporter_RuleCollisionHandling(t *testing.T) {
 }
 
 // TestSARIFReporter_RuleIDSanitization tests the cleaning and normalization of vulnerability names.
-// (Updated to verify Bug 1 and Bug 3 fixes)
 func TestSARIFReporter_RuleIDSanitization(t *testing.T) {
 	reporter, writer := setupSARIFTest(t)
 
@@ -284,13 +274,10 @@ func TestSARIFReporter_RuleIDSanitization(t *testing.T) {
 		{"Path Traversal / LFI", "SCALPEL-PATH-TRAVERSAL-LFI"},
 		{"User@Example!#$%^", "SCALPEL-USER-EXAMPLE"},
 		{"!Leading/Trailing!", "SCALPEL-LEADING-TRAILING"},
-		// Hyphen is now treated as a separator by the regex (Bug 3), but preserved if singular and surrounded by allowed chars.
 		{"Mixed.Case_Test-1", "SCALPEL-MIXED.CASE_TEST-1"},
 		{"", "SCALPEL-UNNAMED-VULNERABILITY"},
 		{"!@#", "SCALPEL-UNKNOWN-VULNERABILITY"},
-		// FIX VERIFICATION (Bug 3): Consecutive hyphens are collapsed.
 		{"Type-A--Sub-Type-B", "SCALPEL-TYPE-A-SUB-TYPE-B"},
-		// FIX VERIFICATION (Bug 3): Mixed symbols and hyphens are collapsed.
 		{"A-!/--B", "SCALPEL-A-B"},
 	}
 
@@ -300,9 +287,7 @@ func TestSARIFReporter_RuleIDSanitization(t *testing.T) {
 	for i, tt := range tests {
 		finding := schemas.Finding{
 			VulnerabilityName: tt.vulnName,
-			// Use index in description to guarantee unique fingerprints (Bug 1 requirement)
-			// This prevents the deduplication logic from merging these test cases.
-			Description: fmt.Sprintf("Test case %d", i),
+			Description:       fmt.Sprintf("Test case %d", i),
 		}
 		reporter.Write(&schemas.ResultEnvelope{Findings: []schemas.Finding{finding}})
 		uniqueIDs[tt.expectedID] = true
@@ -322,7 +307,6 @@ func TestSARIFReporter_RuleIDSanitization(t *testing.T) {
 }
 
 // TestSARIFReporter_Concurrency ensures thread safety (run with `go test -race`).
-// (Updated for Bug 1 fingerprinting requirements)
 func TestSARIFReporter_Concurrency(t *testing.T) {
 	reporter, writer := setupSARIFTest(t)
 
@@ -337,16 +321,13 @@ func TestSARIFReporter_Concurrency(t *testing.T) {
 		go func(id int) {
 			defer wg.Done()
 			for j := 0; j < findingsPerGoroutine; j++ {
-				// Use a limited set of rule definitions
 				ruleIndex := (id + j) % numUniqueRules
 				vulnName := fmt.Sprintf("Concurrent Vuln %d", ruleIndex)
 
 				finding := schemas.Finding{
 					VulnerabilityName: vulnName,
-					// Ensure the description matches the rule index for consistent fingerprinting (Bug 1)
-					Description: fmt.Sprintf("Description %d", ruleIndex),
+					Description:       fmt.Sprintf("Description %d", ruleIndex),
 				}
-				// The Write method must be safe due to the internal mutex
 				err := reporter.Write(&schemas.ResultEnvelope{Findings: []schemas.Finding{finding}})
 				assert.NoError(t, err)
 			}
@@ -361,15 +342,12 @@ func TestSARIFReporter_Concurrency(t *testing.T) {
 	err := json.Unmarshal(writer.Buffer.Bytes(), &log)
 	require.NoError(t, err)
 
-	// Total findings = numGoroutines * findingsPerGoroutine
 	assert.Len(t, log.Runs[0].Results, numGoroutines*findingsPerGoroutine)
-	// Total rules should match the unique rules generated, proving deduplication worked under concurrency
 	assert.Len(t, log.Runs[0].Tool.Driver.Rules, numUniqueRules)
 }
 
 func TestSARIFReporter_ErrorHandling(t *testing.T) {
 	t.Run("Close Error", func(t *testing.T) {
-		// Use the mock writer to simulate a close error
 		mockWriter := &MockWriteCloser{Buffer: new(bytes.Buffer), FailClose: true}
 		reporter := reporting.NewSARIFReporter(mockWriter, "v1.0.0-test")
 
@@ -379,12 +357,9 @@ func TestSARIFReporter_ErrorHandling(t *testing.T) {
 	})
 
 	t.Run("Encode Error (simulated by write failure)", func(t *testing.T) {
-		// JSON encoding writes to the writer. If the writer fails, encoding fails.
 		mockWriter := &MockWriteCloser{Buffer: new(bytes.Buffer), FailWrite: true}
 		reporter := reporting.NewSARIFReporter(mockWriter, "v1.0.0-test")
 
-		// Add data to ensure the encoder attempts to write
-		// Use a unique description to ensure a rule is generated (Bug 1 requirement)
 		reporter.Write(&schemas.ResultEnvelope{Findings: []schemas.Finding{{Description: "force write"}}})
 
 		err := reporter.Close()
@@ -393,55 +368,15 @@ func TestSARIFReporter_ErrorHandling(t *testing.T) {
 	})
 }
 
-// Test for the private severity mapping logic.
-func TestMapSeverityToSARIFLevel(t *testing.T) {
-	// Since the function mapSeverityToSARIFLevel is private (lowercase), we replicate its logic here to test it.
-	mapSeverityToSARIFLevel := func(severity schemas.Severity) string {
-		switch strings.ToLower(string(severity)) {
-		case "critical", "high":
-			return string(sarif.LevelError)
-		case "medium":
-			return string(sarif.LevelWarning)
-		// REFACTOR: Changed "informational" to "info" to match schemas.findings.go
-		case "low", "info":
-			return string(sarif.LevelNote)
-		default:
-			return string(sarif.LevelNote)
-		}
-	}
-
-	tests := []struct {
-		input schemas.Severity
-		want  string
-	}{
-		{schemas.SeverityCritical, string(sarif.LevelError)},
-		{schemas.SeverityHigh, string(sarif.LevelError)},
-		{schemas.SeverityMedium, string(sarif.LevelWarning)},
-		{schemas.SeverityLow, string(sarif.LevelNote)},
-		// REFACTOR: Changed const from SeverityInformational to SeverityInfo
-		{schemas.SeverityInfo, string(sarif.LevelNote)},
-		{"HIGH", string(sarif.LevelError)}, // Case insensitivity
-		{"Unknown", string(sarif.LevelNote)},
-	}
-
-	for _, tt := range tests {
-		t.Run(string(tt.input), func(t *testing.T) {
-			assert.Equal(t, tt.want, mapSeverityToSARIFLevel(tt.input))
-		})
-	}
-}
-
 // Helper function to compare expected CWE strings with the actual interface{} slice from JSON unmarshalling.
-// (Added for Bug 1 verification)
 func assertCWE(t *testing.T, expected []string, actual interface{}) {
-	// Handle nil case gracefully
 	if actual == nil {
 		assert.Empty(t, expected, "Expected CWEs but found nil")
 		return
 	}
 
 	cweList, ok := actual.([]interface{})
-	require.True(t, ok, "CWE value should be a slice of interfaces during test time reflection, got %T", actual)
+	require.True(t, ok, "CWE value should be a slice of interfaces, got %T", actual)
 
 	actualCWEStrings := make([]string, len(cweList))
 	for i, v := range cweList {
@@ -449,6 +384,5 @@ func assertCWE(t *testing.T, expected []string, actual interface{}) {
 		require.True(t, isString, "CWE slice element expected to be string, got %T", v)
 		actualCWEStrings[i] = str
 	}
-	// Use ElementsMatch for order-independent comparison (important due to sorting in fingerprinting)
 	assert.ElementsMatch(t, expected, actualCWEStrings)
 }

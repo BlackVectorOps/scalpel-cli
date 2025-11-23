@@ -2,14 +2,19 @@
 package stealth
 
 import (
+	"context"
 	_ "embed"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sort"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/chromedp/cdproto/debugger"
+	"github.com/chromedp/cdproto/profiler"
 	"github.com/chromedp/chromedp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -49,6 +54,30 @@ func TestJavascriptEvasions(t *testing.T) {
 	err := chromedp.Run(ctx, Apply(testPersona, nil))
 	require.NoError(t, err, "Applying stealth evasions failed")
 
+	// -- Coverage Setup --
+	// Enable Profiler and Debugger domains to capture JS execution stats.
+	err = chromedp.Run(ctx,
+		chromedp.ActionFunc(func(ctx context.Context) error {
+			// FIX: debugger.Enable() returns (debugger.ID, error). Ignore the ID.
+			if _, err := debugger.Enable().Do(ctx); err != nil {
+				return err
+			}
+			// profiler.Enable() usually returns just error, but we handle it cleanly.
+			if err := profiler.Enable().Do(ctx); err != nil {
+				return err
+			}
+
+			// FIX: profiler.StartPreciseCoverage returns (timestamp, error).
+			// We cannot return it directly because ActionFunc expects func() error.
+			_, err := profiler.StartPreciseCoverage().
+				WithDetailed(true).
+				WithCallCount(false).
+				Do(ctx)
+			return err
+		}),
+	)
+	require.NoError(t, err, "Failed to enable CDP profiler/debugger")
+
 	// 4. Setup Test Server
 	// The server serves a blank page where we can run the tests.
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -69,6 +98,10 @@ func TestJavascriptEvasions(t *testing.T) {
 	)
 	require.NoError(t, err, "Chromedp run for JS tests failed or timed out waiting for results")
 	require.NotNil(t, rawResults, "JS Test results should not be nil")
+
+	// -- Coverage Collection --
+	// Capture the coverage data before we process results.
+	calculateJSCoverage(t, ctx)
 
 	// 6. Process Results
 	// Convert the raw interface{} result into a structured format for analysis.
@@ -102,4 +135,116 @@ func TestJavascriptEvasions(t *testing.T) {
 	t.Log("----------------------------------------------------")
 
 	assert.False(t, failed, "Some JavaScript evasion tests failed. Check logs above.")
+}
+
+// calculateJSCoverage retrieves coverage data from CDP, identifies the evasions script,
+// and logs the percentage of code executed.
+func calculateJSCoverage(t *testing.T, ctx context.Context) {
+	var coverage []*profiler.ScriptCoverage
+	err := chromedp.Run(ctx,
+		chromedp.ActionFunc(func(ctx context.Context) error {
+			var err error
+			// FIX: TakePreciseCoverage returns ([]ScriptCoverage, timestamp, error).
+			// We ignore the timestamp (2nd return value).
+			coverage, _, err = profiler.TakePreciseCoverage().Do(ctx)
+			return err
+		}),
+	)
+	if err != nil {
+		t.Logf("Warning: Failed to retrieve JS coverage: %v", err)
+		return
+	}
+
+	found := false
+	for _, script := range coverage {
+		// We need to identify our injected script. Since it's injected via
+		// Page.addScriptToEvaluateOnNewDocument, it might not have a friendly URL.
+		// We fetch the source and check for a unique signature ("SCALPEL_PERSONA").
+		var source string
+		err := chromedp.Run(ctx,
+			chromedp.ActionFunc(func(ctx context.Context) error {
+				var err error
+				// FIX: GetScriptSource returns (source, bytecode, error).
+				// We ignore the bytecode (2nd return value).
+				source, _, err = debugger.GetScriptSource(script.ScriptID).Do(ctx)
+				return err
+			}),
+		)
+		if err != nil {
+			continue
+		}
+
+		// Check for our signature
+		if strings.Contains(source, "SCALPEL_PERSONA") && strings.Contains(source, "evasions.js") {
+			found = true
+			totalBytes := float64(len(source))
+			coveredBytes := calculateCoveredBytes(script.Functions)
+
+			percentage := (coveredBytes / totalBytes) * 100.0
+			t.Logf("--- JS Code Coverage: %.2f%% (%d/%d bytes) ---", percentage, int64(coveredBytes), int64(totalBytes))
+
+			// Threshold check (optional, but good for sanity)
+			if percentage < 10.0 {
+				t.Log("Warning: JS Coverage is suspiciously low. Are the tests actually exercising the evasions?")
+			}
+			break
+		}
+	}
+
+	if !found {
+		t.Log("Warning: Could not locate 'evasions.js' in CDP coverage data.")
+	}
+}
+
+// calculateCoveredBytes merges overlapping execution ranges and sums the unique covered bytes.
+func calculateCoveredBytes(functions []*profiler.FunctionCoverage) float64 {
+	type interval struct {
+		start, end int64
+	}
+	var ranges []interval
+
+	// Collect all ranges where Count > 0 (code was executed)
+	for _, fn := range functions {
+		for _, r := range fn.Ranges {
+			if r.Count > 0 {
+				ranges = append(ranges, interval{start: r.StartOffset, end: r.EndOffset})
+			}
+		}
+	}
+
+	if len(ranges) == 0 {
+		return 0
+	}
+
+	// Sort ranges by start offset
+	sort.Slice(ranges, func(i, j int) bool {
+		return ranges[i].start < ranges[j].start
+	})
+
+	// Merge overlapping intervals
+	var merged []interval
+	current := ranges[0]
+
+	for i := 1; i < len(ranges); i++ {
+		next := ranges[i]
+		if next.start < current.end {
+			// Overlap: extend current end if next goes further
+			if next.end > current.end {
+				current.end = next.end
+			}
+		} else {
+			// No overlap: push current and start new
+			merged = append(merged, current)
+			current = next
+		}
+	}
+	merged = append(merged, current)
+
+	// Sum lengths
+	var total int64
+	for _, m := range merged {
+		total += (m.end - m.start)
+	}
+
+	return float64(total)
 }
