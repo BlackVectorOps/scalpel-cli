@@ -21,14 +21,14 @@ type Reporter interface {
 	Close() error
 }
 
-//  wraps an io.Writer like os.Stdout and provides a no-op Close method.
+// NopWriteCloser wraps an io.Writer like os.Stdout and provides a no-op Close method.
 // This prevents closing standard streams when the reporter attempts to close its writer.
-type nopWriteCloser struct {
+type NopWriteCloser struct {
 	io.Writer
 }
 
 // Close is a no-op for standard streams.
-func (nwc *nopWriteCloser) Close() error {
+func (nwc *NopWriteCloser) Close() error {
 	return nil
 }
 
@@ -42,7 +42,7 @@ func New(format, outputPath, toolVersion string) (Reporter, error) {
 
 	if isStdOut {
 		// Wrap Stdout so Close() is a no-op.
-		writer = &nopWriteCloser{os.Stdout}
+		writer = &NopWriteCloser{os.Stdout}
 		logger.Debug("Configured reporter to write to stdout")
 	} else {
 		f, err := os.Create(outputPath)

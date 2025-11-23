@@ -86,16 +86,14 @@ func (p *PostgresKG) AddEdge(ctx context.Context, edge schemas.Edge) error {
 		props = json.RawMessage("{}")
 	}
 
-	// The query is synchronized with the kg_edges table structure.
-	// Fix 8: Changed conflict target to (id) to align with InMemoryKG behavior and allow structural updates.
-	// We must update all fields as they might have changed.
+	// FIX: We changed the ON CONFLICT target from (id) to (from_node, to_node, type).
+	// This allows us to gracefully handle "re-discovery" of existing relationships
+	// without crashing on the Primary Key constraint.
+	// Note: We DO NOT update the 'id' or 'created_at' to preserve the original record's identity.
 	_, err := p.pool.Exec(ctx, `
         INSERT INTO kg_edges (id, from_node, to_node, type, label, properties, created_at, last_seen)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-        ON CONFLICT (id) DO UPDATE SET
-            from_node = EXCLUDED.from_node,
-            to_node = EXCLUDED.to_node,
-            type = EXCLUDED.type,
+        ON CONFLICT (from_node, to_node, type) DO UPDATE SET
             label = EXCLUDED.label,
             properties = EXCLUDED.properties,
             last_seen = EXCLUDED.last_seen;
@@ -115,7 +113,6 @@ func (p *PostgresKG) AddEdge(ctx context.Context, edge schemas.Edge) error {
 
 	p.log.Debug(
 		"Edge added or updated successfully",
-		zap.String("edge_id", edge.ID),
 		zap.String("from_node", edge.From),
 		zap.String("to_node", edge.To),
 		zap.String("edge_type", string(edge.Type)),

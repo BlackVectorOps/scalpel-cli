@@ -891,24 +891,24 @@ func NewConfigFromViper(v *viper.Viper) (*Config, error) {
 		}
 	}
 
-	// -- ROBUST FALLBACK BLOCK --
-	// Ensure the models map is populated, falling back to defaults if necessary.
-	// Viper's behavior when merging maps can be inconsistent, especially if the config file is missing or the key is empty.
+	// -- MERGE DEFAULTS BLOCK --
+	// Viper overwrites maps completely. If config.yaml defines ANY models,
+	// the default "gemini-2.5-flash" entries are lost.
+	// We must manually merge the hardcoded defaults back in if they are missing.
+	defaults := getDefaultLLMModels()
 
-	// 1. Initialize the map if nil (Viper didn't create it).
+	// Ensure map exists
 	if cfg.AgentCfg.LLM.Models == nil {
 		cfg.AgentCfg.LLM.Models = make(map[string]LLMModelConfig)
 	}
 
-	// 2. Check if the map is empty after unmarshaling.
-	// FIX: The previous logic incorrectly attempted a manual merge which was redundant with Viper's behavior
-	// and potentially flawed. The corrected logic ensures that if Viper fails to load models (resulting in an empty map),
-	// we fall back to the definitive defaults.
-	if len(cfg.AgentCfg.LLM.Models) == 0 {
-		// If the map is empty, we fall back to the definitive defaults.
-		cfg.AgentCfg.LLM.Models = getDefaultLLMModels()
+	// Loop through defaults and add them only if the user hasn't defined them
+	for key, defaultModel := range defaults {
+		if _, exists := cfg.AgentCfg.LLM.Models[key]; !exists {
+			cfg.AgentCfg.LLM.Models[key] = defaultModel
+		}
 	}
-	// -- END ROBUST FALLBACK BLOCK --
+	// -- END MERGE DEFAULTS BLOCK --
 
 	// -- API KEY INJECTION BLOCK --
 	// Manually inject API keys from environment variables if they are not set in the config file.
@@ -989,7 +989,7 @@ func getDefaultLLMModels() map[string]LLMModelConfig {
 		// Gemini 2.5 Flash (Stable) - High speed, lower cost
 		"gemini-2.5-flash": {
 			Provider:      ProviderGemini,
-			Model:         "gemini-2.5-flash-latest",
+			Model:         "gemini-2-5-flash",
 			APIKey:        "", // Should be loaded from env
 			APITimeout:    90 * time.Second,
 			Temperature:   0.8,
@@ -1001,7 +1001,7 @@ func getDefaultLLMModels() map[string]LLMModelConfig {
 		// Gemini 2.5 Pro (Stable) - Reliable production workhorse
 		"gemini-2.5-pro": {
 			Provider:      ProviderGemini,
-			Model:         "gemini-2.5-pro-latest",
+			Model:         "gemini-2-5-pro",
 			APIKey:        "", // Should be loaded from env
 			APITimeout:    2 * time.Minute,
 			Temperature:   0.7,
