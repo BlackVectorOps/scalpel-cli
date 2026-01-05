@@ -13,6 +13,7 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
 	"github.com/xkilldash9x/scalpel-cli/internal/browser/humanoid"
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
+	"github.com/xkilldash9x/scalpel-cli/pkg/observability"
 	"go.uber.org/zap"
 )
 
@@ -48,8 +49,8 @@ func safeGet[T any](args mock.Arguments, index int) T {
 	return zero
 }
 
-func (m *MockConfig) Logger() config.LoggerConfig {
-	return safeGet[config.LoggerConfig](m.Called(), 0)
+func (m *MockConfig) Logger() observability.LoggerConfig {
+	return safeGet[observability.LoggerConfig](m.Called(), 0)
 }
 
 func (m *MockConfig) Database() config.DatabaseConfig {

@@ -1,4 +1,4 @@
-// File: internal/observability/logger.go
+// File: pkg/observability/logger.go
 package observability
 
 import (
@@ -8,17 +8,44 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/xkilldash9x/scalpel-cli/internal/config"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"gopkg.in/natefinch/lumberjack.v2"
 )
 
+// -- Moved from internal/config to make them accessible --
+
+// LoggerConfig defines all settings related to logging.
+type LoggerConfig struct {
+	Level       string      `mapstructure:"level" yaml:"level"`
+	Format      string      `mapstructure:"format" yaml:"format"`
+	AddSource   bool        `mapstructure:"add_source" yaml:"add_source"`
+	ServiceName string      `mapstructure:"service_name" yaml:"service_name"`
+	LogFile     string      `mapstructure:"log_file" yaml:"log_file"`
+	MaxSize     int         `mapstructure:"max_size" yaml:"max_size"`
+	MaxBackups  int         `mapstructure:"max_backups" yaml:"max_backups"`
+	MaxAge      int         `mapstructure:"max_age" yaml:"max_age"`
+	Compress    bool        `mapstructure:"compress" yaml:"compress"`
+	Colors      ColorConfig `mapstructure:"colors" yaml:"colors"`
+}
+
+// ColorConfig specifies the terminal color codes for different log levels.
+type ColorConfig struct {
+	Debug  string `mapstructure:"debug" yaml:"debug"`
+	Info   string `mapstructure:"info" yaml:"info"`
+	Warn   string `mapstructure:"warn" yaml:"warn"`
+	Error  string `mapstructure:"error" yaml:"error"`
+	DPanic string `mapstructure:"dpanic" yaml:"dpanic"`
+	Panic  string `mapstructure:"panic" yaml:"panic"`
+	Fatal  string `mapstructure:"fatal" yaml:"fatal"`
+}
+
+// -- End of Config Types --
+
 var (
 	// globalLogger stores the global logger instance safely across goroutines.
 	globalLogger atomic.Pointer[zap.Logger]
 	// once ensures that initialization happens exactly once.
-	// We use an atomic pointer to sync.Once to allow for safe resetting in tests.
 	oncePtr atomic.Pointer[sync.Once]
 )
 
@@ -52,8 +79,7 @@ func init() {
 }
 
 // Initialize sets up the global Zap logger based on configuration and a specified output writer.
-// This is the core, flexible initializer.
-func Initialize(cfg config.LoggerConfig, consoleWriter zapcore.WriteSyncer) {
+func Initialize(cfg LoggerConfig, consoleWriter zapcore.WriteSyncer) {
 	// Load the current 'Once' instance
 	o := oncePtr.Load()
 	o.Do(func() {
@@ -68,7 +94,7 @@ func Initialize(cfg config.LoggerConfig, consoleWriter zapcore.WriteSyncer) {
 
 		if cfg.LogFile != "" {
 			// File encoder is always JSON for structured logging.
-			fileEncoder := getEncoder(config.LoggerConfig{Format: "json"})
+			fileEncoder := getEncoder(LoggerConfig{Format: "json"})
 			// lumberjack handles file rotation and thread-safe writes.
 			fileWriter := zapcore.AddSync(&lumberjack.Logger{
 				Filename:   cfg.LogFile,
@@ -88,40 +114,31 @@ func Initialize(cfg config.LoggerConfig, consoleWriter zapcore.WriteSyncer) {
 		}
 
 		logger := zap.New(core, options...).Named(cfg.ServiceName)
-		globalLogger.Store(logger) // Atomically store the initialized logger.
+		globalLogger.Store(logger)
 
-		// Replace the standard library logger and Zap's global loggers.
 		zap.ReplaceGlobals(logger)
 		zap.RedirectStdLog(logger)
 	})
 }
 
 // InitializeLogger is a convenience wrapper around Initialize for production use.
-// It defaults console output to a locked Stdout.
-func InitializeLogger(cfg config.LoggerConfig) {
+func InitializeLogger(cfg LoggerConfig) {
 	Initialize(cfg, zapcore.Lock(os.Stdout))
 }
 
 // ResetForTest resets the sync.Once and clears the global logger.
-// This function should ONLY be used in tests to ensure isolation.
 func ResetForTest() {
 	globalLogger.Store(nil)
-	// Atomically replace the old sync.Once with a fresh one
 	oncePtr.Store(new(sync.Once))
 }
 
 // SetLogger is a test helper that forcibly replaces the global logger instance.
-// This should ONLY be used in tests to inject a specific logger (like a test logger)
-// and bypass the sync.Once mechanism.
 func SetLogger(logger *zap.Logger) {
 	globalLogger.Store(logger)
-	// Also replace the zap global logger to capture any logs from third-party libs
-	// that might use it.
 	zap.ReplaceGlobals(logger)
 }
 
-// newColorizedLevelEncoder creates a zapcore.LevelEncoder that colorizes the log level.
-func newColorizedLevelEncoder(colors config.ColorConfig) zapcore.LevelEncoder {
+func newColorizedLevelEncoder(colors ColorConfig) zapcore.LevelEncoder {
 	return func(level zapcore.Level, enc zapcore.PrimitiveArrayEncoder) {
 		var color string
 		levelStr := strings.ToUpper(level.String())
@@ -153,83 +170,46 @@ func newColorizedLevelEncoder(colors config.ColorConfig) zapcore.LevelEncoder {
 	}
 }
 
-// getEncoder selects and configures the appropriate log encoder based on the
-// provided configuration. It supports "json" for structured logging and a custom
-// "console" format for human-readable, colorized terminal output.
-func getEncoder(cfg config.LoggerConfig) zapcore.Encoder {
-	// --- Base Configuration ---
-	// Start with production-ready encoder settings.
-	// This includes EncodeCaller = ShortCallerEncoder by default.
+func getEncoder(cfg LoggerConfig) zapcore.Encoder {
 	encoderConfig := zap.NewProductionEncoderConfig()
-	// Use a more human-readable time format.
 	encoderConfig.EncodeTime = zapcore.TimeEncoderOfLayout("2006-01-02T15:04:05.000Z07:00")
 
-	// --- Console Format ---
-	// The console format is optimized for readability in a terminal.
 	if cfg.Format == "console" {
-		// Enable colorized log levels for better visual distinction.
 		encoderConfig.EncodeLevel = newColorizedLevelEncoder(cfg.Colors)
-
-		// Note: We DO NOT set EncodeCaller to nil here.
-		// If the Entry has a caller (e.g. from zap.AddCaller), we must have an encoder
-		// or jsonEncoder.EncodeEntry will panic.
-		// We rely on the ShortCallerEncoder inherited from NewProductionEncoderConfig.
-
-		// Customize the encoder to create a clean, single-line log message.
-		// This avoids the multi-line, key-value output of the default console encoder.
 		return newCustomConsoleEncoder(encoderConfig)
 	}
 
-	// --- JSON Format (Default) ---
-	// The JSON format is ideal for production environments where logs are parsed
-	// by log management systems (e.g., ELK, Splunk, Datadog).
-	encoderConfig.EncodeLevel = zapcore.CapitalLevelEncoder // e.g., "INFO", "ERROR"
+	encoderConfig.EncodeLevel = zapcore.CapitalLevelEncoder
 	return zapcore.NewJSONEncoder(encoderConfig)
 }
 
-// newCustomConsoleEncoder creates a Zap encoder with a custom format optimized for
-// human readability in a terminal. It produces a clean, single-line output that
-// includes the timestamp, a color-coded level, the logger's name (component),
-// the main message, and any structured fields as a JSON blob.
 func newCustomConsoleEncoder(cfg zapcore.EncoderConfig) zapcore.Encoder {
-	// We create a new encoder configuration to avoid modifying the original.
-	// This ensures that if the original cfg is used elsewhere, it remains unchanged.
 	consoleCfg := cfg
-	// The `EncodeName` is customized to add a dot suffix, making the component
-	// name visually distinct in the log line (e.g., "scalpel-cli.DiscoveryEngine.").
 	consoleCfg.EncodeName = func(loggerName string, enc zapcore.PrimitiveArrayEncoder) {
 		enc.AppendString(loggerName + ".")
 	}
-
-	// The custom encoder is built on top of Zap's standard ConsoleEncoder.
-	// By creating our own implementation, we gain full control over the final
-	// log format, allowing us to structure the output exactly as desired.
 	return zapcore.NewConsoleEncoder(consoleCfg)
 }
 
 // GetLogger returns the initialized global logger instance.
 func GetLogger() *zap.Logger {
-	logger := globalLogger.Load() // Atomically load the logger pointer.
+	logger := globalLogger.Load()
 	if logger == nil {
-		// Fallback mechanism if InitializeLogger hasn't been called.
 		l, err := zap.NewDevelopment()
 		if err != nil {
 			return zap.NewNop()
 		}
-		// Log a warning that the fallback is being used.
 		l.Warn("Global logger requested before initialization; using fallback.")
 		return l.Named("fallback")
 	}
 	return logger
 }
 
-// Sync flushes any buffered log entries. Applications should call this before exiting.
+// Sync flushes any buffered log entries.
 func Sync() {
 	logger := globalLogger.Load()
 	if logger != nil {
 		if err := logger.Sync(); err != nil {
-			// Handle common sync errors gracefully (e.g., writing to closed stdout/stderr on some OSes).
-			// This prevents noisy errors during application shutdown or test teardown.
 			errMsg := err.Error()
 			if !strings.Contains(errMsg, "sync /dev/stdout") &&
 				!strings.Contains(errMsg, "invalid argument") &&

@@ -16,8 +16,8 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
 	"github.com/xkilldash9x/scalpel-cli/internal/mocks"
-	"github.com/xkilldash9x/scalpel-cli/pkg/observability"
 	"github.com/xkilldash9x/scalpel-cli/internal/service"
+	"github.com/xkilldash9x/scalpel-cli/pkg/observability"
 	"go.uber.org/zap/zapcore"
 )
 
@@ -168,7 +168,7 @@ func TestApplyScanFlagOverrides(t *testing.T) {
 			var buffer bytes.Buffer
 			writer := zapcore.AddSync(&buffer)
 			observability.Initialize(
-				config.LoggerConfig{Level: "debug", Format: "console"},
+				observability.LoggerConfig{Level: "debug", Format: "console"},
 				writer,
 			)
 
@@ -202,7 +202,7 @@ func TestApplyScanFlagOverrides(t *testing.T) {
 }
 
 func TestRunScanLogic(t *testing.T) {
-	observability.InitializeLogger(config.LoggerConfig{Level: "fatal"})
+	observability.InitializeLogger(observability.LoggerConfig{Level: "fatal"})
 	baseCtx := context.Background()
 	// Define the expected normalized targets
 	defaultTargets := []string{"https://example.com"}
@@ -353,7 +353,7 @@ func TestRunScan_NoGoroutineLeak(t *testing.T) {
 	// This test inspects the global runtime state.
 	t.Parallel()
 
-	observability.InitializeLogger(config.LoggerConfig{Level: "fatal"})
+	observability.InitializeLogger(observability.LoggerConfig{Level: "fatal"})
 	baseCtx := context.Background()
 	defaultTargets := []string{"https://example.com"}
 

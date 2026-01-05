@@ -18,7 +18,7 @@ import (
 func TestConfigFlagOverride(t *testing.T) {
 	// Initialize logger for the test run to avoid noise.
 	observability.ResetForTest()
-	observability.InitializeLogger(config.LoggerConfig{Level: "fatal"})
+	observability.InitializeLogger(observability.LoggerConfig{Level: "fatal"})
 
 	// FIX: Use the accurate newPristineRootCmd instead of the previously flawed helper.
 	testRootCmd := newPristineRootCmd()

@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/spf13/viper"
+	"github.com/xkilldash9x/scalpel-cli/pkg/observability"
 )
 
 // Interface defines a contract for accessing application configuration settings.
@@ -30,7 +31,7 @@ import (
 // different parts of the application to depend on this interface, making them
 // easier to test and more resilient to changes in the configuration structure.
 type Interface interface {
-	Logger() LoggerConfig
+	Logger() observability.LoggerConfig
 	Database() DatabaseConfig
 	Engine() EngineConfig
 	Browser() BrowserConfig
@@ -85,17 +86,17 @@ type Interface interface {
 // the application. It uses `mapstructure` tags to facilitate loading from
 // configuration files (e.g., YAML, JSON) via the Viper library.
 type Config struct {
-	mu           sync.RWMutex    `mapstructure:"-" yaml:"-"`
-	LoggerCfg    LoggerConfig    `mapstructure:"logger" yaml:"logger"`
-	DatabaseCfg  DatabaseConfig  `mapstructure:"database" yaml:"database"`
-	EngineCfg    EngineConfig    `mapstructure:"engine" yaml:"engine"`
-	BrowserCfg   BrowserConfig   `mapstructure:"browser" yaml:"browser"`
-	NetworkCfg   NetworkConfig   `mapstructure:"network" yaml:"network"`
-	IASTCfg      IASTConfig      `mapstructure:"iast" yaml:"iast"`
-	ScannersCfg  ScannersConfig  `mapstructure:"scanners" yaml:"scanners"`
-	AgentCfg     AgentConfig     `mapstructure:"agent" yaml:"agent"`
-	DiscoveryCfg DiscoveryConfig `mapstructure:"discovery" yaml:"discovery"`
-	AutofixCfg   AutofixConfig   `mapstructure:"autofix" yaml:"autofix"`
+	mu           sync.RWMutex               `mapstructure:"-" yaml:"-"`
+	LoggerCfg    observability.LoggerConfig `mapstructure:"logger" yaml:"logger"`
+	DatabaseCfg  DatabaseConfig             `mapstructure:"database" yaml:"database"`
+	EngineCfg    EngineConfig               `mapstructure:"engine" yaml:"engine"`
+	BrowserCfg   BrowserConfig              `mapstructure:"browser" yaml:"browser"`
+	NetworkCfg   NetworkConfig              `mapstructure:"network" yaml:"network"`
+	IASTCfg      IASTConfig                 `mapstructure:"iast" yaml:"iast"`
+	ScannersCfg  ScannersConfig             `mapstructure:"scanners" yaml:"scanners"`
+	AgentCfg     AgentConfig                `mapstructure:"agent" yaml:"agent"`
+	DiscoveryCfg DiscoveryConfig            `mapstructure:"discovery" yaml:"discovery"`
+	AutofixCfg   AutofixConfig              `mapstructure:"autofix" yaml:"autofix"`
 	// ScanCfg holds settings for a specific scan job, typically populated from
 	// CLI flags rather than a configuration file, hence the ignored tags.
 	ScanCfg ScanConfig `mapstructure:"-" yaml:"-"`
@@ -103,7 +104,7 @@ type Config struct {
 
 // -- Interface Method Implementations (Getters) --
 
-func (c *Config) Logger() LoggerConfig {
+func (c *Config) Logger() observability.LoggerConfig {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.LoggerCfg
@@ -314,32 +315,6 @@ type GitHubConfig struct {
 	RepoOwner  string `mapstructure:"repo_owner" yaml:"repo_owner"`
 	RepoName   string `mapstructure:"repo_name" yaml:"repo_name"`
 	BaseBranch string `mapstructure:"base_branch" yaml:"base_branch"`
-}
-
-// LoggerConfig defines all settings related to logging, including level, format,
-// file rotation, and colorization.
-type LoggerConfig struct {
-	Level       string      `mapstructure:"level" yaml:"level"`
-	Format      string      `mapstructure:"format" yaml:"format"`
-	AddSource   bool        `mapstructure:"add_source" yaml:"add_source"`
-	ServiceName string      `mapstructure:"service_name" yaml:"service_name"`
-	LogFile     string      `mapstructure:"log_file" yaml:"log_file"`
-	MaxSize     int         `mapstructure:"max_size" yaml:"max_size"`
-	MaxBackups  int         `mapstructure:"max_backups" yaml:"max_backups"`
-	MaxAge      int         `mapstructure:"max_age" yaml:"max_age"`
-	Compress    bool        `mapstructure:"compress" yaml:"compress"`
-	Colors      ColorConfig `mapstructure:"colors" yaml:"colors"`
-}
-
-// ColorConfig specifies the terminal color codes for different log levels.
-type ColorConfig struct {
-	Debug  string `mapstructure:"debug" yaml:"debug"`
-	Info   string `mapstructure:"info" yaml:"info"`
-	Warn   string `mapstructure:"warn" yaml:"warn"`
-	Error  string `mapstructure:"error" yaml:"error"`
-	DPanic string `mapstructure:"dpanic" yaml:"dpanic"`
-	Panic  string `mapstructure:"panic" yaml:"panic"`
-	Fatal  string `mapstructure:"fatal" yaml:"fatal"`
 }
 
 // DatabaseConfig holds the connection string for the application's database.

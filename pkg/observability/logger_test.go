@@ -1,4 +1,4 @@
-// File: internal/observability/logger_test.go
+// File: pkg/observability/logger_test.go
 package observability
 
 import (
@@ -10,7 +10,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/xkilldash9x/scalpel-cli/internal/config"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
@@ -18,7 +17,8 @@ import (
 // -- Test Helper Functions --
 
 // setupTestLogger initializes the global logger to write to a buffer for testing.
-func setupTestLogger(cfg config.LoggerConfig) *bytes.Buffer {
+// FIX: Uses local LoggerConfig from the same package.
+func setupTestLogger(cfg LoggerConfig) *bytes.Buffer {
 	buf := new(bytes.Buffer)
 	// Wrap the buffer in a WriteSyncer.
 	writer := zapcore.AddSync(buf)
@@ -35,11 +35,12 @@ func TestInitializeLogger(t *testing.T) {
 		// Use the exported reset function to ensure a clean slate.
 		ResetForTest()
 
-		cfg := config.LoggerConfig{
+		// FIX: Use local LoggerConfig
+		cfg := LoggerConfig{
 			Level:       "debug",
 			Format:      "console",
 			ServiceName: "TestService",
-			Colors: config.ColorConfig{ // -- testing our color configuration --
+			Colors: ColorConfig{ // -- testing our color configuration --
 				Info: "green",
 			},
 		}
@@ -60,7 +61,7 @@ func TestInitializeLogger(t *testing.T) {
 	t.Run("should initialize json logger", func(t *testing.T) {
 		ResetForTest()
 
-		cfg := config.LoggerConfig{
+		cfg := LoggerConfig{
 			Level:       "info",
 			Format:      "json",
 			ServiceName: "JSONTest",
@@ -90,7 +91,7 @@ func TestInitializeLogger(t *testing.T) {
 		require.NoError(t, err)
 		defer os.Remove(tmpFile.Name())
 
-		cfg := config.LoggerConfig{
+		cfg := LoggerConfig{
 			Level:   "debug",
 			Format:  "json",
 			LogFile: tmpFile.Name(),
@@ -112,12 +113,12 @@ func TestInitializeLogger(t *testing.T) {
 
 		// -- first initialization --
 		// Use console format for easier string comparison of the service name.
-		cfg1 := config.LoggerConfig{Level: "info", Format: "console", ServiceName: "First"}
+		cfg1 := LoggerConfig{Level: "info", Format: "console", ServiceName: "First"}
 		buf1 := setupTestLogger(cfg1)
 		logger1 := GetLogger()
 
 		// -- second, should be ignored due to sync.Once --
-		cfg2 := config.LoggerConfig{Level: "debug", Format: "console", ServiceName: "Second"}
+		cfg2 := LoggerConfig{Level: "debug", Format: "console", ServiceName: "Second"}
 		// This initialization is ignored, but we still get a buffer back.
 		buf2 := setupTestLogger(cfg2)
 		logger2 := GetLogger()
@@ -164,7 +165,7 @@ func TestGetLogger(t *testing.T) {
 
 	t.Run("should return the global logger after initialization", func(t *testing.T) {
 		ResetForTest()
-		cfg := config.LoggerConfig{Level: "info", ServiceName: "GlobalTest"}
+		cfg := LoggerConfig{Level: "info", ServiceName: "GlobalTest"}
 		InitializeLogger(cfg)
 
 		logger := GetLogger()

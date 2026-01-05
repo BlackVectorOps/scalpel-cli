@@ -37,7 +37,7 @@ func TestRunSelfHeal(t *testing.T) {
 	// Common arrange steps for all sub-tests
 	// Use a silenced global logger for these tests.
 	observability.ResetForTest()
-	observability.InitializeLogger(config.LoggerConfig{Level: "fatal"})
+	observability.InitializeLogger(observability.LoggerConfig{Level: "fatal"})
 	logger := observability.GetLogger()
 
 	ctx := context.Background()
@@ -120,7 +120,7 @@ func TestSelfHealCmd_RunE_LLMInitializationFailure(t *testing.T) {
 	// Arrange
 	// FIX: Initialize the global logger properly for the test run.
 	observability.ResetForTest()
-	observability.InitializeLogger(config.LoggerConfig{Level: "fatal"}) // Keep output clean
+	observability.InitializeLogger(observability.LoggerConfig{Level: "fatal"}) // Keep output clean
 
 	badCfg := config.NewDefaultConfig()
 	badCfg.AgentCfg.LLM.Models = make(map[string]config.LLMModelConfig) // No models

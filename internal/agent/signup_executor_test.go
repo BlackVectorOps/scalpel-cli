@@ -51,7 +51,7 @@ func (m *MockConfig) Discovery() config.DiscoveryConfig           { return confi
 func (m *MockConfig) Engine() config.EngineConfig                 { return config.EngineConfig{} }
 func (m *MockConfig) IAST() config.IASTConfig                     { return config.IASTConfig{} }
 func (m *MockConfig) JWT() config.JWTConfig                       { return config.JWTConfig{} }
-func (m *MockConfig) Logger() config.LoggerConfig                 { return config.LoggerConfig{} }
+func (m *MockConfig) Logger() observability.LoggerConfig          { return observability.LoggerConfig{} }
 func (m *MockConfig) Network() config.NetworkConfig               { return config.NetworkConfig{} }
 func (m *MockConfig) Scan() config.ScanConfig                     { return config.ScanConfig{} }
 func (m *MockConfig) SetScanConfig(sc config.ScanConfig)          {}

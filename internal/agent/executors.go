@@ -373,7 +373,7 @@ func (e *ControlExecutor) Execute(ctx context.Context, action Action) (*Executio
 	}, nil
 }
 
-func (e *ControlExecutor) handleDecideNextStep(ctx context.Context, action Action) (*ExecutionResult, error) {
+func (e *ControlExecutor) handleDecideNextStep(_ context.Context, action Action) (*ExecutionResult, error) {
 	// Logic to "tie the scan process into the agents ability to decide, plan, react, replan or reorganize"
 	// This would parse metadata to adjust global configuration if possible, or trigger
 	// complex internal state transitions.

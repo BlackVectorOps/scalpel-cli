@@ -18,7 +18,6 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
-	"github.com/xkilldash9x/scalpel-cli/internal/config"
 	"github.com/xkilldash9x/scalpel-cli/internal/jsoncompare"
 	"github.com/xkilldash9x/scalpel-cli/pkg/observability"
 	"go.uber.org/goleak"
@@ -26,7 +25,7 @@ import (
 
 func TestMain(m *testing.M) {
 	// Initialize the logger for all tests in this package.
-	observability.InitializeLogger(config.LoggerConfig{
+	observability.InitializeLogger(observability.LoggerConfig{
 		Level:  "debug",
 		Format: "console",
 	})
@@ -483,11 +482,11 @@ func TestDetect_RedirectVulnerability(t *testing.T) {
 	traffic := []RequestResponsePair{pair}
 
 	config := Config{
-		Session:       userA, // The original session
-		SecondSession: userB, // The session to test for horizontal privilege escalation
+		Session:           userA, // The original session
+		SecondSession:     userB, // The session to test for horizontal privilege escalation
 		ComparisonOptions: jsoncompare.DefaultOptions(),
 		ConcurrencyLevel:  5,
-		HttpClient:    client,
+		HttpClient:        client,
 		// Test the Horizontal strategy, which is where this bug lies.
 		SkipManipulation:    true,
 		SkipUnauthenticated: true,

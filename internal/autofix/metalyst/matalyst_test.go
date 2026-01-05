@@ -30,7 +30,7 @@ func setupTestEnvironment(t *testing.T) (string, func()) {
 	t.Helper()
 
 	// Configure the logger to write to the test's output.
-	testLogCfg := config.LoggerConfig{
+	testLogCfg := observability.LoggerConfig{
 		Level:  "debug",
 		Format: "console",
 	}

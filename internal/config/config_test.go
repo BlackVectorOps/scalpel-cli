@@ -47,14 +47,16 @@ func TestConfigValidation(t *testing.T) {
 		assert.NoError(t, err, "A valid config should not produce a validation error")
 
 		// Test Case: Invalid Engine Concurrency
-		cfgInvalidEngine := *cfg
+		cfgInvalidEngine := NewDefaultConfig()
+		cfgInvalidEngine.DatabaseCfg.URL = "postgres://user:pass@host/db"
 		cfgInvalidEngine.EngineCfg.WorkerConcurrency = 0
 		err = cfgInvalidEngine.Validate()
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "engine.worker_concurrency must be a positive integer")
 
 		// Test Case: Invalid Browser Concurrency
-		cfgInvalidBrowser := *cfg
+		cfgInvalidBrowser := NewDefaultConfig()
+		cfgInvalidBrowser.DatabaseCfg.URL = "postgres://user:pass@host/db"
 		cfgInvalidBrowser.BrowserCfg.Concurrency = -1
 		err = cfgInvalidBrowser.Validate()
 		assert.Error(t, err)

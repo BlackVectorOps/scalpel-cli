@@ -10,52 +10,60 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/pkg/network"
 )
 
-// ErrCredentialsNotFound is a sentinel error returned by a CredentialsProvider
-// when it does not have credentials for a given host and realm. This signals
-// to the client that authentication cannot be handled and the original 401/407
-// response should be returned.
+/*
+Sentinel error returned when credentials are not available for a given host and realm.
+
+	Signals to the client that authentication cannot be handled and the original 401/407
+	response should be returned.
+*/
 var ErrCredentialsNotFound = errors.New("credentials not found")
 
-// CredentialsProvider defines an interface for dynamically supplying credentials
-// in response to an HTTP authentication challenge (e.g., Basic Auth). This allows
-// the client to support authentication without hardcoding usernames and passwords.
+/*
+Defines an interface for dynamically supplying credentials in response to an
+
+	HTTP authentication challenge (e.g., Basic Auth). Allows the client to support
+	authentication without hardcoding usernames and passwords. *
+*/
 type CredentialsProvider interface {
-	// GetCredentials is called when the client receives a 401 (Unauthorized) or
-	// 407 (Proxy Authentication Required) response.
-	//
-	// Parameters:
-	//   - host: The host (e.g., "example.com:443") that issued the challenge.
-	//   - realm: The authentication realm specified in the WWW-Authenticate header.
-	//
-	// It should return the username, password, and nil on success. If credentials
-	// are not available, it must return ErrCredentialsNotFound. Other errors
-	// will halt the request.
+	/** Called when the client receives a 401 (Unauthorized) or 407 (Proxy Authentication Required)
+	  response.
+
+	  Parameters:
+	    - host: The host (e.g., "example.com:443") that issued the challenge.
+	    - realm: The authentication realm specified in the WWW-Authenticate header.
+
+	  Should return the username, password, and nil on success. If credentials
+	  are not available, it must return ErrCredentialsNotFound. Other errors
+	  will halt the request. */
 	GetCredentials(host string, realm string) (username string, password string, err error)
 }
 
-// RetryPolicy encapsulates the rules for retrying failed or transient HTTP requests.
-// It supports exponential backoff with jitter to prevent overwhelming a server
-// that is temporarily unavailable.
+/*
+Encapsulates the rules for retrying failed or transient HTTP requests. Supports
+
+	exponential backoff with jitter to prevent overwhelming a server that is
+	temporarily unavailable. *
+*/
 type RetryPolicy struct {
-	// MaxRetries is the maximum number of retry attempts after the initial request fails.
+	// Maximum number of retry attempts after the initial request fails.
 	MaxRetries int
-	// InitialBackoff is the base duration to wait before the first retry.
+	// Base duration to wait before the first retry.
 	InitialBackoff time.Duration
-	// MaxBackoff is the upper limit for the backoff duration, preventing excessively long waits.
+	// Upper limit for the backoff duration, preventing excessively long waits.
 	MaxBackoff time.Duration
-	// BackoffFactor is the multiplier for the exponential backoff calculation (e.g., 2.0).
+	// Multiplier for the exponential backoff calculation (e.g., 2.0).
 	BackoffFactor float64
-	// Jitter, if true, adds a random factor to the backoff duration to prevent
-	// multiple clients from retrying in synchronized waves (thundering herd problem).
+	// If true, adds a random factor to the backoff duration to prevent multiple
+	// clients from retrying in synchronized waves (thundering herd problem).
 	Jitter bool
-	// RetryableStatusCodes is a set of HTTP status codes that should trigger a
-	// retry for idempotent requests (e.g., GET, PUT, DELETE).
+	// Set of HTTP status codes that should trigger a retry for idempotent requests
+	// (e.g., GET, PUT, DELETE).
 	RetryableStatusCodes map[int]bool
 }
 
-// NewDefaultRetryPolicy creates and returns a RetryPolicy with sensible defaults,
-// such as 3 max retries, exponential backoff starting at 500ms, and retries for
-// common transient server errors like 502, 503, and 504.
+// Creates and returns a policy with sensible defaults, such as 3 max retries,
+// exponential backoff starting at 500ms, and retries for common transient server
+// errors like 502, 503, and 504.
 func NewDefaultRetryPolicy() *RetryPolicy {
 	return &RetryPolicy{
 		MaxRetries:     3,
@@ -76,18 +84,17 @@ func NewDefaultRetryPolicy() *RetryPolicy {
 	}
 }
 
-// H2Settings defines configuration parameters specific to HTTP/2 connections.
+// Defines configuration parameters specific to HTTP/2 connections.
 type H2Settings struct {
-	// PingInterval specifies the time between sending HTTP/2 PING frames to the
-	// server to check for connection liveness.
+	// Time between sending PING frames to the server to check for connection liveness.
 	PingInterval time.Duration
-	// PingTimeout is the maximum time to wait for a PING acknowledgment before
-	// considering the connection dead and closing it.
+	// Maximum time to wait for a PING acknowledgment before considering the
+	// connection dead and closing it.
 	PingTimeout time.Duration
 }
 
-// DefaultH2Settings returns a default H2Settings configuration with a 30-second
-// ping interval and a 5-second ping timeout.
+// Returns a default configuration with a 30-second ping interval and a 5-second
+// ping timeout.
 func DefaultH2Settings() H2Settings {
 	return H2Settings{
 		PingInterval: 30 * time.Second,
@@ -95,46 +102,74 @@ func DefaultH2Settings() H2Settings {
 	}
 }
 
-// ClientConfig is the primary configuration struct for a CustomClient. It aggregates
-// all configurable aspects of the client, including dialing, cookies, timeouts,
-// redirection, retries, authentication, and HTTP/2 settings.
-type ClientConfig struct {
-	// DialerConfig holds the low-level configuration for establishing TCP and
-	// TLS connections, including proxy settings.
-	DialerConfig *network.DialerConfig
-
-	// CookieJar specifies the cookie jar for the client. If nil, cookies are not managed.
-	CookieJar http.CookieJar
-
-	// RequestTimeout sets the timeout for a single HTTP request attempt.
-	RequestTimeout time.Duration
-
-	// IdleConnTimeout is the maximum duration a connection can remain idle in the
-	// pool before it is closed and evicted.
-	IdleConnTimeout time.Duration
-
-	// InsecureSkipVerify controls whether to skip TLS certificate verification.
-	InsecureSkipVerify bool
-
-	// CheckRedirect provides a function to define a custom redirect policy. If nil,
-	// the client's default policy is used.
-	CheckRedirect func(req *http.Request, via []*http.Request) error
-
-	// RetryPolicy defines the rules for retrying failed requests.
-	RetryPolicy *RetryPolicy
-
-	// CredentialsProvider is an interface for dynamically supplying credentials for
-	// HTTP authentication.
-	CredentialsProvider CredentialsProvider
-
-	// H2Config holds settings specific to HTTP/2 connections.
-	H2Config H2Settings
+// Defines configuration parameters specific to HTTP/3 (QUIC) connections.
+type H3Settings struct {
+	// Frequency of keep-alive packets sent to maintain the QUIC connection and
+	// prevent NAT timeouts.
+	KeepAlivePeriod time.Duration
+	// Maximum duration the connection can remain idle before being closed by the
+	// QUIC layer.
+	MaxIdleTimeout time.Duration
 }
 
-// NewBrowserClientConfig creates a new ClientConfig with defaults that are
-// optimized to emulate the behavior of a modern web browser. This includes
-// a pre-configured cookie jar, sensible timeouts, a default retry policy,
-// and standard HTTP/2 settings.
+// Returns standard QUIC parameters optimized for robustness.
+func DefaultH3Settings() H3Settings {
+	return H3Settings{
+		KeepAlivePeriod: 10 * time.Second,
+		MaxIdleTimeout:  30 * time.Second,
+	}
+}
+
+/*
+The primary configuration struct for a CustomClient. Aggregates all configurable
+
+	aspects of the client, including dialing, cookies, timeouts, redirection, retries,
+	authentication, and protocol-specific settings. *
+*/
+type ClientConfig struct {
+	// Low-level configuration for establishing TCP and TLS connections, including
+	// proxy settings.
+	DialerConfig *network.DialerConfig
+
+	// Specifies the cookie jar for the client. If nil, cookies are not managed.
+	CookieJar http.CookieJar
+
+	// Sets the timeout for a single HTTP request attempt.
+	RequestTimeout time.Duration
+
+	// Maximum duration a connection can remain idle in the pool before it is closed
+	// and evicted.
+	IdleConnTimeout time.Duration
+
+	// Controls whether to skip TLS certificate verification.
+	InsecureSkipVerify bool
+
+	/* Provides a function to define a custom redirect policy. If nil, the client's
+	default policy is used.*/
+	CheckRedirect func(req *http.Request, via []*http.Request) error
+
+	// Defines the rules for retrying failed requests.
+	RetryPolicy *RetryPolicy
+
+	// Interface for dynamically supplying credentials for HTTP authentication.
+	CredentialsProvider CredentialsProvider
+
+	// Settings specific to HTTP/2 connections.
+	H2Config H2Settings
+
+	// Settings specific to HTTP/3 connections.
+	H3Config H3Settings
+
+	/* Controls the injection of padding bytes into HTTP/2 frames. If nil, no
+	   padding is applied. */
+	PaddingStrategy PaddingStrategy
+}
+
+/*
+Creates a new configuration with defaults optimized to emulate the behavior of a
+modern web browser. Includes a pre-configured cookie jar, sensible timeouts, a
+default retry policy, and standard HTTP/2 and HTTP/3 settings. *
+*/
 func NewBrowserClientConfig() *ClientConfig {
 	// Create a default cookie jar
 	jar, _ := cookiejar.New(nil) // Error is only if PublicSuffixList is provided and invalid.
@@ -145,15 +180,19 @@ func NewBrowserClientConfig() *ClientConfig {
 		RequestTimeout:      30 * time.Second,
 		IdleConnTimeout:     90 * time.Second, // Standard browser idle timeout
 		InsecureSkipVerify:  false,
-		CheckRedirect:       nil, // Use CustomClient's default redirect logic.
+		CheckRedirect:       nil,
 		RetryPolicy:         NewDefaultRetryPolicy(),
-		CredentialsProvider: nil, // No credentials provider by default.
+		CredentialsProvider: nil,
 		H2Config:            DefaultH2Settings(),
+		H3Config:            DefaultH3Settings(),
+		PaddingStrategy:     nil,
 	}
 }
 
-// SetProxy is a convenience method to configure an HTTP/HTTPS proxy for the
-// client. It sets the `ProxyURL` field in the underlying `DialerConfig`.
+/*
+A convenience method to configure an HTTP/HTTPS proxy. Sets the `ProxyURL` field
+in the underlying `DialerConfig`. *
+*/
 func (c *ClientConfig) SetProxy(proxyURL *url.URL) {
 	if c.DialerConfig == nil {
 		c.DialerConfig = network.NewDialerConfig()

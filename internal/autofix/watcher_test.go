@@ -15,13 +15,14 @@ import (
 	"go.uber.org/zap/zaptest"
 
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
+	"github.com/xkilldash9x/scalpel-cli/pkg/observability"
 )
 
 // --- Mock Config for Testing ---
 
 // mockConfig is a mock implementation of the config.Interface for testing purposes.
 type mockConfig struct {
-	loggerCfg  config.LoggerConfig
+	loggerCfg  observability.LoggerConfig
 	autofixCfg config.AutofixConfig
 	// Add other config structs here if needed by other tests
 }
@@ -42,7 +43,7 @@ func (m *mockConfig) SetJWTBruteForceEnabled(b bool)              { panic("unimp
 func (m *mockConfig) SetJWTEnabled(b bool)                        { panic("unimplemented") }
 func (m *mockConfig) SetBrowserDebug(b bool)                      { panic("unimplemented") }
 func (m *mockConfig) SetBrowserDisableCache(b bool)               { panic("unimplemented") }
-func (m *mockConfig) SetBrowserDisableGPU(b bool)                   { panic("unimplemented") }
+func (m *mockConfig) SetBrowserDisableGPU(b bool)                 { panic("unimplemented") }
 func (m *mockConfig) SetBrowserHeadless(b bool)                   { panic("unimplemented") }
 func (m *mockConfig) SetBrowserHumanoidClickHoldMaxMs(ms int)     { panic("unimplemented") }
 func (m *mockConfig) SetBrowserHumanoidClickHoldMinMs(ms int)     { panic("unimplemented") }
@@ -55,7 +56,7 @@ func (m *mockConfig) SetNetworkNavigationTimeout(d time.Duration) { panic("unimp
 // Ensure mockConfig satisfies the interface.
 var _ config.Interface = (*mockConfig)(nil)
 
-func (m *mockConfig) Logger() config.LoggerConfig          { return m.loggerCfg }
+func (m *mockConfig) Logger() observability.LoggerConfig   { return m.loggerCfg }
 func (m *mockConfig) Autofix() config.AutofixConfig        { return m.autofixCfg }
 func (m *mockConfig) Database() config.DatabaseConfig      { return config.DatabaseConfig{} }
 func (m *mockConfig) Engine() config.EngineConfig          { return config.EngineConfig{} }
@@ -149,7 +150,7 @@ func setupWatcherIntegration(t *testing.T) *testHarness {
 
 	// Corrected: Use the mockConfig that implements the interface.
 	cfg := &mockConfig{
-		loggerCfg: config.LoggerConfig{LogFile: logFile},
+		loggerCfg: observability.LoggerConfig{LogFile: logFile},
 		// DASTLogPath is intentionally left empty to test the debug log path.
 		autofixCfg: config.AutofixConfig{},
 	}

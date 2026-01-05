@@ -17,7 +17,6 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/analysis/active/timeslip"
 	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
-	"github.com/xkilldash9x/scalpel-cli/internal/config"
 	"github.com/xkilldash9x/scalpel-cli/pkg/observability"
 )
 
@@ -140,7 +139,7 @@ func setupE2EAnalyzer(reporter core.Reporter, insecure bool) (*timeslip.Analyzer
 
 func TestE2E_TOCTOU_Vulnerable(t *testing.T) {
 	observability.ResetForTest()
-	observability.InitializeLogger(config.LoggerConfig{
+	observability.InitializeLogger(observability.LoggerConfig{
 		Level:       "debug",
 		Format:      "console",
 		AddSource:   true,
@@ -215,7 +214,7 @@ func TestE2E_TOCTOU_Vulnerable(t *testing.T) {
 }
 
 func TestE2E_Patched_WithLocking(t *testing.T) {
-	observability.InitializeLogger(config.LoggerConfig{})
+	observability.InitializeLogger(observability.LoggerConfig{})
 	// Setup a patched server using locking
 	vs := &VulnerableServer{
 		processDelay: 50 * time.Millisecond,

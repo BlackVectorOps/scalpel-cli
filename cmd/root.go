@@ -11,8 +11,8 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
-	"github.com/xkilldash9x/scalpel-cli/pkg/observability"
 	"github.com/xkilldash9x/scalpel-cli/internal/service"
+	"github.com/xkilldash9x/scalpel-cli/pkg/observability"
 	"go.uber.org/zap"
 )
 
@@ -42,7 +42,7 @@ func NewRootCommand() *cobra.Command {
 			v := viper.New()
 			if err := initializeConfig(cmd, v, cfgFile); err != nil {
 				// Initialize a minimal logger for startup errors.
-				observability.InitializeLogger(config.LoggerConfig{Level: "info", Format: "console", ServiceName: "scalpel-cli"})
+				observability.InitializeLogger(observability.LoggerConfig{Level: "info", Format: "console", ServiceName: "scalpel-cli"})
 				log := observability.GetLogger()
 				log.Error("Failed to initialize configuration", zap.Error(err))
 				return fmt.Errorf("failed to initialize configuration: %w", err)
@@ -50,7 +50,7 @@ func NewRootCommand() *cobra.Command {
 
 			cfg, err := config.NewConfigFromViper(v)
 			if err != nil {
-				observability.InitializeLogger(config.LoggerConfig{Level: "info", Format: "console", ServiceName: "scalpel-cli"})
+				observability.InitializeLogger(observability.LoggerConfig{Level: "info", Format: "console", ServiceName: "scalpel-cli"})
 				return fmt.Errorf("failed to load or validate config: %w", err)
 			}
 
